@@ -28,7 +28,7 @@ jobs:
             cmake_preset: linux
             artifact_name: linux-x64
 
-          - os: macos-latest
+          - os: macos-13
             triplet: x64-osx
             cmake_preset: macos
             artifact_name: macos-x64
@@ -117,13 +117,27 @@ jobs:
       with:
         arch: x64
 
+    - name: Build mRuby first (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        if (Test-Path "external/mruby") {
+          cd external/mruby
+          $env:MRUBY_CONFIG = "$env:GITHUB_WORKSPACE\build_config\msvc.rb"
+          rake
+          if ($LASTEXITCODE -ne 0) {
+            Write-Warning "mRuby build failed, continuing without mRuby support"
+          }
+          cd ..\..
+        }
+
     - name: Configure CMake
       shell: bash
       run: |
-        # On Windows, remove Ruby MSYS64 from PATH to prevent GCC conflict
+        # On Windows, remove MSYS64 GCC/bin directories from PATH, but keep Ruby
         if [ "$RUNNER_OS" == "Windows" ]; then
-          export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v "msys64" | tr '\n' ':')
-          echo "Cleaned PATH (removed MSYS64)"
+          export PATH=$(echo "$PATH" | tr ';' '\n' | grep -v "msys64.*bin" | tr '\n' ';')
+          echo "Cleaned PATH (removed MSYS64 bin dirs)"
         fi
 
         # Retry logic for transient network errors

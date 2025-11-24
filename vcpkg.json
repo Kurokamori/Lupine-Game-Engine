@@ -3,8 +3,15 @@
   "version": "1.0.0",
   "description": "Lupine Game Engine with Python Editor and C++ Runtime",
   "dependencies": [
-    "sdl2",
-    "pybind11",
+    {
+      "name": "sdl2",
+      "default-features": false,
+      "features": ["vulkan", "x11", "wayland"]
+    },
+    {
+      "name": "pybind11",
+      "host": true
+    },
     "nlohmann-json",
     "vulkan",
     "vulkan-headers",
