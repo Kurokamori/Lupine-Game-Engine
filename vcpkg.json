@@ -1,44 +1,45 @@
 {
-  "$schema": "https://raw.githubusercontent.com/Microsoft/vcpkg/master/scripts/vcpkg.schema.json",
-  "name": "lupine-engine",
+  "name": "lupine-game-engine",
   "version": "1.0.0",
-  "description": "Lupine Game Engine - A modern, cross-platform game engine",
-  "homepage": "https://github.com/lupine-engine/lupine",
-  "license": "MIT",
-  "supports": "windows | linux | osx",
+  "description": "Lupine Game Engine with Python Editor and C++ Runtime",
   "dependencies": [
-    {
-      "name": "sdl2",
-      "features": ["vulkan"]
-    },
-    "sdl2-image",
-    "sdl2-ttf",
-    "sdl2-mixer",
+    "sdl2",
+    "pybind11",
+    "nlohmann-json",
+    "vulkan",
+    "vulkan-headers",
+    "opengl",
     "glad",
+    "glew",
+    "glfw3",
     "glm",
+    "assimp",
+    "stb",
+    "fmt",
+    "spdlog",
+    "entt",
+    "zlib",
+    "polyclipping",
     "box2d",
     "bullet3",
-    "assimp",
     "lua",
-    "pybind11",
-    "yaml-cpp",
-    "pugixml",
-    "nlohmann-json",
-    "spdlog",
-    "fmt",
-    "libpng",
-    "libjpeg-turbo",
-    "freetype",
-    "zlib",
-    "bzip2",
-    "lz4",
-    "zstd",
-    "libogg",
-    "libvorbis",
-    "libflac",
-    "opus",
-    "python3",
-    "qtbase",
-    "libsndfile"
-  ]
+    "sol2",
+    "miniaudio"
+  ],
+  "features": {
+    "vulkan": {
+      "description": "Enable Vulkan rendering backend",
+      "dependencies": [
+        "vulkan",
+        "vulkan-headers"
+      ]
+    },
+    "opengl": {
+      "description": "Enable OpenGL rendering backend",
+      "dependencies": [
+        "opengl",
+        "glad"
+      ]
+    }
+  }
 }

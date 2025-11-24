@@ -1,0 +1,5 @@
+markdown
+pyqt6
+numpy
+Pillow>=10.0.0
+opencv-python>=4.8.0

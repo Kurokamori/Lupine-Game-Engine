@@ -1,0 +1,230 @@
+{
+  "actions": [
+    {
+      "name": "ui_accept",
+      "deadzone": 0.5,
+      "bindings": [
+        {
+          "deviceType": 0,
+          "keyCode": 257,
+          "keyName": "Enter"
+        },
+        {
+          "deviceType": 0,
+          "keyCode": 32,
+          "keyName": "Space"
+        },
+        {
+          "deviceType": 2,
+          "gamepadButton": 0,
+          "buttonName": "A",
+          "gamepadID": 0
+        }
+      ]
+    },
+    {
+      "name": "ui_cancel",
+      "deadzone": 0.5,
+      "bindings": [
+        {
+          "deviceType": 0,
+          "keyCode": 256,
+          "keyName": "Escape"
+        },
+        {
+          "deviceType": 2,
+          "gamepadButton": 1,
+          "buttonName": "B",
+          "gamepadID": 0
+        }
+      ]
+    },
+    {
+      "name": "jump",
+      "deadzone": 0.5,
+      "bindings": [
+        {
+          "deviceType": 0,
+          "keyCode": 32,
+          "keyName": "Space"
+        },
+        {
+          "deviceType": 2,
+          "gamepadButton": 0,
+          "buttonName": "A",
+          "gamepadID": 0
+        }
+      ]
+    },
+    {
+      "name": "attack",
+      "deadzone": 0.5,
+      "bindings": [
+        {
+          "deviceType": 1,
+          "mouseButton": 0,
+          "buttonName": "Left"
+        },
+        {
+          "deviceType": 2,
+          "gamepadButton": 5,
+          "buttonName": "RightBumper",
+          "gamepadID": 0
+        }
+      ]
+    },
+    {
+      "name": "interact",
+      "deadzone": 0.5,
+      "bindings": [
+        {
+          "deviceType": 0,
+          "keyCode": 69,
+          "keyName": "E"
+        },
+        {
+          "deviceType": 2,
+          "gamepadButton": 2,
+          "buttonName": "X",
+          "gamepadID": 0
+        }
+      ]
+    }
+  ],
+  "axes": [
+    {
+      "name": "move_horizontal",
+      "deadzone": 0.2,
+      "sensitivity": 3.0,
+      "gravity": 3.0,
+      "snap": true,
+      "bindings": [
+        {
+          "deviceType": 0,
+          "keyCode": 65,
+          "keyName": "A",
+          "scale": -1.0
+        },
+        {
+          "deviceType": 0,
+          "keyCode": 68,
+          "keyName": "D",
+          "scale": 1.0
+        },
+        {
+          "deviceType": 0,
+          "keyCode": 263,
+          "keyName": "Left",
+          "scale": -1.0
+        },
+        {
+          "deviceType": 0,
+          "keyCode": 262,
+          "keyName": "Right",
+          "scale": 1.0
+        },
+        {
+          "deviceType": 2,
+          "gamepadAxis": 0,
+          "axisName": "LeftX",
+          "scale": 1.0,
+          "gamepadID": 0
+        }
+      ]
+    },
+    {
+      "name": "move_vertical",
+      "deadzone": 0.2,
+      "sensitivity": 3.0,
+      "gravity": 3.0,
+      "snap": true,
+      "bindings": [
+        {
+          "deviceType": 0,
+          "keyCode": 83,
+          "keyName": "S",
+          "scale": -1.0
+        },
+        {
+          "deviceType": 0,
+          "keyCode": 87,
+          "keyName": "W",
+          "scale": 1.0
+        },
+        {
+          "deviceType": 0,
+          "keyCode": 264,
+          "keyName": "Down",
+          "scale": -1.0
+        },
+        {
+          "deviceType": 0,
+          "keyCode": 265,
+          "keyName": "Up",
+          "scale": 1.0
+        },
+        {
+          "deviceType": 2,
+          "gamepadAxis": 1,
+          "axisName": "LeftY",
+          "scale": -1.0,
+          "gamepadID": 0
+        }
+      ]
+    },
+    {
+      "name": "look_horizontal",
+      "deadzone": 0.1,
+      "sensitivity": 1.0,
+      "gravity": 0.0,
+      "snap": false,
+      "bindings": [
+        {
+          "deviceType": 2,
+          "gamepadAxis": 2,
+          "axisName": "RightX",
+          "scale": 1.0,
+          "gamepadID": 0
+        }
+      ]
+    },
+    {
+      "name": "look_vertical",
+      "deadzone": 0.1,
+      "sensitivity": 1.0,
+      "gravity": 0.0,
+      "snap": false,
+      "bindings": [
+        {
+          "deviceType": 2,
+          "gamepadAxis": 3,
+          "axisName": "RightY",
+          "scale": -1.0,
+          "gamepadID": 0
+        }
+      ]
+    },
+    {
+      "name": "accelerate",
+      "deadzone": 0.1,
+      "sensitivity": 1.0,
+      "gravity": 2.0,
+      "snap": false,
+      "bindings": [
+        {
+          "deviceType": 0,
+          "keyCode": 340,
+          "keyName": "LeftShift",
+          "scale": 1.0
+        },
+        {
+          "deviceType": 2,
+          "gamepadAxis": 5,
+          "axisName": "RightTrigger",
+          "scale": 1.0,
+          "gamepadID": 0
+        }
+      ]
+    }
+  ]
+}

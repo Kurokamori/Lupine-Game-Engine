@@ -1,0 +1,184 @@
+name: Build Lupine Engine
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  BUILD_TYPE: Release
+  VCPKG_BINARY_SOURCES: 'clear;x-gha,readwrite'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            triplet: x64-windows-static
+            cmake_preset: windows
+            artifact_name: windows-x64
+
+          - os: ubuntu-latest
+            triplet: x64-linux
+            cmake_preset: linux
+            artifact_name: linux-x64
+
+          - os: macos-latest
+            triplet: x64-osx
+            cmake_preset: macos
+            artifact_name: macos-x64
+
+          - os: macos-latest
+            triplet: arm64-osx
+            cmake_preset: macos-arm
+            artifact_name: macos-arm64
+
+    runs-on: ${{ matrix.os }}
+
+    name: Build on ${{ matrix.artifact_name }}
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Set up Ruby
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: '3.2'
+        bundler-cache: false
+
+    - name: Install Rake
+      run: gem install rake
+
+    - name: Export GitHub Actions cache environment variables
+      uses: actions/github-script@v7
+      with:
+        script: |
+          core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+          core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+    - name: Install Linux dependencies
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          ninja-build \
+          pkg-config \
+          libx11-dev \
+          libxrandr-dev \
+          libxi-dev \
+          libgl1-mesa-dev \
+          libglu1-mesa-dev \
+          libxinerama-dev \
+          libxcursor-dev \
+          python3-dev \
+          autoconf \
+          autoconf-archive \
+          automake \
+          libtool \
+          libltdl-dev
+
+    - name: Install macOS build dependencies
+      if: runner.os == 'macOS'
+      run: |
+        brew install autoconf autoconf-archive automake libtool libiconv
+
+    - name: Setup vcpkg
+      uses: lukka/run-vcpkg@v11
+      with:
+        vcpkgJsonGlob: 'vcpkg.json'
+
+    - name: Setup CMake and Ninja
+      uses: lukka/get-cmake@latest
+
+    - name: Configure CMake
+      shell: bash
+      run: |
+        cmake -B build \
+          -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+          -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake" \
+          -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} \
+          ${{ matrix.os == 'windows-latest' && '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL' || '' }}
+
+    - name: Build
+      run: cmake --build build --config ${{ env.BUILD_TYPE }} --parallel
+
+    - name: Test Console Application
+      run: |
+        ./build/bin/${{ env.BUILD_TYPE }}/lupine_console${{ runner.os == 'Windows' && '.exe' || '' }}
+      shell: bash
+      continue-on-error: true
+
+    - name: Package artifacts
+      run: |
+        mkdir -p artifacts/${{ matrix.artifact_name }}
+        cp -r build/bin/${{ env.BUILD_TYPE }}/* artifacts/${{ matrix.artifact_name }}/ || true
+        cp -r editor/*.pyd artifacts/${{ matrix.artifact_name }}/ || true
+        cp -r editor/*.so artifacts/${{ matrix.artifact_name }}/ || true
+        cp -r editor/*.dylib artifacts/${{ matrix.artifact_name }}/ || true
+        # Package mRuby library for cross-platform deployment
+        mkdir -p artifacts/${{ matrix.artifact_name }}/mruby
+        cp -r external/mruby/build/host/lib/* artifacts/${{ matrix.artifact_name }}/mruby/ || true
+        cp -r external/mruby/include artifacts/${{ matrix.artifact_name }}/mruby/ || true
+      shell: bash
+      continue-on-error: true
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: lupine-engine-${{ matrix.artifact_name }}
+        path: artifacts/${{ matrix.artifact_name }}/
+        retention-days: 30
+
+    - name: Upload Python modules
+      uses: actions/upload-artifact@v4
+      with:
+        name: python-modules-${{ matrix.artifact_name }}
+        path: |
+          editor/lupine_engine.*
+          editor/lupine_runtime.*
+        retention-days: 30
+        if-no-files-found: warn
+
+  package-vcpkg-cache:
+    needs: build
+    runs-on: ubuntu-latest
+    name: Package vcpkg binaries
+
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+
+    - name: Create release package
+      run: |
+        mkdir -p release
+        for dir in lupine-engine-*; do
+          if [ -d "$dir" ]; then
+            platform=${dir#lupine-engine-}
+            tar czf release/lupine-engine-${platform}.tar.gz -C "$dir" .
+          fi
+        done
+
+    - name: Upload release packages
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-packages
+        path: release/*.tar.gz
+        retention-days: 90
