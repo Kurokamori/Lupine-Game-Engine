@@ -101,15 +101,24 @@ jobs:
     - name: Install macOS build dependencies
       if: runner.os == 'macOS'
       run: |
-        brew install autoconf autoconf-archive automake libtool libiconv
+        brew install ninja autoconf autoconf-archive automake libtool libiconv
+
+    - name: Setup CMake and Ninja
+      uses: lukka/get-cmake@latest
+
+    - name: Verify macOS build tools
+      if: runner.os == 'macOS'
+      run: |
+        which ninja
+        which clang
+        which clang++
+        ninja --version
+        clang --version
 
     - name: Setup vcpkg
       uses: lukka/run-vcpkg@v11
       with:
         vcpkgJsonGlob: 'vcpkg.json'
-
-    - name: Setup CMake and Ninja
-      uses: lukka/get-cmake@latest
 
     - name: Setup MSVC (Windows)
       if: runner.os == 'Windows'
@@ -152,6 +161,7 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake" \
             -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} \
             ${{ matrix.os == 'windows-latest' && '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl' || '' }} \
+            ${{ startsWith(matrix.os, 'macos') && '-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++' || '' }} \
             -G Ninja && break
 
           if [ $attempt -lt $max_attempts ]; then

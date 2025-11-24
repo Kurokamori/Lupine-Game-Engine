@@ -6,7 +6,7 @@
     {
       "name": "sdl2",
       "default-features": false,
-      "features": ["vulkan", "x11", "wayland"]
+      "features": ["vulkan"]
     },
     {
       "name": "pybind11",
@@ -32,6 +32,12 @@
     "lua",
     "sol2",
     "miniaudio"
+  ],
+  "overrides": [
+    {
+      "name": "sdl2",
+      "version": "2.30.9"
+    }
   ],
   "features": {
     "vulkan": {
