@@ -82,7 +82,9 @@ jobs:
           autoconf-archive \
           automake \
           libtool \
-          libltdl-dev
+          libltdl-dev \
+          libsystemd-dev \
+          libudev-dev
 
     - name: Install macOS dependencies
       if: runner.os == 'macOS'
@@ -102,9 +104,21 @@ jobs:
     - name: Setup CMake and Ninja
       uses: lukka/get-cmake@latest
 
+    - name: Setup MSVC (Windows)
+      if: runner.os == 'Windows'
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x64
+
     - name: Configure CMake
       shell: bash
       run: |
+        # On Windows, remove Ruby MSYS64 from PATH to prevent GCC conflict
+        if [ "$RUNNER_OS" == "Windows" ]; then
+          export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v "msys64" | tr '\n' ':')
+          echo "Cleaned PATH (removed MSYS64)"
+        fi
+
         # Retry logic for transient network errors
         max_attempts=3
         attempt=0
@@ -116,7 +130,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
             -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake" \
             -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} \
-            ${{ matrix.os == 'windows-latest' && '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL' || '' }} \
+            ${{ matrix.os == 'windows-latest' && '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl' || '' }} \
             -G Ninja && break
 
           if [ $attempt -lt $max_attempts ]; then

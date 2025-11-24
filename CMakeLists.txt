@@ -170,21 +170,26 @@ if(RUBY_EXECUTABLE AND RAKE_EXECUTABLE)
     set(MRUBY_INCLUDE_DIR "${MRUBY_ROOT}/include")
 
     # Determine build configuration and library extension based on platform and compiler
+    # Use custom build configs from project root (not from external/mruby)
     if(WIN32 AND MSVC)
-        set(MRUBY_CONFIG "msvc")
+        set(MRUBY_CONFIG_NAME "msvc")
+        set(MRUBY_CONFIG "${CMAKE_CURRENT_SOURCE_DIR}/build_config/msvc")
         set(MRUBY_LIBRARY "${MRUBY_BUILD_DIR}/lib/libmruby.lib")
     elseif(MINGW)
-        set(MRUBY_CONFIG "default")
+        set(MRUBY_CONFIG_NAME "default")
+        set(MRUBY_CONFIG "${CMAKE_CURRENT_SOURCE_DIR}/build_config/default")
         set(MRUBY_LIBRARY "${MRUBY_BUILD_DIR}/lib/libmruby.a")
     else()
-        set(MRUBY_CONFIG "default")
+        set(MRUBY_CONFIG_NAME "default")
+        set(MRUBY_CONFIG "${CMAKE_CURRENT_SOURCE_DIR}/build_config/default")
         set(MRUBY_LIBRARY "${MRUBY_BUILD_DIR}/lib/libmruby.a")
     endif()
 
     # Check if mRuby directory exists
     if(EXISTS "${MRUBY_ROOT}")
         message(STATUS "mRuby source found at: ${MRUBY_ROOT}")
-        message(STATUS "mRuby will be built with '${MRUBY_CONFIG}' configuration")
+        message(STATUS "mRuby will be built with '${MRUBY_CONFIG_NAME}' configuration")
+        message(STATUS "mRuby config file: ${MRUBY_CONFIG}.rb")
         message(STATUS "mRuby library will be: ${MRUBY_LIBRARY}")
 
         # On Windows with MSVC, we need to run rake from a VS Developer environment
@@ -213,24 +218,27 @@ if(RUBY_EXECUTABLE AND RAKE_EXECUTABLE)
             if(VS_DEVSHELL_SCRIPT)
                 message(STATUS "Found Visual Studio Developer Shell: ${VS_DEVSHELL_SCRIPT}")
                 # Build mRuby using PowerShell with VS Developer environment
+                # Convert paths to forward slashes for Ruby
+                file(TO_NATIVE_PATH "${MRUBY_CONFIG}" MRUBY_CONFIG_NATIVE)
                 add_custom_command(
                     OUTPUT "${MRUBY_LIBRARY}"
-                    COMMAND powershell -ExecutionPolicy Bypass -Command "& '${VS_DEVSHELL_SCRIPT}' -Arch amd64 -SkipAutomaticLocation; cd '${MRUBY_ROOT}'; $env:MRUBY_CONFIG='${MRUBY_CONFIG}'; & '${RAKE_EXECUTABLE}'"
+                    COMMAND powershell -ExecutionPolicy Bypass -Command "& '${VS_DEVSHELL_SCRIPT}' -Arch amd64 -SkipAutomaticLocation; cd '${MRUBY_ROOT}'; $env:MRUBY_CONFIG='${MRUBY_CONFIG_NATIVE}'; & '${RAKE_EXECUTABLE}'"
                     WORKING_DIRECTORY "${MRUBY_ROOT}"
-                    COMMENT "Building mRuby with ${MRUBY_CONFIG} configuration (MSVC)..."
+                    COMMENT "Building mRuby with ${MRUBY_CONFIG_NAME} configuration (MSVC)..."
                     VERBATIM
                 )
             else()
                 message(WARNING "Visual Studio Developer Shell not found at common locations. mRuby build may fail.")
                 message(WARNING "If build fails, please build mRuby manually from a VS Developer Command Prompt:")
                 message(WARNING "  cd ${MRUBY_ROOT}")
-                message(WARNING "  $env:MRUBY_CONFIG='${MRUBY_CONFIG}'; rake")
+                message(WARNING "  $env:MRUBY_CONFIG='${MRUBY_CONFIG_NATIVE}'; rake")
                 # Fallback to regular rake command (will likely fail without cl.exe in PATH)
+                file(TO_NATIVE_PATH "${MRUBY_CONFIG}" MRUBY_CONFIG_NATIVE)
                 add_custom_command(
                     OUTPUT "${MRUBY_LIBRARY}"
-                    COMMAND ${CMAKE_COMMAND} -E env "MRUBY_CONFIG=${MRUBY_CONFIG}" ${RAKE_EXECUTABLE}
+                    COMMAND ${CMAKE_COMMAND} -E env "MRUBY_CONFIG=${MRUBY_CONFIG_NATIVE}" ${RAKE_EXECUTABLE}
                     WORKING_DIRECTORY "${MRUBY_ROOT}"
-                    COMMENT "Building mRuby with ${MRUBY_CONFIG} configuration..."
+                    COMMENT "Building mRuby with ${MRUBY_CONFIG_NAME} configuration..."
                     VERBATIM
                 )
             endif()
@@ -240,7 +248,7 @@ if(RUBY_EXECUTABLE AND RAKE_EXECUTABLE)
                 OUTPUT "${MRUBY_LIBRARY}"
                 COMMAND ${CMAKE_COMMAND} -E env "MRUBY_CONFIG=${MRUBY_CONFIG}" ${RAKE_EXECUTABLE}
                 WORKING_DIRECTORY "${MRUBY_ROOT}"
-                COMMENT "Building mRuby with ${MRUBY_CONFIG} configuration..."
+                COMMENT "Building mRuby with ${MRUBY_CONFIG_NAME} configuration..."
                 VERBATIM
             )
         endif()
