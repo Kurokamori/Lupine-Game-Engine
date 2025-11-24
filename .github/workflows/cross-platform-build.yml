@@ -9,6 +9,7 @@ on:
 
 env:
   BUILD_TYPE: Release
+  VCPKG_MAX_CONCURRENCY: 4
 
 jobs:
   build-and-test:
@@ -76,7 +77,6 @@ jobs:
           libxinerama-dev \
           libxcursor-dev \
           libvulkan-dev \
-          vulkan-headers \
           python3-dev \
           autoconf \
           autoconf-archive \
@@ -105,12 +105,28 @@ jobs:
     - name: Configure CMake
       shell: bash
       run: |
-        cmake -B build \
-          -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
-          -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake" \
-          -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} \
-          ${{ matrix.os == 'windows-latest' && '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL' || '' }} \
-          -G Ninja
+        # Retry logic for transient network errors
+        max_attempts=3
+        attempt=0
+        until [ $attempt -ge $max_attempts ]; do
+          attempt=$((attempt+1))
+          echo "Attempt $attempt of $max_attempts"
+
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} \
+            ${{ matrix.os == 'windows-latest' && '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL' || '' }} \
+            -G Ninja && break
+
+          if [ $attempt -lt $max_attempts ]; then
+            echo "Configure failed, waiting 30 seconds before retry..."
+            sleep 30
+          else
+            echo "Configure failed after $max_attempts attempts"
+            exit 1
+          fi
+        done
 
     - name: Build
       run: cmake --build build --config ${{ env.BUILD_TYPE }} --parallel
