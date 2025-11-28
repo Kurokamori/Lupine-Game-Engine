@@ -23,7 +23,7 @@ Furthermore, the engine is completely open-source and welcomes any contributions
 Engine Provided under the MIT Permissive License
 </br>
 
-![image](https://github.com/user-attachments/assets/f44b8373-a0ba-402e-9863-3b996111c8b7)
+<img width="3828" height="2058" alt="image" src="https://github.com/user-attachments/assets/788d8a8c-e174-4a69-88b8-e9baf46b25fb" />
 
 ## Installation Instructions
 Windows </br>
