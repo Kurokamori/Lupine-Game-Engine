@@ -2,6 +2,7 @@
 
 #include "Asset.hpp"
 #include "lupine/math/Math.hpp"
+#include "lupine/rendering/Font.hpp"
 #include <vector>
 #include <map>
 #include <cstdint>
@@ -70,12 +71,30 @@ public:
     // Kerning
     float GetKerning(uint32_t first, uint32_t second) const;
 
-    // Text measurement
+    // Text measurement.
+    //
+    // NOTE: this is a plain single-pass advance sum. It ignores word wrap, line
+    // spacing and alignment, and it does not reset the width per line. Prefer
+    // TextLayout::Measure(text, GetMetricsAtlas(), params) for anything that has to
+    // agree with what gets drawn.
     math::Vec2 MeasureText(const std::string& text, float fontSize) const;
+
+    /**
+     * The font's metrics expressed as a renderer-side FontAtlas (no texture).
+     *
+     * This lets CPU-side code — measurement, auto-sizing, bounds — run the very same
+     * TextLayout used to position the glyphs, without needing a GfxDevice to bake a
+     * GPU atlas first. Glyph bearings are converted into the renderer's convention
+     * (see lupine::Glyph: bearing.y is the downward, negative stb `yoff`).
+     */
+    const FontAtlas& GetMetricsAtlas() const { return m_MetricsAtlas; }
 
 private:
     void GenerateAtlas(const std::vector<uint8_t>& fontData, float fontSize, uint32_t atlasWidth, uint32_t atlasHeight);
-    
+    void BuildMetricsAtlas();
+
+    FontAtlas m_MetricsAtlas;
+
     float m_FontSize{48.0f};
     float m_LineHeight{0.0f};
     float m_Ascent{0.0f};

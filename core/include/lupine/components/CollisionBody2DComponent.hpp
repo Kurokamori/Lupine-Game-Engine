@@ -53,6 +53,8 @@ public:
     void OnAwake() override;
     void OnReady() override;
     void OnDestroy() override;
+    void OnPhysicsWorldRebuild(PhysicsWorldRebuildPhase phase) override;
+    void OnPhysicsProcess(float deltaTime) override;
     void OnRender() override;
 
     // Property change notification
@@ -136,6 +138,26 @@ public:
     math::Vec2 GetOffset() const;
     void SetOffset(const math::Vec2& offset);
 
+    /**
+     * Get/Set collision layer (category bits - which layer(s) this body occupies)
+     */
+    uint32_t GetCollisionLayers() const;
+    void SetCollisionLayers(uint32_t layers);
+
+    /**
+     * Get/Set collision mask (mask bits - which layer(s) this body collides with)
+     */
+    uint32_t GetCollisionMask() const;
+    void SetCollisionMask(uint32_t mask);
+
+    /**
+     * Generate the outline vertices for a predefined collision shape. Shared so
+     * other shape-owning components (e.g. AreaTrigger2D) produce identical
+     * geometry for a given shape type.
+     */
+    static void GenerateShapeVertices(CollisionShape2DType shapeType, const math::Vec2& size,
+                                      float radius, std::vector<math::Vec2>& outVertices);
+
     // ===== Debug Visualization =====
 
     /**
@@ -157,6 +179,8 @@ private:
     float m_Friction;
     float m_Restitution;
     bool m_IsSensor;
+    uint32_t m_CollisionLayers = 1;          // Category bits: default layer 1
+    uint32_t m_CollisionMask = 0xFFFFFFFFu;  // Mask bits: default detect all layers
 
     // Debug visualization
     math::Color m_DebugColor;
@@ -166,6 +190,11 @@ private:
     std::unique_ptr<physics2d::Collider2D> m_Collider;
     core::UUID m_PhysicsBodyId;
 
+    // Global scale the current shape geometry was baked with. Tracked (rather than the local
+    // scale property) because an ancestor's scale change resizes this collider just as much as
+    // the node's own does, and neither route raises a property-changed notification here.
+    math::Vec2 m_LastScale = math::Vec2(1.0f, 1.0f);
+
     // Helper methods
     void CreateCollider();
     void DestroyCollider();
@@ -173,6 +202,9 @@ private:
     void GenerateShapeVertices();
     physics2d::RigidBody2D* FindPhysicsBody();
     void DrawDebugShape();
+
+    // Owner's global scale, or (1, 1) when the owner is not a Node2D.
+    math::Vec2 GetNodeGlobalScale() const;
 };
 
 } // namespace components

@@ -1,10 +1,15 @@
 #include "lupine/components/Panel.hpp"
+#include "lupine/components/StyleBoxRenderer.hpp"
 #include "lupine/core/Node.hpp"
+#include "lupine/ui/ThemeManager.hpp"
+#include "lupine/ui/Theme.hpp"
 #include "lupine/rendering/RenderContext.hpp"
 #include "lupine/rendering/RenderWorld.hpp"
 #include "lupine/rendering/Mesh.hpp"
 #include "lupine/rendering/gfx/IGfxDevice.hpp"
+#include "lupine/rendering/TextureUpload.hpp"
 #include "lupine/rendering/gfx/GfxDescriptors.hpp"
+#include "lupine/asset/AssetDatabase.hpp"
 #include "lupine/logger/Logger.hpp"
 
 namespace lupine {
@@ -17,7 +22,7 @@ using core::Node2D;
 using core::Node3D;
 
 Panel::Panel()
-    : Component("Panel")
+    : UIControl("Panel")
     , m_StyleBox(nullptr)
     , m_CornerRadius(0.0f, true)
     , m_BorderWidth(0.0f, true)
@@ -28,7 +33,7 @@ Panel::Panel()
 }
 
 Panel::Panel(const std::string& name)
-    : Component(name)
+    : UIControl(name)
     , m_StyleBox(nullptr)
     , m_CornerRadius(0.0f, true)
     , m_BorderWidth(0.0f, true)
@@ -44,17 +49,22 @@ Panel::~Panel() {
 
 void Panel::DefineProperties() {
 
-    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(width, 100.0f, 0.0f, 10000.0f, 1.0f, "Size"));
-    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(height, 100.0f, 0.0f, 10000.0f, 1.0f, "Size"));
+    DefineUIControlProperties(100.0f, 100.0f, "useUISpace", "Size");
 
     DefineProperty(PROPERTY_INT_RANGE_GROUP(layer, 0, -100, 100, 1, "Rendering"));
     DefineProperty(PROPERTY_INT_RANGE_GROUP(sortingOrder, 0, -1000, 1000, 1, "Rendering"));
-    DefineProperty(PROPERTY_DEFAULT_GROUP(useUISpace, Bool, true, "Rendering"));
 
     DefineProperty(PROPERTY_FILE_GROUP(stylePath, std::string(""), "*.style", "Style"));
 
     DefineProperty(PROPERTY_DEFAULT_GROUP(backgroundColor, Color, Color(0.8f, 0.8f, 0.8f, 1.0f), "Background"));
     DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(opacity, 1.0f, 0.0f, 1.0f, 0.01f, "Background"));
+    DefineProperty(PROPERTY_FILE_GROUP(backgroundImagePath, std::string(""), "*.png,*.jpg,*.jpeg,*.bmp,*.tga", "Background"));
+    DefineProperty(PROPERTY_ENUM_GROUP(backgroundImageStretchMode, 0, "Background", Stretch, KeepCentered, NineSlice));
+
+    DefineProperty(PROPERTY_DEFAULT_GROUP(nineSliceMargins, Vec4, Vec4(8.0f, 8.0f, 8.0f, 8.0f), "NineSlice"));
+    DefineProperty(PROPERTY_ENUM_GROUP(nineSliceAxisH, 0, "NineSlice", Stretch, Tile));
+    DefineProperty(PROPERTY_ENUM_GROUP(nineSliceAxisV, 0, "NineSlice", Stretch, Tile));
+    DefineProperty(PROPERTY_DEFAULT_GROUP(nineSliceDrawCenter, Bool, true, "NineSlice"));
 
     DefineProperty(PROPERTY_DEFAULT_GROUP(borderEnabled, Bool, false, "Border"));
     DefineProperty(PROPERTY_DEFAULT_GROUP(borderWidthLinked, Bool, true, "Border"));
@@ -74,6 +84,14 @@ void Panel::DefineProperties() {
     DefineProperty(PROPERTY_DEFAULT_GROUP(shadowOffset, Vec2, Vec2(0.0f, 0.0f), "Shadow"));
 
     DefineProperty(PROPERTY_FILE_GROUP(customShaderPath, std::string(""), "*.glsl,*.shader", "Material"));
+    DefineProperty(PROPERTY_FILE_GROUP(materialOverride, std::string(""), "*.lsh,*.mat,*.material", "Material"));
+    DefineProperty(PROPERTY_DEFAULT_GROUP(shaderParameters, String, std::string(""), "Material"));
+
+    DefineMouseFilterProperty(MouseFilter::Ignore);
+}
+
+void Panel::DefineSignals() {
+    DefineMouseFilterSignals();
 }
 
 void Panel::OnAwake() {
@@ -99,52 +117,27 @@ void Panel::OnReady() {
     m_MeshNeedsRegeneration = true;
 }
 
+void Panel::OnInput(float) {
+    if (!IsEnabled()) {
+        return;
+    }
+
+    UpdateMouseFilterState();
+}
+
 void Panel::OnRender() {
 
 }
 
 bool Panel::OnGizmoScale(float scaleDelta, int axis, bool is3D) {
-
-    if (!is3D) {
-        float currentWidth = GetWidth();
-        float currentHeight = GetHeight();
-
-        if (axis == 0) {
-
-            SetWidth(std::max(0.1f, currentWidth + scaleDelta * currentWidth));
-        } else if (axis == 1) {
-
-            SetHeight(std::max(0.1f, currentHeight + scaleDelta * currentHeight));
-        } else if (axis == -1) {
-
-            SetWidth(std::max(0.1f, currentWidth + scaleDelta * currentWidth));
-            SetHeight(std::max(0.1f, currentHeight + scaleDelta * currentHeight));
-        }
-
+    // Resizing is delegated to the base, which writes whichever property actually drives
+    // the axis: width/height when point-anchored, the offsets when anchor-stretched (where
+    // width/height are never read at all), and nothing when a container owns the rect.
+    const bool handled = UIControl::OnGizmoScale(scaleDelta, axis, is3D);
+    if (handled) {
         m_MeshNeedsRegeneration = true;
-
-        return true;
     }
-
-    return false;
-}
-
-float Panel::GetWidth() const {
-    return GetPropertyValue<float>("width");
-}
-
-void Panel::SetWidth(float width) {
-    SetPropertyValue<float>("width", width);
-    m_MeshNeedsRegeneration = true;
-}
-
-float Panel::GetHeight() const {
-    return GetPropertyValue<float>("height");
-}
-
-void Panel::SetHeight(float height) {
-    SetPropertyValue<float>("height", height);
-    m_MeshNeedsRegeneration = true;
+    return handled;
 }
 
 int Panel::GetLayer() const {
@@ -161,14 +154,6 @@ int Panel::GetSortingOrder() const {
 
 void Panel::SetSortingOrder(int order) {
     SetPropertyValue<int>("sortingOrder", order);
-}
-
-bool Panel::GetUseUISpace() const {
-    return GetPropertyValue<bool>("useUISpace");
-}
-
-void Panel::SetUseUISpace(bool useUISpace) {
-    SetPropertyValue<bool>("useUISpace", useUISpace);
 }
 
 void Panel::SetStyleBox(std::shared_ptr<StyleBox> styleBox) {
@@ -215,18 +200,23 @@ void Panel::SetStylePath(const std::string& path) {
     SetPropertyValue<std::string>("stylePath", path);
 }
 
-const Color& Panel::GetBackgroundColor() const {
-    static Color cachedColor;
-    const ComponentProperty* prop = m_CustomProperties.GetProperty("backgroundColor");
-    if (prop) {
-        cachedColor = prop->GetValue<Color>();
-        return cachedColor;
-    }
-    return Color::White();
+const std::vector<UIControl::ThemeBinding>& Panel::GetThemeBindings() const {
+    static const std::vector<ThemeBinding> kBindings = {
+        { "backgroundColor",     "background",       ThemeBinding::Kind::Color },
+        { "backgroundImagePath", "background_image", ThemeBinding::Kind::Image },
+        { "borderColor",     "border_color",  ThemeBinding::Kind::Color },
+        { "shadowColor",     "shadow_color",  ThemeBinding::Kind::Color },
+        { "cornerRadius",    "corner_radius", ThemeBinding::Kind::Constant }
+    };
+    return kBindings;
+}
+
+Color Panel::GetBackgroundColor() const {
+    return ResolveThemedColor("backgroundColor", "background");
 }
 
 void Panel::SetBackgroundColor(const Color& color) {
-    SetPropertyValue<Color>("backgroundColor", color);
+    SetThemedProperty<Color>("backgroundColor", color);
     if (auto flatStyle = GetStyleBoxFlat()) {
         flatStyle->SetBackgroundColor(color);
     }
@@ -242,6 +232,70 @@ void Panel::SetOpacity(float opacity) {
     if (auto flatStyle = GetStyleBoxFlat()) {
         flatStyle->SetOpacity(opacity);
     }
+    m_MeshNeedsRegeneration = true;
+}
+
+std::string Panel::GetBackgroundImagePath() const {
+    return ResolveThemedImage("backgroundImagePath", "background_image");
+}
+
+void Panel::SetBackgroundImagePath(const std::string& path) {
+    std::string resPath = path;
+    if (!path.empty() && !(path.size() >= 6 && path.substr(0, 6) == "res://")) {
+        asset::AssetDatabase& assetDb = asset::AssetDatabase::GetInstance();
+        if (assetDb.IsInitialized()) {
+            std::string converted = assetDb.ToResourcePath(path);
+            if (!converted.empty()) {
+                resPath = converted;
+            }
+        }
+    }
+    SetThemedProperty<std::string>("backgroundImagePath", resPath);
+    m_MeshNeedsRegeneration = true;
+}
+
+UIImageStretchMode Panel::GetBackgroundImageStretchMode() const {
+    return UIImageStretchModeFromInt(GetPropertyValue<int>("backgroundImageStretchMode"));
+}
+
+void Panel::SetBackgroundImageStretchMode(UIImageStretchMode mode) {
+    SetPropertyValue<int>("backgroundImageStretchMode", static_cast<int>(mode));
+    m_MeshNeedsRegeneration = true;
+}
+
+Vec4 Panel::GetNineSliceMargins() const {
+    return GetPropertyValue<Vec4>("nineSliceMargins");
+}
+
+void Panel::SetNineSliceMargins(const Vec4& margins) {
+    SetPropertyValue<Vec4>("nineSliceMargins", margins);
+    m_MeshNeedsRegeneration = true;
+}
+
+UINineSliceAxisMode Panel::GetNineSliceAxisHorizontal() const {
+    return UINineSliceAxisModeFromInt(GetPropertyValue<int>("nineSliceAxisH"));
+}
+
+void Panel::SetNineSliceAxisHorizontal(UINineSliceAxisMode mode) {
+    SetPropertyValue<int>("nineSliceAxisH", static_cast<int>(mode));
+    m_MeshNeedsRegeneration = true;
+}
+
+UINineSliceAxisMode Panel::GetNineSliceAxisVertical() const {
+    return UINineSliceAxisModeFromInt(GetPropertyValue<int>("nineSliceAxisV"));
+}
+
+void Panel::SetNineSliceAxisVertical(UINineSliceAxisMode mode) {
+    SetPropertyValue<int>("nineSliceAxisV", static_cast<int>(mode));
+    m_MeshNeedsRegeneration = true;
+}
+
+bool Panel::GetNineSliceDrawCenter() const {
+    return GetPropertyValue<bool>("nineSliceDrawCenter");
+}
+
+void Panel::SetNineSliceDrawCenter(bool drawCenter) {
+    SetPropertyValue<bool>("nineSliceDrawCenter", drawCenter);
     m_MeshNeedsRegeneration = true;
 }
 
@@ -303,18 +357,12 @@ void Panel::SetBorderEnabled(bool enabled) {
     m_MeshNeedsRegeneration = true;
 }
 
-const Color& Panel::GetBorderColor() const {
-    static Color cachedColor;
-    const ComponentProperty* prop = m_CustomProperties.GetProperty("borderColor");
-    if (prop) {
-        cachedColor = prop->GetValue<Color>();
-        return cachedColor;
-    }
-    return Color::Black();
+Color Panel::GetBorderColor() const {
+    return ResolveThemedColor("borderColor", "border_color");
 }
 
 void Panel::SetBorderColor(const Color& color) {
-    SetPropertyValue<Color>("borderColor", color);
+    SetThemedProperty<Color>("borderColor", color);
     m_MeshNeedsRegeneration = true;
 }
 
@@ -333,7 +381,7 @@ float Panel::GetCornerRadiusTopLeft() const {
 
 void Panel::SetCornerRadiusTopLeft(float radius) {
     m_CornerRadius.Set(0, radius);
-    SetPropertyValue<Vec4>("cornerRadius", m_CornerRadius.AsVec4());
+    SetThemedProperty<Vec4>("cornerRadius", m_CornerRadius.AsVec4());
     m_MeshNeedsRegeneration = true;
 }
 
@@ -343,7 +391,7 @@ float Panel::GetCornerRadiusTopRight() const {
 
 void Panel::SetCornerRadiusTopRight(float radius) {
     m_CornerRadius.Set(1, radius);
-    SetPropertyValue<Vec4>("cornerRadius", m_CornerRadius.AsVec4());
+    SetThemedProperty<Vec4>("cornerRadius", m_CornerRadius.AsVec4());
     m_MeshNeedsRegeneration = true;
 }
 
@@ -353,7 +401,7 @@ float Panel::GetCornerRadiusBottomLeft() const {
 
 void Panel::SetCornerRadiusBottomLeft(float radius) {
     m_CornerRadius.Set(3, radius);
-    SetPropertyValue<Vec4>("cornerRadius", m_CornerRadius.AsVec4());
+    SetThemedProperty<Vec4>("cornerRadius", m_CornerRadius.AsVec4());
     m_MeshNeedsRegeneration = true;
 }
 
@@ -363,7 +411,7 @@ float Panel::GetCornerRadiusBottomRight() const {
 
 void Panel::SetCornerRadiusBottomRight(float radius) {
     m_CornerRadius.Set(2, radius);
-    SetPropertyValue<Vec4>("cornerRadius", m_CornerRadius.AsVec4());
+    SetThemedProperty<Vec4>("cornerRadius", m_CornerRadius.AsVec4());
     m_MeshNeedsRegeneration = true;
 }
 
@@ -415,18 +463,12 @@ void Panel::SetShadowEnabled(bool enabled) {
     m_MeshNeedsRegeneration = true;
 }
 
-const Color& Panel::GetShadowColor() const {
-    static Color cachedColor;
-    const ComponentProperty* prop = m_CustomProperties.GetProperty("shadowColor");
-    if (prop) {
-        cachedColor = prop->GetValue<Color>();
-        return cachedColor;
-    }
-    return Color(0.0f, 0.0f, 0.0f, 0.6f);
+Color Panel::GetShadowColor() const {
+    return ResolveThemedColor("shadowColor", "shadow_color");
 }
 
 void Panel::SetShadowColor(const Color& color) {
-    SetPropertyValue<Color>("shadowColor", color);
+    SetThemedProperty<Color>("shadowColor", color);
     if (auto flatStyle = GetStyleBoxFlat()) {
         flatStyle->SetShadowColor(color);
     }
@@ -448,11 +490,8 @@ void Panel::SetShadowSize(float size) {
 const Vec2& Panel::GetShadowOffset() const {
     static Vec2 cachedOffset;
     const ComponentProperty* prop = m_CustomProperties.GetProperty("shadowOffset");
-    if (prop) {
-        cachedOffset = prop->GetValue<Vec2>();
-        return cachedOffset;
-    }
-    return Vec2::Zero();
+    cachedOffset = prop ? prop->GetValue<Vec2>() : Vec2::Zero();
+    return cachedOffset;
 }
 
 void Panel::SetShadowOffset(const Vec2& offset) {
@@ -476,6 +515,42 @@ void Panel::SetCustomShaderPath(const std::string& path) {
     }
 }
 
+const std::string& Panel::GetShader() const {
+    // Custom .lsh shaders live in the material override slot.
+    static std::string cachedPath;
+    std::string materialPath = GetPropertyValue<std::string>("materialOverride");
+    if (materialPath.size() >= 4 && materialPath.compare(materialPath.size() - 4, 4, ".lsh") == 0) {
+        cachedPath = materialPath;
+    } else {
+        cachedPath = std::string();
+    }
+    return cachedPath;
+}
+
+void Panel::SetShader(const std::string& shaderPath) {
+    std::string resPath = shaderPath;
+    if (!shaderPath.empty() && !(shaderPath.size() >= 6 && shaderPath.substr(0, 6) == "res://")) {
+        auto& assetDb = asset::AssetDatabase::GetInstance();
+        if (assetDb.IsInitialized()) {
+            std::string converted = assetDb.ToResourcePath(shaderPath);
+            if (!converted.empty()) {
+                resPath = converted;
+            }
+        }
+    }
+    SetPropertyValue<std::string>("materialOverride", resPath);
+}
+
+const std::string& Panel::GetShaderParameters() const {
+    static std::string cachedParams;
+    cachedParams = GetPropertyValue<std::string>("shaderParameters");
+    return cachedParams;
+}
+
+void Panel::SetShaderParameters(const std::string& parametersJson) {
+    SetPropertyValue<std::string>("shaderParameters", parametersJson);
+}
+
 void Panel::buildDrawCommands(RenderContext& ctx) {
     if (!IsEnabled()) {
         return;
@@ -485,6 +560,19 @@ void Panel::buildDrawCommands(RenderContext& ctx) {
     bool cornerRadiusLinked = GetPropertyValue<bool>("cornerRadiusLinked");
     m_CornerRadius.FromVec4(cornerRadiusVec);
     m_CornerRadius.SetLinked(cornerRadiusLinked);
+
+    // A theme may supply a uniform corner radius. Applied only when the theme
+    // defines it and the property is not a local override (preserving per-corner
+    // values otherwise).
+    if (!IsThemeOverridden("cornerRadius")) {
+        const ui::ThemeAsset* theme = GetEffectiveTheme();
+        ui::ThemeManager& tm = ui::ThemeManager::GetInstance();
+        if (tm.HasConstant(theme, GetThemeTypeName(), GetThemeTypeVariation(), "corner_radius")) {
+            float r = tm.ResolveConstant(theme, GetThemeTypeName(), GetThemeTypeVariation(), "corner_radius", 0.0f);
+            m_CornerRadius.FromVec4(Vec4(r, r, r, r));
+            m_CornerRadius.SetLinked(true);
+        }
+    }
 
     Vec4 borderWidthVec = GetPropertyValue<Vec4>("borderWidth");
     bool borderWidthLinked = GetPropertyValue<bool>("borderWidthLinked");
@@ -497,15 +585,170 @@ void Panel::buildDrawCommands(RenderContext& ctx) {
     Node2D* node2D = dynamic_cast<Node2D*>(owner);
     if (!node2D) return;
 
-    Vec2 position = node2D->GetGlobalPosition();
-    Vec2 size = Vec2(GetWidth(), GetHeight());
+    const Rect __rect = GetResolvedRect();
+    Vec2 position = __rect.GetCenter();
+    Vec2 size = __rect.size;
     float rotation = node2D->GetGlobalRotation();
 
+    // A themed StyleBox entry ("panel"), when the effective theme defines one,
+    // fully replaces the flat property-driven background+border — this is what
+    // lets a theme supply a textured nine-patch / line / empty panel style. The
+    // control's own opacity still modulates it. The local custom shader and
+    // background image still draw over it.
+    if (std::shared_ptr<StyleBox> themedBox = ResolveThemedStyleBox("panel")) {
+        bool fillDrawn = false;
+        if (!GetShader().empty()) {
+            fillDrawn = RenderFillCustomShader(ctx, position, size, rotation);
+        }
+        if (!fillDrawn) {
+            DrawStyleBox(ctx, themedBox.get(), position, size, rotation, Color(1.0f, 1.0f, 1.0f, GetOpacity()));
+        }
+        RenderBackgroundImage(ctx, position, size, rotation);
+        return;
+    }
+
     RenderBorder(ctx, position, size, rotation);
-    RenderFill(ctx, position, size, rotation);
+
+    // A custom .lsh shader, when attached and compiled, renders the background fill;
+    // otherwise the flat StyleBox fill is used.
+    bool fillDrawn = false;
+    if (!GetShader().empty()) {
+        fillDrawn = RenderFillCustomShader(ctx, position, size, rotation);
+    }
+    if (!fillDrawn) {
+        RenderFill(ctx, position, size, rotation);
+    }
+
+    // Optional background image, painted over the fill (tinted by opacity).
+    RenderBackgroundImage(ctx, position, size, rotation);
 }
 
-void Panel::RenderFill(RenderContext& ctx, const Vec2& position, const Vec2& size, float rotation) {
+void Panel::RenderBackgroundImage(RenderContext& ctx, const Vec2& position, const Vec2& size, float rotation) {
+    std::string path = ResolveThemedImage("backgroundImagePath", "background_image");
+
+    if (path != m_CurrentBackgroundImagePath) {
+        if (m_BackgroundImageHandle.isValid()) {
+            if (IGfxDevice* device = ctx.getDevice()) {
+                device->destroyTexture(m_BackgroundImageHandle);
+            }
+            m_BackgroundImageHandle = TextureHandle();
+        }
+        m_BackgroundImageAsset.Reset();
+        m_CurrentBackgroundImagePath = path;
+
+        if (!path.empty()) {
+            m_BackgroundImageAsset = asset::AssetRef<asset::ImageAsset>(new asset::ImageAsset());
+            if (!m_BackgroundImageAsset->LoadFromFile(path, true, asset::ImageColorSpace::sRGB)) {
+                m_BackgroundImageAsset.Reset();
+            }
+        }
+    }
+
+    if (!m_BackgroundImageHandle.isValid() && m_BackgroundImageAsset.IsValid() &&
+        m_BackgroundImageAsset->IsLoaded()) {
+        if (m_BackgroundImageAsset->GetWidth() > 0 && m_BackgroundImageAsset->GetHeight() > 0 &&
+            m_BackgroundImageAsset->GetData() != nullptr) {
+            if (IGfxDevice* device = ctx.getDevice()) {
+                m_BackgroundImageHandle = lupine::CreateTexture2DFromImage(device, *m_BackgroundImageAsset, TextureFormat::RGBA8_UNORM);
+            }
+        }
+    }
+
+    if (!m_BackgroundImageHandle.isValid() || !m_BackgroundImageAsset.IsValid()) {
+        return;
+    }
+
+    Color tint = Color::White();
+    tint.a *= GetOpacity();
+
+    UIImageStretchMode stretchMode = GetBackgroundImageStretchMode();
+    Vec4 margins = GetNineSliceMargins();
+    UINineSlice nineSlice;
+    nineSlice.marginLeft = margins.x;
+    nineSlice.marginTop = margins.y;
+    nineSlice.marginRight = margins.z;
+    nineSlice.marginBottom = margins.w;
+    nineSlice.axisHorizontal = GetNineSliceAxisHorizontal();
+    nineSlice.axisVertical = GetNineSliceAxisVertical();
+    nineSlice.drawCenter = GetNineSliceDrawCenter();
+
+    // A themed "background_image" entry may also dictate the fit (stretch / nine-slice),
+    // overriding this panel's own stretch + nine-slice properties.
+    ui::ThemeImage themedImage;
+    if (ResolveThemedImageEx("backgroundImagePath", "background_image", themedImage) && themedImage.hasStretch) {
+        stretchMode = UIImageStretchModeFromInt(themedImage.stretchMode);
+        if (themedImage.stretchMode == 2) {
+            nineSlice.marginLeft = themedImage.marginLeft;
+            nineSlice.marginTop = themedImage.marginTop;
+            nineSlice.marginRight = themedImage.marginRight;
+            nineSlice.marginBottom = themedImage.marginBottom;
+            nineSlice.axisHorizontal = UINineSliceAxisModeFromInt(themedImage.axisH);
+            nineSlice.axisVertical = UINineSliceAxisModeFromInt(themedImage.axisV);
+            nineSlice.drawCenter = themedImage.drawCenter;
+        }
+    }
+
+    DrawUIImage(ctx, position, size, rotation, m_BackgroundImageHandle,
+                m_BackgroundImageAsset->GetWidth(), m_BackgroundImageAsset->GetHeight(),
+                tint, m_CornerRadius.AsVec4(), stretchMode, nineSlice);
+}
+
+bool Panel::OnAssetFileChanged(const std::string& changedPath, const std::string& resolvedChangedPath) {
+    std::string imagePath = GetBackgroundImagePath();
+    if (imagePath.empty()) {
+        return false;
+    }
+
+    asset::AssetDatabase& assetDb = asset::AssetDatabase::GetInstance();
+    std::string resolved;
+    if (assetDb.IsInitialized()) {
+        resolved = assetDb.ResolveAsset(imagePath);
+    }
+
+    bool matches = (imagePath == changedPath) ||
+                   (!resolved.empty() && !resolvedChangedPath.empty() && resolved == resolvedChangedPath);
+
+    if (matches) {
+        m_BackgroundImageHandle = TextureHandle();
+        m_BackgroundImageAsset.Reset();
+        m_CurrentBackgroundImagePath.clear();
+        m_MeshNeedsRegeneration = true;
+        return true;
+    }
+
+    return false;
+}
+
+bool Panel::RenderFillCustomShader(RenderContext& ctx, const Vec2& center, const Vec2& size, float rotation) {
+    const std::string& shaderPath = GetShader();
+    if (shaderPath.empty()) {
+        return false;
+    }
+
+    MaterialHandle material = ctx.getOrCreateLshMaterial(shaderPath, 0);
+    if (!material.isValid()) {
+        return false;
+    }
+
+    Color fillColor = GetBackgroundColor();
+    fillColor.a *= GetOpacity();
+
+    Vec4 cornerRadius = m_CornerRadius.AsVec4();
+
+    MaterialPropertyBlock params;
+    m_ShaderParams.BuildBlock(ctx, GetShaderParameters(), params);
+
+    if (std::abs(rotation) > 0.0001f) {
+        ctx.drawRoundedRectShader(center, size, cornerRadius, fillColor, rotation, material, params);
+    } else {
+        Vec2 topLeft = Vec2(center.x - size.x * 0.5f, center.y - size.y * 0.5f);
+        ctx.drawRoundedRectShader(topLeft, size, cornerRadius, fillColor, 0.0f, material, params);
+    }
+
+    return true;
+}
+
+void Panel::RenderFill(RenderContext& ctx, const Vec2& center, const Vec2& size, float rotation) {
     Color fillColor = GetBackgroundColor();
     fillColor.a *= GetOpacity();
 
@@ -515,13 +758,16 @@ void Panel::RenderFill(RenderContext& ctx, const Vec2& position, const Vec2& siz
     int blendMode = 0;
 
     if (std::abs(rotation) > 0.0001f) {
-        ctx.drawRoundedRect(position, size, cornerRadius, fillColor, rotation, blendMode);
+        // Rotated: pass center directly
+        ctx.drawRoundedRect(center, size, cornerRadius, fillColor, rotation, blendMode);
     } else {
-        ctx.drawRoundedRect(position, size, cornerRadius, fillColor, blendMode);
+        // Non-rotated: calculate top-left from center
+        Vec2 topLeft = Vec2(center.x - size.x * 0.5f, center.y - size.y * 0.5f);
+        ctx.drawRoundedRect(topLeft, size, cornerRadius, fillColor, blendMode);
     }
 }
 
-void Panel::RenderBorder(RenderContext& ctx, const Vec2& position, const Vec2& size, float rotation) {
+void Panel::RenderBorder(RenderContext& ctx, const Vec2& center, const Vec2& size, float rotation) {
     if (!GetBorderEnabled()) {
         return;
     }
@@ -540,7 +786,6 @@ void Panel::RenderBorder(RenderContext& ctx, const Vec2& position, const Vec2& s
     Vec4 innerRadius = m_CornerRadius.AsVec4();
 
     Vec2 outerSize = Vec2(size.x + borderLeft + borderRight, size.y + borderTop + borderBottom);
-    Vec2 outerPosition = Vec2(position.x, position.y);
 
     Vec4 outerRadius = Vec4(
         innerRadius.x + std::max(borderTop, borderLeft),
@@ -551,11 +796,18 @@ void Panel::RenderBorder(RenderContext& ctx, const Vec2& position, const Vec2& s
 
     Vec4 borderWidthVec = Vec4(borderTop, borderRight, borderBottom, borderLeft);
 
+    // Account for asymmetric border offset from center
+    float borderOffsetX = (borderRight - borderLeft) * 0.5f;
+    float borderOffsetY = (borderBottom - borderTop) * 0.5f;
+    Vec2 borderCenter = Vec2(center.x + borderOffsetX, center.y + borderOffsetY);
+
     if (std::abs(rotation) > 0.0001f) {
-        ctx.drawRoundedRectBorder(outerPosition, outerSize, outerRadius, borderWidthVec, borderColor, rotation);
+        // Rotated: pass center directly
+        ctx.drawRoundedRectBorder(borderCenter, outerSize, outerRadius, borderWidthVec, borderColor, rotation);
     } else {
-        Vec2 outerPosNoRot = Vec2(position.x - borderLeft, position.y - borderTop);
-        ctx.drawRoundedRectBorder(outerPosNoRot, outerSize, outerRadius, borderWidthVec, borderColor);
+        // Non-rotated: calculate top-left from center
+        Vec2 outerTopLeft = Vec2(borderCenter.x - outerSize.x * 0.5f, borderCenter.y - outerSize.y * 0.5f);
+        ctx.drawRoundedRectBorder(outerTopLeft, outerSize, outerRadius, borderWidthVec, borderColor);
     }
 }
 
@@ -563,9 +815,6 @@ AABB Panel::getWorldBounds() const {
     if (!GetOwner()) {
         return AABB();
     }
-
-    float width = GetWidth();
-    float height = GetHeight();
 
     Node2D* node2d = dynamic_cast<Node2D*>(GetOwner());
     if (!node2d) {
@@ -576,7 +825,8 @@ AABB Panel::getWorldBounds() const {
     Vec2 globalScale = node2d->GetGlobalScale();
     float rotation = node2d->GetGlobalRotation();
 
-    Vec2 size(width * globalScale.x, height * globalScale.y);
+    Vec2 boundsSize = GetBoundsSize();
+    Vec2 size(boundsSize.x * globalScale.x, boundsSize.y * globalScale.y);
 
     if (std::abs(rotation) > 0.0001f) {
         float cosR = std::cos(rotation);
@@ -658,8 +908,7 @@ RenderLayer Panel::getRenderLayer() const {
 }
 
 SpatialType Panel::getSpatialType() const {
-
-    return SpatialType::World2D;
+    return GetUISpatialType();
 }
 
 void Panel::EnsureStyleBox() {

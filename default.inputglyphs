@@ -1,0 +1,11 @@
+{
+  "_comment": "Optional glyph override map. The engine generates device-aware glyph ids and labels automatically (e.g. 'key_space', 'gamepad_xbox_a', 'mouse_left'); this file only overrides the human label and/or supplies an art texture path per glyph id. Load it at runtime with Input.load_glyph_map('res://default.inputglyphs') / lc_input_load_glyph_map(). Each entry: { \"label\": \"...\", \"art\": \"res://path.png\" } (both optional).",
+
+  "key_space": { "label": "Space" },
+  "key_e": { "label": "E" },
+  "mouse_left": { "label": "Left Click" },
+
+  "gamepad_xbox_a": { "label": "A" },
+  "gamepad_ps_a": { "label": "Cross" },
+  "gamepad_switch_a": { "label": "B" }
+}

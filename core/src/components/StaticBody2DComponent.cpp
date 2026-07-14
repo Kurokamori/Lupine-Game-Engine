@@ -1,6 +1,7 @@
 #include "lupine/components/StaticBody2DComponent.hpp"
 #include "lupine/core/Node.hpp"
 #include "lupine/core/SceneManager.hpp"
+#include "lupine/physics2d/TransformSync2D.hpp"
 #include "lupine/logger/Logger.hpp"
 
 namespace lupine {
@@ -47,15 +48,39 @@ void StaticBody2DComponent::OnDestroy() {
     DestroyPhysicsBody();
 }
 
-void StaticBody2DComponent::OnPhysicsProcess(float deltaTime) {
+void StaticBody2DComponent::OnPhysicsWorldRebuild(PhysicsWorldRebuildPhase phase) {
+    // See Component::PhysicsWorldRebuildPhase. A static body owns no velocity, so there is
+    // nothing to save - it just needs its body back in the fresh world.
+    switch (phase) {
+        case PhysicsWorldRebuildPhase::SaveState:
+            break;
+
+        case PhysicsWorldRebuildPhase::RecreateBodies:
+            // The body died with the world: drop the stale handles without touching them.
+            m_PhysicsBody = nullptr;
+            m_BodyCreated = false;
+            CreatePhysicsBody();
+            break;
+
+        case PhysicsWorldRebuildPhase::AttachColliders:
+            if (m_PhysicsBody) {
+                SyncTransformToPhysics();
+            }
+            break;
+    }
+}
+
+void StaticBody2DComponent::OnPhysicsProcess(float) {
     if (!m_PhysicsBody) return;
 
-    auto* node2D = dynamic_cast<core::Node2D*>(m_Owner);
+    core::Node2D* node2D = dynamic_cast<core::Node2D*>(m_Owner);
     if (node2D) {
-        math::Vec2 nodePos = node2D->GetPosition();
-        float nodeRot = node2D->GetRotation();
+        // Compared in world space: an ancestor may have moved even when this node's local
+        // transform is unchanged, and the body has to follow.
+        const math::Vec2 globalPosition = node2D->GetGlobalPosition();
+        const float globalRotation = node2D->GetGlobalRotation();
 
-        if (nodePos != m_LastPosition || nodeRot != m_LastRotation) {
+        if (globalPosition != m_LastPosition || globalRotation != m_LastRotation) {
             SyncTransformToPhysics();
         }
     }
@@ -87,8 +112,60 @@ void StaticBody2DComponent::CreatePhysicsBody() {
         return;
     }
 
+    physicsWorld->SetBodyNode(m_PhysicsBodyId, m_Owner);
+
+    RegisterCollisionCallbacks();
+
     m_BodyCreated = true;
 
+}
+
+void StaticBody2DComponent::DefineSignals() {
+    RegisterSignal({"body_entered",
+                    {{"body", core::PropertyValueType::NodePath}},
+                    "Emitted when another physics body starts colliding with this body."});
+    RegisterSignal({"body_exited",
+                    {{"body", core::PropertyValueType::NodePath}},
+                    "Emitted when another physics body stops colliding with this body."});
+}
+
+void StaticBody2DComponent::RegisterCollisionCallbacks() {
+    auto* sceneManager = core::SceneManager::GetInstance();
+    if (!sceneManager) return;
+
+    auto* physicsWorld = sceneManager->GetPhysics2DWorld();
+    if (!physicsWorld) return;
+
+    physicsWorld->RegisterCollisionEnter(m_PhysicsBodyId,
+        [this](const physics2d::CollisionInfo& info) {
+            OnCollisionEnterInternal(info);
+        });
+
+    physicsWorld->RegisterCollisionExit(m_PhysicsBodyId,
+        [this](const physics2d::CollisionInfo& info) {
+            OnCollisionExitInternal(info);
+        });
+}
+
+void StaticBody2DComponent::OnCollisionEnterInternal(const physics2d::CollisionInfo& info) {
+    core::UUID otherBodyId = (info.bodyA == m_PhysicsBodyId) ? info.bodyB : info.bodyA;
+    Emit("body_entered", { ResolveOtherBodyNodeArg(otherBodyId) });
+}
+
+void StaticBody2DComponent::OnCollisionExitInternal(const physics2d::CollisionInfo& info) {
+    core::UUID otherBodyId = (info.bodyA == m_PhysicsBodyId) ? info.bodyB : info.bodyA;
+    Emit("body_exited", { ResolveOtherBodyNodeArg(otherBodyId) });
+}
+
+nlohmann::json StaticBody2DComponent::ResolveOtherBodyNodeArg(const core::UUID& otherBodyId) const {
+    auto* sceneManager = core::SceneManager::GetInstance();
+    if (sceneManager) {
+        auto* physicsWorld = sceneManager->GetPhysics2DWorld();
+        if (physicsWorld) {
+            return core::Node::NodeArg(physicsWorld->GetBodyNode(otherBodyId));
+        }
+    }
+    return nlohmann::json(nullptr);
 }
 
 void StaticBody2DComponent::DestroyPhysicsBody() {
@@ -97,6 +174,7 @@ void StaticBody2DComponent::DestroyPhysicsBody() {
     auto* sceneManager = core::SceneManager::GetInstance();
 
     bool isShuttingDown = (sceneManager && sceneManager->IsShuttingDown()) ||
+                          (sceneManager && sceneManager->IsChangingScene()) ||
                           (m_Owner && m_Owner->GetScene() && m_Owner->GetScene()->IsShuttingDown());
 
     if (sceneManager && !isShuttingDown) {
@@ -113,17 +191,17 @@ void StaticBody2DComponent::DestroyPhysicsBody() {
 void StaticBody2DComponent::SyncTransformToPhysics() {
     if (!m_PhysicsBody || !m_Owner) return;
 
-    auto* node2D = dynamic_cast<core::Node2D*>(m_Owner);
+    core::Node2D* node2D = dynamic_cast<core::Node2D*>(m_Owner);
     if (!node2D) return;
 
-    math::Vec2 position = node2D->GetPosition();
-    float rotation = node2D->GetRotation();
+    const math::Vec2 globalPosition = node2D->GetGlobalPosition();
+    const float globalRotation = node2D->GetGlobalRotation();
 
-    m_PhysicsBody->SetPosition(position);
-    m_PhysicsBody->SetRotation(rotation);
+    m_PhysicsBody->SetPosition(globalPosition);
+    m_PhysicsBody->SetRotation(globalRotation);
 
-    m_LastPosition = position;
-    m_LastRotation = rotation;
+    m_LastPosition = globalPosition;
+    m_LastRotation = globalRotation;
 }
 
 void StaticBody2DComponent::SyncTransformFromPhysics() {
@@ -158,9 +236,9 @@ void StaticBody2DComponent::SetPosition(const math::Vec2& position) {
         m_LastPosition = position;
     }
 
-    auto* node2D = dynamic_cast<core::Node2D*>(m_Owner);
+    core::Node2D* node2D = dynamic_cast<core::Node2D*>(m_Owner);
     if (node2D) {
-        node2D->SetPosition(position);
+        node2D->SetPosition(physics2d::GlobalToLocalPosition(*node2D, position));
     }
 }
 
@@ -170,9 +248,9 @@ void StaticBody2DComponent::SetRotation(float angle) {
         m_LastRotation = angle;
     }
 
-    auto* node2D = dynamic_cast<core::Node2D*>(m_Owner);
+    core::Node2D* node2D = dynamic_cast<core::Node2D*>(m_Owner);
     if (node2D) {
-        node2D->SetRotation(angle);
+        node2D->SetRotation(physics2d::GlobalToLocalRotation(*node2D, angle));
     }
 }
 

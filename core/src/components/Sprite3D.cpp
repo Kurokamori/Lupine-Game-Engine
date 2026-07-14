@@ -2,17 +2,107 @@
 #include "lupine/core/Node.hpp"
 #include "lupine/rendering/RenderContext.hpp"
 #include "lupine/rendering/RenderWorld.hpp"
+#include "lupine/rendering/TextureCache.hpp"
 #include "lupine/rendering/gfx/IGfxDevice.hpp"
+#include "lupine/rendering/TextureUpload.hpp"
 #include "lupine/rendering/gfx/GfxDescriptors.hpp"
+#include "lupine/asset/AssetDatabase.hpp"
 #include "lupine/logger/Logger.hpp"
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_inverse.hpp>
+#include <unordered_map>
+#include <mutex>
 
 namespace lupine {
 namespace components {
 
 using namespace core;
 using namespace math;
+
+// Static texture cache to share textures across all Sprite3D instances
+// Use lazy initialization to avoid static initialization order issues
+static std::unordered_map<std::string, TextureHandle>& GetSprite3DTextureCache() {
+    static std::unordered_map<std::string, TextureHandle> s_Sprite3DTextureCache;
+    return s_Sprite3DTextureCache;
+}
+
+static std::mutex& GetSprite3DTextureCacheMutex() {
+    static std::mutex s_Sprite3DTextureCacheMutex;
+    return s_Sprite3DTextureCacheMutex;
+}
+
+// Lazy registration with TextureCache system for hot-reloading
+static void EnsureSprite3DCacheRegistered() {
+    static bool registered = false;
+    if (registered) return;
+    registered = true;
+
+    rendering::TextureCache::RegisterCache(
+        "Sprite3D",
+        [](const std::string& path) -> bool {
+            std::lock_guard<std::mutex> lock(GetSprite3DTextureCacheMutex());
+            auto it = GetSprite3DTextureCache().find(path);
+            if (it != GetSprite3DTextureCache().end()) {
+                GetSprite3DTextureCache().erase(it);
+                return true;
+            }
+            return false;
+        },
+        []() {
+            std::lock_guard<std::mutex> lock(GetSprite3DTextureCacheMutex());
+            GetSprite3DTextureCache().clear();
+        }
+    );
+}
+
+// Helper to get or create a cached texture for Sprite3D
+static TextureHandle GetOrCreateSprite3DTexture(
+    IGfxDevice* device,
+    const std::string& path,
+    asset::AssetRef<asset::ImageAsset>& asset)
+{
+    if (path.empty() || !device) {
+        return TextureHandle();
+    }
+
+    // Ensure cache is registered with TextureCache system (lazy init)
+    EnsureSprite3DCacheRegistered();
+
+    // Check cache first
+    {
+        std::lock_guard<std::mutex> lock(GetSprite3DTextureCacheMutex());
+        auto it = GetSprite3DTextureCache().find(path);
+        if (it != GetSprite3DTextureCache().end() && it->second.isValid()) {
+            return it->second;
+        }
+    }
+
+    // Not in cache, need to load
+    if (!asset.IsValid()) {
+        asset = asset::AssetRef<asset::ImageAsset>(new asset::ImageAsset());
+        
+        if (!asset->LoadFromFile(path, true, asset::ImageColorSpace::sRGB)) {
+            LOG_ERROR(LogCategory::Render, "Sprite3D FAILED to load texture: {}", path);
+            return TextureHandle();
+        }
+        
+    }
+
+    if (!asset->IsLoaded() || asset->GetWidth() == 0 || asset->GetHeight() == 0 || asset->GetData() == nullptr) {
+        return TextureHandle();
+    }
+
+    // Create texture
+    TextureHandle handle = lupine::CreateTexture2DFromImage(device, *asset, TextureFormat::RGBA8_SRGB);
+
+    // Cache it
+    {
+        std::lock_guard<std::mutex> lock(GetSprite3DTextureCacheMutex());
+        GetSprite3DTextureCache()[path] = handle;
+    }
+
+    return handle;
+}
 
 Sprite3D::Sprite3D()
     : Component("Sprite3D")
@@ -338,18 +428,71 @@ const std::string& Sprite3D::GetTexturePath() const {
 }
 
 void Sprite3D::SetTexturePath(const std::string& path) {
-    SetPropertyValue<std::string>("texturePath", path);
+    // Convert to res:// path if possible
+    std::string resPath = path;
+    if (!path.empty() && !(path.size() >= 6 && path.substr(0, 6) == "res://")) {
+        auto& assetDb = asset::AssetDatabase::GetInstance();
+        if (assetDb.IsInitialized()) {
+            std::string converted = assetDb.ToResourcePath(path);
+            if (!converted.empty()) {
+                resPath = converted;
+            }
+        }
+    }
+    SetPropertyValue<std::string>("texturePath", resPath);
 }
 
-const Color& Sprite3D::GetModulate() const {
-    static Color cachedColor;
+bool Sprite3D::OnAssetFileChanged(const std::string& changedPath, const std::string& resolvedChangedPath) {
+    // Get our current texture path
+    std::string currentPath = GetTexturePath();
+    if (currentPath.empty()) {
+        return false;
+    }
+
+    // Resolve our path for comparison
+    std::string resolvedCurrentPath;
+    auto& assetDb = asset::AssetDatabase::GetInstance();
+    if (assetDb.IsInitialized()) {
+        resolvedCurrentPath = assetDb.ResolveAsset(currentPath);
+    }
+
+    // Check if this is our texture
+    bool matches = (currentPath == changedPath) ||
+                   (!resolvedCurrentPath.empty() && !resolvedChangedPath.empty() &&
+                    resolvedCurrentPath == resolvedChangedPath);
+
+    if (matches) {
+
+        // IMPORTANT: Remove from the static texture cache first!
+        // This ensures the next buildDrawCommands will reload from disk
+        {
+            std::lock_guard<std::mutex> lock(GetSprite3DTextureCacheMutex());
+            auto& cache = GetSprite3DTextureCache();
+            auto it = cache.find(currentPath);
+            if (it != cache.end()) {
+                
+                cache.erase(it);
+            }
+        }
+
+        // Invalidate our cached texture handle - force reload on next render
+        m_TextureHandle = TextureHandle();
+        m_TextureAsset.Reset();
+        m_CurrentTexturePath.clear();  // Force path comparison to trigger reload
+        m_TextureNeedsUpload = true;
+
+        return true;
+    }
+
+    return false;
+}
+
+Color Sprite3D::GetModulate() const {
     const ComponentProperty* prop = m_CustomProperties.GetProperty("modulate");
     if (prop) {
-        cachedColor = prop->GetValue<Color>();
-        return cachedColor;
+        return prop->GetValue<Color>();
     }
-    static Color defaultColor = Color::White();
-    return defaultColor;
+    return Color::White();
 }
 
 void Sprite3D::SetModulate(const Color& color) {
@@ -453,73 +596,34 @@ void Sprite3D::SetReceiveShadow(bool receiveShadow) {
 
 void Sprite3D::buildDrawCommands(RenderContext& ctx) {
     if (!IsEnabled() || !m_Owner) {
-
         return;
     }
 
     Node3D* node3D = dynamic_cast<Node3D*>(m_Owner);
     if (!node3D) {
-
         return;
     }
 
     std::string currentPath = GetTexturePath();
+
+    // Check if we need to update the texture (path changed)
     if (currentPath != m_CurrentTexturePath) {
-
-        if (m_TextureHandle.isValid()) {
-            IGfxDevice* device = ctx.getDevice();
-            if (device) {
-                device->destroyTexture(m_TextureHandle);
-                m_TextureHandle = TextureHandle();
-
-            }
-        }
-
+        // Don't destroy textures from cache - they're shared!
+        // Just update our handle to point to the new cached texture
+        m_TextureHandle = TextureHandle();
         m_TextureAsset.Reset();
-
-        if (!currentPath.empty()) {
-
-            m_TextureAsset = asset::AssetRef<asset::ImageAsset>(new asset::ImageAsset());
-
-            bool loaded = m_TextureAsset->LoadFromFile(currentPath, true, asset::ImageColorSpace::sRGB);
-
-            if (!loaded) {
-
-                m_TextureAsset.Reset();
-            } else {
-
-            }
-        }
-
         m_CurrentTexturePath = currentPath;
     }
 
-    if (!m_TextureHandle.isValid()) {
-
-        if (m_TextureAsset.IsValid() && m_TextureAsset->IsLoaded()) {
-
-            if (m_TextureAsset->GetWidth() == 0 || m_TextureAsset->GetHeight() == 0 || m_TextureAsset->GetData() == nullptr) {
-
-                return;
-            }
-
-            TextureDesc desc;
-            desc.width = m_TextureAsset->GetWidth();
-            desc.height = m_TextureAsset->GetHeight();
-            desc.format = TextureFormat::RGBA8_SRGB;
-            desc.usage = TextureUsage::Sampled;
-            desc.initialData = m_TextureAsset->GetData();
-
-            IGfxDevice* device = ctx.getDevice();
-            if (device) {
-                m_TextureHandle = device->createTexture(desc);
-
-            }
+    // Get or create cached texture if we don't have a valid handle
+    if (!m_TextureHandle.isValid() && !currentPath.empty()) {
+        IGfxDevice* device = ctx.getDevice();
+        if (device) {
+            m_TextureHandle = GetOrCreateSprite3DTexture(device, currentPath, m_TextureAsset);
         }
     }
 
     if (!m_TextureHandle.isValid()) {
-
         return;
     }
 

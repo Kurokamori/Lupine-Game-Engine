@@ -1,0 +1,77 @@
+{
+  "lupine_theme": 1,
+  "name": "Default",
+  "extends": "",
+  "palette": "res://default.palette",
+  "variables": {
+    "radius_md": 6.0,
+    "border_thin": 1.0
+  },
+  "font_roles": {},
+  "types": {
+    "Panel": {
+      "colors": {
+        "background": { "bind": "palette:surface" },
+        "border_color": { "bind": "palette:border" }
+      },
+      "constants": {
+        "corner_radius": { "bind": "var:radius_md" }
+      }
+    },
+    "Container": {
+      "colors": {
+        "background": { "bind": "palette:background" },
+        "border_color": { "bind": "palette:border" }
+      }
+    },
+    "Button": {
+      "colors": {
+        "background": { "bind": "palette:accent" },
+        "border_color": { "bind": "palette:accent", "op": "darken", "amount": 0.15 },
+        "font_color": { "bind": "palette:text_on_accent" }
+      },
+      "constants": {
+        "corner_radius": { "bind": "var:radius_md" }
+      }
+    },
+    "Label": {
+      "colors": {
+        "font_color": { "bind": "palette:text" }
+      }
+    },
+    "LineEdit": {
+      "colors": {
+        "background": { "bind": "palette:surface" },
+        "border_color": { "bind": "palette:border" },
+        "font_color": { "bind": "palette:text" },
+        "placeholder_color": { "bind": "palette:text_muted" },
+        "selection_color": { "bind": "palette:selection" },
+        "caret_color": { "bind": "palette:text" }
+      },
+      "constants": {
+        "corner_radius": { "bind": "var:radius_md" },
+        "border_width": { "bind": "var:border_thin" }
+      }
+    },
+    "ItemList": {
+      "colors": {
+        "background": { "bind": "palette:surface" },
+        "border_color": { "bind": "palette:border" },
+        "font_color": { "bind": "palette:text" },
+        "selection_color": { "bind": "palette:selection" },
+        "hover_color": { "bind": "palette:surface_hover" }
+      }
+    },
+    "ProgressBar": {
+      "colors": {
+        "background": { "bind": "palette:surface" },
+        "fill_color": { "bind": "palette:accent" },
+        "border_color": { "bind": "palette:border" },
+        "font_color": { "bind": "palette:text" }
+      },
+      "constants": {
+        "corner_radius": { "bind": "var:radius_md" }
+      }
+    }
+  }
+}

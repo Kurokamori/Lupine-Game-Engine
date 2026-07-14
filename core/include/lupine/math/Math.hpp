@@ -29,6 +29,7 @@
 #include "OBB.hpp"
 #include "Ray.hpp"
 #include "Plane.hpp"
+#include "Rect.hpp"
 
 // Camera utilities
 #include "Camera.hpp"

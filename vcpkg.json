@@ -3,55 +3,60 @@
   "version": "1.0.0",
   "description": "Lupine Game Engine with Python Editor and C++ Runtime",
   "dependencies": [
+    "assimp",
+    "box2d",
+    "bullet3",
+    "enet",
+    "entt",
     {
-      "name": "sdl2",
+      "name": "ffmpeg",
       "default-features": false,
-      "features": ["vulkan"]
+      "features": [
+        "avcodec",
+        "avformat",
+        "swresample",
+        "swscale"
+      ]
     },
+    "fmt",
     {
-      "name": "pybind11",
-      "host": true
+      "name": "ixwebsocket",
+      "default-features": false
     },
-    "nlohmann-json",
-    "vulkan",
-    "vulkan-headers",
-    "opengl",
     "glad",
     "glew",
     "glfw3",
     "glm",
-    "assimp",
-    "stb",
-    "fmt",
-    "spdlog",
-    "entt",
-    "zlib",
-    "polyclipping",
-    "box2d",
-    "bullet3",
+    "glslang",
+    "libiconv",
     "lua",
+    "miniaudio",
+    "nlohmann-json",
+    "opengl",
+    "polyclipping",
+    "pybind11",
+    "sdl2",
     "sol2",
-    "miniaudio"
-  ],
-  "overrides": [
-    {
-      "name": "sdl2",
-      "version": "2.30.9"
-    }
+    "spdlog",
+    "stb",
+    "directx-dxc",
+    "vulkan",
+    "vulkan-headers",
+    "zlib"
   ],
   "features": {
+    "opengl": {
+      "description": "Enable OpenGL rendering backend",
+      "dependencies": [
+        "glad",
+        "opengl"
+      ]
+    },
     "vulkan": {
       "description": "Enable Vulkan rendering backend",
       "dependencies": [
         "vulkan",
         "vulkan-headers"
-      ]
-    },
-    "opengl": {
-      "description": "Enable OpenGL rendering backend",
-      "dependencies": [
-        "opengl",
-        "glad"
       ]
     }
   }

@@ -4,6 +4,7 @@
 #include "lupine/rendering/RenderWorld.hpp"
 #include "lupine/rendering/ResourceHandles.hpp"
 #include "lupine/rendering/PBRMaterial.hpp"
+#include "lupine/rendering/Material.hpp"
 #include "lupine/math/Color.hpp"
 #include "lupine/math/AABB.hpp"
 #include "lupine/asset/ImageAsset.hpp"
@@ -11,12 +12,16 @@
 #include <optional>
 #include <vector>
 #include <string>
+#include <unordered_map>
 
 namespace lupine {
 namespace components {
 
 using namespace core;
 using namespace math;
+
+// Use ShaderType from PBRMaterial.hpp
+using lupine::ShaderType;
 
 /**
  * Material slot for SkeletalMesh3D
@@ -26,6 +31,35 @@ struct SkeletalMaterialSlot {
     std::string name;                           // Material name from model
     uint32_t materialIndex;                     // Index in model's material array
     bool enableOverride = false;                // Whether to use override or model's material
+
+    // Shader selection
+    ShaderType shaderType = ShaderType::PBR;
+    std::string customVertShaderPath;
+    std::string customFragShaderPath;
+    std::string customLshShaderPath;            // Custom .lsh shader (skeletal layout)
+
+    // Toon shader specific parameters
+    float shadowBands = 3.0f;
+    float shadowThreshold = 0.5f;
+    float shadowSoftness = 0.02f;
+    float specularBands = 2.0f;
+    float specularPower = 32.0f;
+    float rimIntensity = 0.0f;
+    float rimPower = 3.0f;
+
+    // Stylized shader specific parameters (legacy - kept for backward compatibility)
+    float stylizedShadowSoftness = 0.3f;        // How soft the shadow transitions are
+    float stylizedSpecularSoftness = 0.15f;     // How soft the specular edge is
+    float stylizedShadowBrightness = 0.4f;      // How bright shadows are (0-1)
+    float stylizedShadowWarmth = 0.5f;          // Warm/cool color shift in shadows (0-1)
+    float stylizedSpecularIntensity = 0.5f;     // Specular highlight intensity
+    float stylizedHalfLambertPower = 1.5f;      // Controls wrap-around lighting softness
+
+    // Generic shader parameters - uniform name to value mapping
+    // This allows any shader to define custom parameters without C++ code changes
+    // Keys are uniform names (e.g., "u_GlowParams", "u_StylizedParams")
+    // Values can be float, Vec2, Vec3, Vec4, Color, int, bool
+    std::unordered_map<std::string, MaterialPropertyValue> shaderParams;
 
     // PBR Material override properties
     Color albedoColor = Color::White();
@@ -91,6 +125,9 @@ public:
 
     // Property change notification
     void OnPropertyChanged(const std::string& propertyName, const nlohmann::json& newValue) override;
+
+    // Asset hot-reload support
+    bool OnAssetFileChanged(const std::string& changedPath, const std::string& resolvedChangedPath) override;
 
     // ===== Model Loading =====
 
@@ -217,6 +254,7 @@ public:
     SpatialType getSpatialType() const override { return SpatialType::World3D; }
     bool IntersectRay(const math::Ray& ray, float& outDistance) const override;
     math::OBB getOrientedBounds() const override;
+    void prepareGPUResources(IGfxDevice* device) override;
 
 private:
     // Model asset
@@ -260,9 +298,15 @@ private:
     bool m_MeshesNeedUpload;
 
     /**
-     * Upload meshes to GPU if needed
+     * Upload meshes to GPU if needed (using RenderContext)
      */
     void UploadMeshesToGPU(RenderContext& ctx);
+
+    /**
+     * Upload meshes to GPU if needed (using device directly)
+     * Used for pre-upload optimization to avoid first-frame stutter
+     */
+    void UploadMeshesToGPU(IGfxDevice* device);
 
     /**
      * Upload material textures to GPU for a specific slot

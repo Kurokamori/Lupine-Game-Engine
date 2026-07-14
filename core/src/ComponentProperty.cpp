@@ -19,10 +19,14 @@ void ComponentProperty::InitializeFromDefault() {
             case core::PropertyValueType::String:
             case core::PropertyValueType::NodePath:
             case core::PropertyValueType::ScenePath:
+            case core::PropertyValueType::Resource:
                 m_CurrentValue = "";
                 break;
             case core::PropertyValueType::Bool:
                 m_CurrentValue = false;
+                break;
+            case core::PropertyValueType::Double:
+                m_CurrentValue = 0.0;
                 break;
             case core::PropertyValueType::Vec2:
                 m_CurrentValue = nlohmann::json{{"x", 0.0f}, {"y", 0.0f}};
@@ -33,8 +37,23 @@ void ComponentProperty::InitializeFromDefault() {
             case core::PropertyValueType::Vec4:
                 m_CurrentValue = nlohmann::json{{"x", 0.0f}, {"y", 0.0f}, {"z", 0.0f}, {"w", 0.0f}};
                 break;
+            case core::PropertyValueType::Quat:
+                m_CurrentValue = nlohmann::json{{"w", 1.0f}, {"x", 0.0f}, {"y", 0.0f}, {"z", 0.0f}};
+                break;
+            case core::PropertyValueType::Rect:
+                m_CurrentValue = nlohmann::json{{"x", 0.0f}, {"y", 0.0f}, {"w", 0.0f}, {"h", 0.0f}};
+                break;
             case core::PropertyValueType::Color:
                 m_CurrentValue = nlohmann::json{{"r", 1.0f}, {"g", 1.0f}, {"b", 1.0f}, {"a", 1.0f}};
+                break;
+            case core::PropertyValueType::StringArray:
+            case core::PropertyValueType::IntArray:
+            case core::PropertyValueType::FloatArray:
+            case core::PropertyValueType::Array:
+                m_CurrentValue = nlohmann::json::array();
+                break;
+            case core::PropertyValueType::Dictionary:
+                m_CurrentValue = nlohmann::json::object();
                 break;
         }
     }

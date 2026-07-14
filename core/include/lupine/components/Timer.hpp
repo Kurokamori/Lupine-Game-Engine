@@ -34,6 +34,7 @@ public:
     // ISerializable interface
     std::string GetTypeName() const override { return "Timer"; }
     void DefineProperties() override;
+    void DefineSignals() override;
 
     // Lifecycle hooks
     void OnAwake() override;
@@ -84,7 +85,16 @@ public:
     // Loop (restart automatically when done)
     bool GetLoop() const;
     void SetLoop(bool loop);
-    
+
+    // Repeat count (maximum number of times the timer fires while looping).
+    // -1 means repeat indefinitely (the default); any value >= 1 fires that many
+    // times in total and then stops. Ignored when looping is disabled (one-shot).
+    int GetRepeatCount() const;
+    void SetRepeatCount(int repeatCount);
+
+    // Number of times the timer has fired since the last Start()/Reset().
+    int GetFireCount() const { return m_FireCount; }
+
     // Auto-start (starts when component becomes active)
     bool GetAutoStart() const;
     void SetAutoStart(bool autoStart);
@@ -118,9 +128,13 @@ private:
 
     // Callback for timeout event
     TimeoutCallback m_TimeoutCallback;
-    
+
     // Internal flag to prevent multiple timeout triggers in same frame
     bool m_HasTriggered;
+
+    // Runtime count of timeouts fired since the last Start()/Reset(). Used to
+    // honour a finite repeat count without serializing transient state.
+    int m_FireCount;
 };
 
 } // namespace components

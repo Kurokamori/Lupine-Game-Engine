@@ -2,19 +2,110 @@
 #include "lupine/core/Node.hpp"
 #include "lupine/rendering/RenderContext.hpp"
 #include "lupine/rendering/RenderWorld.hpp"
+#include "lupine/rendering/TextureCache.hpp"
 #include "lupine/rendering/gfx/IGfxDevice.hpp"
+#include "lupine/rendering/TextureUpload.hpp"
 #include "lupine/rendering/gfx/GfxDescriptors.hpp"
 #include "lupine/rendering/Mesh.hpp"
+#include "lupine/asset/AssetDatabase.hpp"
 #include "lupine/logger/Logger.hpp"
 #include "lupine/platform/Path.hpp"
 #include "lupine/platform/FileSystem.hpp"
+#include "lupine/platform/PackFile.hpp"
 #include <algorithm>
+#include <unordered_map>
+#include <mutex>
 
 namespace lupine {
 namespace components {
 
 using namespace core;
 using namespace math;
+
+// Static texture cache to share textures across all StaticMesh3D instances
+// Use lazy initialization to avoid static initialization order issues
+static std::unordered_map<std::string, TextureHandle>& GetStaticMesh3DTextureCache() {
+    static std::unordered_map<std::string, TextureHandle> s_TextureCache;
+    return s_TextureCache;
+}
+
+static std::mutex& GetStaticMesh3DTextureCacheMutex() {
+    static std::mutex s_TextureCacheMutex;
+    return s_TextureCacheMutex;
+}
+
+// Lazy registration with TextureCache system for hot-reloading
+static void EnsureStaticMesh3DCacheRegistered() {
+    static bool registered = false;
+    if (registered) return;
+    registered = true;
+
+    rendering::TextureCache::RegisterCache(
+        "StaticMesh3D",
+        [](const std::string& path) -> bool {
+            std::lock_guard<std::mutex> lock(GetStaticMesh3DTextureCacheMutex());
+            auto it = GetStaticMesh3DTextureCache().find(path);
+            if (it != GetStaticMesh3DTextureCache().end()) {
+                // Don't destroy - let the GfxDevice handle cleanup
+                // Just remove from cache so it gets reloaded
+                GetStaticMesh3DTextureCache().erase(it);
+                return true;
+            }
+            return false;
+        },
+        []() {
+            std::lock_guard<std::mutex> lock(GetStaticMesh3DTextureCacheMutex());
+            GetStaticMesh3DTextureCache().clear();
+        }
+    );
+}
+
+// Helper to get or create a cached texture
+static TextureHandle GetOrCreateCachedTexture(
+    IGfxDevice* device,
+    const std::string& path,
+    asset::AssetRef<asset::ImageAsset>& asset,
+    TextureFormat format)
+{
+    if (path.empty() || !device) {
+        return TextureHandle();
+    }
+
+    // Ensure cache is registered with TextureCache system (lazy init)
+    EnsureStaticMesh3DCacheRegistered();
+
+    // Check cache first
+    {
+        std::lock_guard<std::mutex> lock(GetStaticMesh3DTextureCacheMutex());
+        auto it = GetStaticMesh3DTextureCache().find(path);
+        if (it != GetStaticMesh3DTextureCache().end() && it->second.isValid()) {
+            return it->second;
+        }
+    }
+
+    // Not in cache, need to load
+    if (!asset.IsValid()) {
+        asset = asset::AssetRef<asset::ImageAsset>(new asset::ImageAsset());
+        if (!asset->LoadFromFile(path)) {
+            return TextureHandle();
+        }
+    }
+
+    if (!asset->IsLoaded()) {
+        return TextureHandle();
+    }
+
+    // Create texture
+    TextureHandle handle = lupine::CreateTexture2DFromImage(device, *asset, format);
+
+    // Cache it
+    {
+        std::lock_guard<std::mutex> lock(GetStaticMesh3DTextureCacheMutex());
+        GetStaticMesh3DTextureCache()[path] = handle;
+    }
+
+    return handle;
+}
 
 StaticMesh3D::StaticMesh3D()
     : Component("StaticMesh3D")
@@ -170,6 +261,85 @@ void StaticMesh3D::UploadMeshesToGPU(RenderContext& ctx) {
     m_MeshesNeedUpload = false;
 }
 
+void StaticMesh3D::UploadMeshesToGPU(IGfxDevice* device) {
+    if (!m_MeshesNeedUpload || !m_ModelAsset.IsValid() || !device) {
+        return;
+    }
+
+    if (!m_MeshHandles.empty()) {
+        for (auto& handle : m_MeshHandles) {
+            if (handle.isValid()) {
+                device->destroyMesh(handle);
+            }
+        }
+        m_MeshHandles.clear();
+    }
+
+    const auto& meshes = m_ModelAsset->GetMeshes();
+    m_MeshHandles.reserve(meshes.size());
+
+    for (const auto& assetMesh : meshes) {
+        MeshData meshData;
+
+        meshData.vertices.reserve(assetMesh.vertices.size());
+        for (const auto& assetVertex : assetMesh.vertices) {
+            Vertex vertex;
+            vertex.position = assetVertex.position;
+            vertex.normal = assetVertex.normal;
+            vertex.texCoord = assetVertex.texCoord;
+            vertex.tangent = assetVertex.tangent;
+            vertex.color = Vec4(1.0f, 1.0f, 1.0f, 1.0f);
+            meshData.vertices.push_back(vertex);
+        }
+
+        meshData.indices = assetMesh.indices;
+        meshData.bounds = AABB(assetMesh.boundsMin, assetMesh.boundsMax);
+
+        MeshHandle handle = device->createMesh(meshData);
+        m_MeshHandles.push_back(handle);
+    }
+
+    m_MeshesNeedUpload = false;
+}
+
+void StaticMesh3D::prepareGPUResources(IGfxDevice* device) {
+    if (!device) {
+        return;
+    }
+
+    // Upload meshes to GPU if needed
+    if (m_MeshesNeedUpload && m_ModelAsset.IsValid()) {
+        UploadMeshesToGPU(device);
+    }
+
+    // Pre-load and upload textures for all material slots (using cache for sharing)
+    for (auto& slot : m_MaterialSlots) {
+        // Albedo texture (use cache to share across instances)
+        if (!slot.albedoTexturePath.empty() && !slot.albedoTextureHandle.isValid()) {
+            slot.albedoTextureHandle = GetOrCreateCachedTexture(
+                device, slot.albedoTexturePath, slot.albedoTextureAsset, TextureFormat::RGBA8_SRGB);
+        }
+
+        // Metallic roughness texture
+        if (!slot.metallicRoughnessTexturePath.empty() && !slot.metallicRoughnessTextureHandle.isValid()) {
+            slot.metallicRoughnessTextureHandle = GetOrCreateCachedTexture(
+                device, slot.metallicRoughnessTexturePath, slot.metallicRoughnessTextureAsset, TextureFormat::RGBA8_UNORM);
+        }
+
+        // Normal texture
+        if (!slot.normalTexturePath.empty() && !slot.normalTextureHandle.isValid()) {
+            slot.normalTextureHandle = GetOrCreateCachedTexture(
+                device, slot.normalTexturePath, slot.normalTextureAsset, TextureFormat::RGBA8_UNORM);
+        }
+
+        // Emissive texture
+        if (!slot.emissiveTexturePath.empty() && !slot.emissiveTextureHandle.isValid()) {
+            slot.emissiveTextureHandle = GetOrCreateCachedTexture(
+                device, slot.emissiveTexturePath, slot.emissiveTextureAsset, TextureFormat::RGBA8_SRGB);
+        }
+    }
+}
+
 bool StaticMesh3D::LoadTexture(const std::string& filepath, asset::AssetRef<asset::ImageAsset>& outAsset) {
     if (filepath.empty()) {
         return false;
@@ -262,24 +432,68 @@ std::string StaticMesh3D::ResolveTexturePath(const std::string& texturePath, con
         return "";
     }
 
+    // Embedded texture reference - pass through
     if (texturePath[0] == '*') {
         return texturePath;
     }
 
+    // If it's already a res:// path, verify it exists and return as-is
+    if (texturePath.size() >= 6 && texturePath.substr(0, 6) == "res://") {
+        auto& packFS = platform::PackFileSystem::Instance();
+        if (packFS.isPackMode()) {
+            // In pack mode, just check if it exists in pack
+            if (packFS.exists(texturePath)) {
+                return texturePath;
+            }
+        } else {
+            // In editor mode, check via AssetDatabase
+            auto& assetDb = asset::AssetDatabase::GetInstance();
+            if (assetDb.IsInitialized()) {
+                std::string physicalPath = assetDb.ResolveAsset(texturePath);
+                if (platform::FileSystem::Exists(physicalPath)) {
+                    return texturePath;
+                }
+            }
+        }
+        // Path doesn't exist but it's a res:// path, return it anyway for error handling
+        return texturePath;
+    }
+
+    // Check if running from pack file - resolve relative path
+    auto& packFS = platform::PackFileSystem::Instance();
+    if (packFS.isPackMode()) {
+        // Resolve relative to model directory
+        std::string resolvedPath = modelDir + texturePath;
+        std::replace(resolvedPath.begin(), resolvedPath.end(), '\\', '/');
+        if (packFS.exists(resolvedPath)) {
+            return resolvedPath;
+        }
+    }
+
     std::string filename = platform::Path::GetFilename(texturePath);
 
+    // For absolute paths, try to convert to res:// format
     if (platform::Path::IsAbsolute(texturePath)) {
-
+        auto& assetDb = asset::AssetDatabase::GetInstance();
+        if (assetDb.IsInitialized()) {
+            std::string resPath = assetDb.ToResourcePath(texturePath);
+            if (!resPath.empty() && platform::FileSystem::Exists(texturePath)) {
+                return resPath;
+            }
+        }
+        // If conversion failed but file exists, return as-is (backwards compat)
         if (platform::FileSystem::Exists(texturePath)) {
             return texturePath;
         }
-
     }
 
     std::string resolvedPath = platform::Path::Join(modelDir, texturePath);
 
     if (platform::FileSystem::Exists(resolvedPath)) {
-        return resolvedPath;
+        // Convert to res:// if possible
+        auto& assetDb = asset::AssetDatabase::GetInstance();
+        std::string resPath = assetDb.ToResourcePath(resolvedPath);
+        return resPath.empty() ? resolvedPath : resPath;
     }
 
     std::vector<std::string> searchDirs = {
@@ -310,8 +524,10 @@ std::string StaticMesh3D::ResolveTexturePath(const std::string& texturePath, con
         }
 
         if (platform::FileSystem::Exists(testPath)) {
-
-            return testPath;
+            // Convert to res:// if possible
+            auto& assetDb = asset::AssetDatabase::GetInstance();
+            std::string resPath = assetDb.ToResourcePath(testPath);
+            return resPath.empty() ? testPath : resPath;
         }
     }
 
@@ -329,46 +545,22 @@ void StaticMesh3D::UploadMaterialSlotTextures(RenderContext& ctx, MaterialSlot& 
     }
 
     if (slot.albedoTextureAsset && slot.albedoTextureAsset->IsLoaded() && !slot.albedoTextureHandle.isValid()) {
-        TextureDesc desc;
-        desc.width = slot.albedoTextureAsset->GetWidth();
-        desc.height = slot.albedoTextureAsset->GetHeight();
-        desc.format = TextureFormat::RGBA8_SRGB;
-        desc.usage = TextureUsage::Sampled;
-        desc.initialData = slot.albedoTextureAsset->GetData();
-        slot.albedoTextureHandle = device->createTexture(desc);
+        slot.albedoTextureHandle = lupine::CreateTexture2DFromImage(device, *slot.albedoTextureAsset, TextureFormat::RGBA8_SRGB);
 
     }
 
     if (slot.metallicRoughnessTextureAsset && slot.metallicRoughnessTextureAsset->IsLoaded() && !slot.metallicRoughnessTextureHandle.isValid()) {
-        TextureDesc desc;
-        desc.width = slot.metallicRoughnessTextureAsset->GetWidth();
-        desc.height = slot.metallicRoughnessTextureAsset->GetHeight();
-        desc.format = TextureFormat::RGBA8_UNORM;
-        desc.usage = TextureUsage::Sampled;
-        desc.initialData = slot.metallicRoughnessTextureAsset->GetData();
-        slot.metallicRoughnessTextureHandle = device->createTexture(desc);
+        slot.metallicRoughnessTextureHandle = lupine::CreateTexture2DFromImage(device, *slot.metallicRoughnessTextureAsset, TextureFormat::RGBA8_UNORM);
 
     }
 
     if (slot.normalTextureAsset && slot.normalTextureAsset->IsLoaded() && !slot.normalTextureHandle.isValid()) {
-        TextureDesc desc;
-        desc.width = slot.normalTextureAsset->GetWidth();
-        desc.height = slot.normalTextureAsset->GetHeight();
-        desc.format = TextureFormat::RGBA8_UNORM;
-        desc.usage = TextureUsage::Sampled;
-        desc.initialData = slot.normalTextureAsset->GetData();
-        slot.normalTextureHandle = device->createTexture(desc);
+        slot.normalTextureHandle = lupine::CreateTexture2DFromImage(device, *slot.normalTextureAsset, TextureFormat::RGBA8_UNORM);
 
     }
 
     if (slot.emissiveTextureAsset && slot.emissiveTextureAsset->IsLoaded() && !slot.emissiveTextureHandle.isValid()) {
-        TextureDesc desc;
-        desc.width = slot.emissiveTextureAsset->GetWidth();
-        desc.height = slot.emissiveTextureAsset->GetHeight();
-        desc.format = TextureFormat::RGBA8_SRGB;
-        desc.usage = TextureUsage::Sampled;
-        desc.initialData = slot.emissiveTextureAsset->GetData();
-        slot.emissiveTextureHandle = device->createTexture(desc);
+        slot.emissiveTextureHandle = lupine::CreateTexture2DFromImage(device, *slot.emissiveTextureAsset, TextureFormat::RGBA8_SRGB);
 
     }
 
@@ -381,81 +573,25 @@ void StaticMesh3D::LoadAndUploadMaterialTextures(RenderContext& ctx, MaterialSlo
         return;
     }
 
+    // Use texture cache to share textures across instances
     if (!slot.albedoTexturePath.empty() && !slot.albedoTextureHandle.isValid()) {
-        if (!slot.albedoTextureAsset.IsValid()) {
-
-            if (LoadTexture(slot.albedoTexturePath, slot.albedoTextureAsset)) {
-
-            }
-        }
-
-        if (slot.albedoTextureAsset.IsValid() && slot.albedoTextureAsset->IsLoaded()) {
-            TextureDesc desc;
-            desc.width = slot.albedoTextureAsset->GetWidth();
-            desc.height = slot.albedoTextureAsset->GetHeight();
-            desc.format = TextureFormat::RGBA8_SRGB;
-            desc.usage = TextureUsage::Sampled;
-            desc.initialData = slot.albedoTextureAsset->GetData();
-            slot.albedoTextureHandle = device->createTexture(desc);
-
-        }
+        slot.albedoTextureHandle = GetOrCreateCachedTexture(
+            device, slot.albedoTexturePath, slot.albedoTextureAsset, TextureFormat::RGBA8_SRGB);
     }
 
     if (!slot.metallicRoughnessTexturePath.empty() && !slot.metallicRoughnessTextureHandle.isValid()) {
-        if (!slot.metallicRoughnessTextureAsset.IsValid()) {
-            if (LoadTexture(slot.metallicRoughnessTexturePath, slot.metallicRoughnessTextureAsset)) {
-
-            }
-        }
-
-        if (slot.metallicRoughnessTextureAsset.IsValid() && slot.metallicRoughnessTextureAsset->IsLoaded()) {
-            TextureDesc desc;
-            desc.width = slot.metallicRoughnessTextureAsset->GetWidth();
-            desc.height = slot.metallicRoughnessTextureAsset->GetHeight();
-            desc.format = TextureFormat::RGBA8_UNORM;
-            desc.usage = TextureUsage::Sampled;
-            desc.initialData = slot.metallicRoughnessTextureAsset->GetData();
-            slot.metallicRoughnessTextureHandle = device->createTexture(desc);
-
-        }
+        slot.metallicRoughnessTextureHandle = GetOrCreateCachedTexture(
+            device, slot.metallicRoughnessTexturePath, slot.metallicRoughnessTextureAsset, TextureFormat::RGBA8_UNORM);
     }
 
     if (!slot.normalTexturePath.empty() && !slot.normalTextureHandle.isValid()) {
-        if (!slot.normalTextureAsset.IsValid()) {
-            if (LoadTexture(slot.normalTexturePath, slot.normalTextureAsset)) {
-
-            }
-        }
-
-        if (slot.normalTextureAsset.IsValid() && slot.normalTextureAsset->IsLoaded()) {
-            TextureDesc desc;
-            desc.width = slot.normalTextureAsset->GetWidth();
-            desc.height = slot.normalTextureAsset->GetHeight();
-            desc.format = TextureFormat::RGBA8_UNORM;
-            desc.usage = TextureUsage::Sampled;
-            desc.initialData = slot.normalTextureAsset->GetData();
-            slot.normalTextureHandle = device->createTexture(desc);
-
-        }
+        slot.normalTextureHandle = GetOrCreateCachedTexture(
+            device, slot.normalTexturePath, slot.normalTextureAsset, TextureFormat::RGBA8_UNORM);
     }
 
     if (!slot.emissiveTexturePath.empty() && !slot.emissiveTextureHandle.isValid()) {
-        if (!slot.emissiveTextureAsset.IsValid()) {
-            if (LoadTexture(slot.emissiveTexturePath, slot.emissiveTextureAsset)) {
-
-            }
-        }
-
-        if (slot.emissiveTextureAsset.IsValid() && slot.emissiveTextureAsset->IsLoaded()) {
-            TextureDesc desc;
-            desc.width = slot.emissiveTextureAsset->GetWidth();
-            desc.height = slot.emissiveTextureAsset->GetHeight();
-            desc.format = TextureFormat::RGBA8_SRGB;
-            desc.usage = TextureUsage::Sampled;
-            desc.initialData = slot.emissiveTextureAsset->GetData();
-            slot.emissiveTextureHandle = device->createTexture(desc);
-
-        }
+        slot.emissiveTextureHandle = GetOrCreateCachedTexture(
+            device, slot.emissiveTexturePath, slot.emissiveTextureAsset, TextureFormat::RGBA8_SRGB);
     }
 }
 
@@ -515,12 +651,6 @@ void StaticMesh3D::buildDrawCommands(RenderContext& ctx) {
 
     Mat4 transform = node3D->GetGlobalTransformMatrix();
 
-    MaterialHandle defaultMaterial = ctx.getDefaultPBRMaterial();
-    if (!defaultMaterial.isValid()) {
-
-        return;
-    }
-
     const auto& meshes = m_ModelAsset->GetMeshes();
     const auto& materials = m_ModelAsset->GetMaterials();
 
@@ -544,16 +674,92 @@ void StaticMesh3D::buildDrawCommands(RenderContext& ctx) {
             }
         }
 
-        if (slot && slot->enableOverride) {
+        // Select material based on shader type using the material registry
+        ShaderType shaderType = slot ? slot->shaderType : ShaderType::PBR;
+        MaterialHandle selectedMaterial;
+
+        // A custom .lsh shader takes precedence: translated at runtime for the active
+        // backend with the 3D-mesh vertex layout; its optional #render_mode drives the
+        // pipeline blend/cull/depth state (opaque default by 3=opaque).
+        const bool hasLsh = (slot && !slot->customLshShaderPath.empty());
+        if (hasLsh) {
+            selectedMaterial = ctx.getOrCreateLshMaterial(
+                slot->customLshShaderPath, 3 /*opaque default*/, LshMaterialLayout::Mesh3D);
+        } else if (shaderType == ShaderType::Custom && slot &&
+            (!slot->customVertShaderPath.empty() || !slot->customFragShaderPath.empty())) {
+            // Handle custom shaders (supports single-file shaders like HLSL)
+            selectedMaterial = ctx.getOrCreateCustomMaterial(
+                slot->customVertShaderPath,
+                slot->customFragShaderPath,
+                false  // not skeletal
+            );
+        } else {
+            selectedMaterial = ctx.getMaterial(shaderType, false);  // false = not skeletal
+        }
+
+        if (!selectedMaterial.isValid()) {
+            continue;
+        }
+
+        if (slot && (slot->enableOverride || hasLsh)) {
 
             useOverride = true;
 
             UploadMaterialSlotTextures(ctx, *slot);
 
             overrides.setColor("u_AlbedoColor", slot->albedoColor);
-            overrides.setVec4("u_MaterialParams1", Vec4(slot->metallic, slot->roughness, slot->normalScale, slot->emissiveStrength));
             overrides.setColor("u_EmissiveColor", slot->emissiveColor);
             overrides.setFloat("u_AlphaCutoff", slot->alphaCutoff);
+
+            // Set ALL material uniforms - shaders use what they need and ignore the rest
+            // This approach supports custom shaders without requiring per-shader-type code paths
+
+            // PBR uniforms: u_MaterialParams1 = metallic, roughness, normalScale, emissiveStrength
+            overrides.setVec4("u_MaterialParams1", Vec4(slot->metallic, slot->roughness, slot->normalScale, slot->emissiveStrength));
+            // PBR uniforms: u_MaterialParams2 = alphaCutoff, aoStrength, heightScale, unused
+            overrides.setVec4("u_MaterialParams2", Vec4(slot->alphaCutoff, 1.0f, 1.0f, 0.0f));
+
+            // Toon uniforms: u_ToonMaterialParams = shadowBands, specularBands, normalScale, emissiveStrength
+            overrides.setVec4("u_ToonMaterialParams", Vec4(slot->shadowBands, slot->specularBands, slot->normalScale, slot->emissiveStrength));
+            // Toon uniforms: u_ToonMaterialParams2 = alphaCutoff, rimPower, rimIntensity, specularPower
+            overrides.setVec4("u_ToonMaterialParams2", Vec4(slot->alphaCutoff, slot->rimPower, slot->rimIntensity, slot->specularPower));
+            // Toon uniforms: u_ToonParams = shadowThreshold, shadowSoftness, specularThreshold, specularSoftness
+            overrides.setVec4("u_ToonParams", Vec4(slot->shadowThreshold, slot->shadowSoftness, slot->shadowThreshold, slot->shadowSoftness));
+
+            // Stylized uniforms: u_MaterialParams1 = shadowSoftness, specularSoftness, normalScale, emissiveStrength
+            if (shaderType == ShaderType::Stylized) {
+                overrides.setVec4("u_MaterialParams1", Vec4(slot->stylizedShadowSoftness, slot->stylizedSpecularSoftness, slot->normalScale, slot->emissiveStrength));
+                // u_MaterialParams2 = alphaCutoff, rimPower, rimIntensity, specularPower (shared with toon)
+                overrides.setVec4("u_MaterialParams2", Vec4(slot->alphaCutoff, slot->rimPower, slot->rimIntensity, slot->specularPower));
+                // u_StylizedParams = shadowBrightness, shadowWarmth, specularIntensity, halfLambertPower
+                overrides.setVec4("u_StylizedParams", Vec4(slot->stylizedShadowBrightness, slot->stylizedShadowWarmth, slot->stylizedSpecularIntensity, slot->stylizedHalfLambertPower));
+            }
+
+            // Apply generic shader parameters from shaderParams map
+            // This allows custom shaders to receive their parameters without C++ code changes
+            for (const auto& [uniformName, value] : slot->shaderParams) {
+                std::visit([&overrides, &uniformName](auto&& arg) {
+                    using T = std::decay_t<decltype(arg)>;
+                    if constexpr (std::is_same_v<T, float>) {
+                        overrides.setFloat(uniformName, arg);
+                    } else if constexpr (std::is_same_v<T, int>) {
+                        overrides.setInt(uniformName, arg);
+                    } else if constexpr (std::is_same_v<T, bool>) {
+                        overrides.setBool(uniformName, arg);
+                    } else if constexpr (std::is_same_v<T, Vec2>) {
+                        overrides.setVec2(uniformName, arg);
+                    } else if constexpr (std::is_same_v<T, Vec3>) {
+                        overrides.setVec3(uniformName, arg);
+                    } else if constexpr (std::is_same_v<T, Vec4>) {
+                        overrides.setVec4(uniformName, arg);
+                    } else if constexpr (std::is_same_v<T, Color>) {
+                        overrides.setColor(uniformName, arg);
+                    } else if constexpr (std::is_same_v<T, TextureHandle>) {
+                        overrides.setTexture(uniformName, arg);
+                    }
+                    // Mat4 arrays handled separately if needed
+                }, value);
+            }
 
             Vec4 textureFlags(
                 slot->albedoTextureHandle.isValid() ? 1.0f : 0.0f,
@@ -563,27 +769,58 @@ void StaticMesh3D::buildDrawCommands(RenderContext& ctx) {
             );
             overrides.setVec4("u_TextureFlags", textureFlags);
 
-            if (slot->albedoTextureHandle.isValid()) {
-                overrides.setTexture("u_AlbedoTexture", slot->albedoTextureHandle);
-            }
-            if (slot->metallicRoughnessTextureHandle.isValid()) {
-                overrides.setTexture("u_MetallicRoughnessTexture", slot->metallicRoughnessTextureHandle);
-            }
-            if (slot->normalTextureHandle.isValid()) {
-                overrides.setTexture("u_NormalTexture", slot->normalTextureHandle);
-            }
-            if (slot->emissiveTextureHandle.isValid()) {
-                overrides.setTexture("u_EmissiveTexture", slot->emissiveTextureHandle);
-            }
+            // Always bind textures (valid or not) to prevent stale texture bleeding
+            overrides.setTexture("u_AlbedoTexture", slot->albedoTextureHandle);
+            overrides.setTexture("u_MetallicRoughnessTexture", slot->metallicRoughnessTextureHandle);
+            overrides.setTexture("u_NormalTexture", slot->normalTextureHandle);
+            overrides.setTexture("u_EmissiveTexture", slot->emissiveTextureHandle);
 
         } else if (materialIndex < materials.size() && slot) {
 
             const auto& material = materials[materialIndex];
 
             overrides.setColor("u_AlbedoColor", Color(material.albedo.x, material.albedo.y, material.albedo.z, material.opacity));
-            overrides.setVec4("u_MaterialParams1", Vec4(material.metallic, material.roughness, 1.0f, 1.0f));
             overrides.setColor("u_EmissiveColor", Color(material.emissive.x, material.emissive.y, material.emissive.z, 1.0f));
             overrides.setFloat("u_AlphaCutoff", 0.5f);
+
+            // Set ALL material uniforms - shaders use what they need and ignore the rest
+            // This approach supports custom shaders without requiring per-shader-type code paths
+
+            // PBR uniforms: u_MaterialParams1 = metallic, roughness, normalScale, emissiveStrength
+            overrides.setVec4("u_MaterialParams1", Vec4(material.metallic, material.roughness, 1.0f, 1.0f));
+            // PBR uniforms: u_MaterialParams2 = alphaCutoff, aoStrength, heightScale, unused
+            overrides.setVec4("u_MaterialParams2", Vec4(0.5f, 1.0f, 1.0f, 0.0f));
+
+            // Toon uniforms: u_ToonMaterialParams = shadowBands, specularBands, normalScale, emissiveStrength
+            overrides.setVec4("u_ToonMaterialParams", Vec4(slot->shadowBands, slot->specularBands, 1.0f, 1.0f));
+            // Toon uniforms: u_ToonMaterialParams2 = alphaCutoff, rimPower, rimIntensity, specularPower
+            overrides.setVec4("u_ToonMaterialParams2", Vec4(0.5f, slot->rimPower, slot->rimIntensity, slot->specularPower));
+            // Toon uniforms: u_ToonParams = shadowThreshold, shadowSoftness, specularThreshold, specularSoftness
+            overrides.setVec4("u_ToonParams", Vec4(slot->shadowThreshold, slot->shadowSoftness, slot->shadowThreshold, slot->shadowSoftness));
+
+            // Apply generic shader parameters from shaderParams map
+            for (const auto& [uniformName, value] : slot->shaderParams) {
+                std::visit([&overrides, &uniformName](auto&& arg) {
+                    using T = std::decay_t<decltype(arg)>;
+                    if constexpr (std::is_same_v<T, float>) {
+                        overrides.setFloat(uniformName, arg);
+                    } else if constexpr (std::is_same_v<T, int>) {
+                        overrides.setInt(uniformName, arg);
+                    } else if constexpr (std::is_same_v<T, bool>) {
+                        overrides.setBool(uniformName, arg);
+                    } else if constexpr (std::is_same_v<T, Vec2>) {
+                        overrides.setVec2(uniformName, arg);
+                    } else if constexpr (std::is_same_v<T, Vec3>) {
+                        overrides.setVec3(uniformName, arg);
+                    } else if constexpr (std::is_same_v<T, Vec4>) {
+                        overrides.setVec4(uniformName, arg);
+                    } else if constexpr (std::is_same_v<T, Color>) {
+                        overrides.setColor(uniformName, arg);
+                    } else if constexpr (std::is_same_v<T, TextureHandle>) {
+                        overrides.setTexture(uniformName, arg);
+                    }
+                }, value);
+            }
 
             LoadAndUploadMaterialTextures(ctx, *slot);
 
@@ -595,26 +832,22 @@ void StaticMesh3D::buildDrawCommands(RenderContext& ctx) {
             );
             overrides.setVec4("u_TextureFlags", textureFlags);
 
-            if (slot->albedoTextureHandle.isValid()) {
-                overrides.setTexture("u_AlbedoTexture", slot->albedoTextureHandle);
-
+            // DEBUG: Log texture validity for WebGL debugging
+            static bool loggedOnce = false;
+            if (!loggedOnce && slot->albedoTextureHandle.isValid()) {
+                
+                loggedOnce = true;
             }
-            if (slot->metallicRoughnessTextureHandle.isValid()) {
-                overrides.setTexture("u_MetallicRoughnessTexture", slot->metallicRoughnessTextureHandle);
 
-            }
-            if (slot->normalTextureHandle.isValid()) {
-                overrides.setTexture("u_NormalTexture", slot->normalTextureHandle);
-
-            }
-            if (slot->emissiveTextureHandle.isValid()) {
-                overrides.setTexture("u_EmissiveTexture", slot->emissiveTextureHandle);
-
-            }
+            // Always bind textures (valid or not) to prevent stale texture bleeding
+            overrides.setTexture("u_AlbedoTexture", slot->albedoTextureHandle);
+            overrides.setTexture("u_MetallicRoughnessTexture", slot->metallicRoughnessTextureHandle);
+            overrides.setTexture("u_NormalTexture", slot->normalTextureHandle);
+            overrides.setTexture("u_EmissiveTexture", slot->emissiveTextureHandle);
 
         }
 
-        ctx.drawMesh(meshHandle, defaultMaterial, transform, overrides, meshIdx, GetCastShadow(), GetReceiveShadow());
+        ctx.drawMesh(meshHandle, selectedMaterial, transform, overrides, static_cast<uint32_t>(meshIdx), GetCastShadow(), GetReceiveShadow());
     }
 }
 
@@ -786,15 +1019,91 @@ std::string StaticMesh3D::GetModelPath() const {
 }
 
 void StaticMesh3D::SetModelPath(const std::string& path) {
-    std::string currentPath = GetModelPath();
-    if (currentPath != path) {
-        SetPropertyValue<std::string>("modelPath", path);
-        m_CurrentModelPath = path;
-
-        if (!path.empty()) {
-            LoadModel(path);
+    // Convert to res:// path if possible
+    std::string resPath = path;
+    if (!path.empty() && !(path.size() >= 6 && path.substr(0, 6) == "res://")) {
+        auto& assetDb = asset::AssetDatabase::GetInstance();
+        if (assetDb.IsInitialized()) {
+            std::string converted = assetDb.ToResourcePath(path);
+            if (!converted.empty()) {
+                resPath = converted;
+            }
         }
     }
+
+    std::string currentPath = GetModelPath();
+    if (currentPath != resPath) {
+        SetPropertyValue<std::string>("modelPath", resPath);
+        m_CurrentModelPath = resPath;
+
+        if (!resPath.empty()) {
+            LoadModel(resPath);
+        }
+    }
+}
+
+bool StaticMesh3D::OnAssetFileChanged(const std::string& changedPath, const std::string& resolvedChangedPath) {
+    auto& assetDb = asset::AssetDatabase::GetInstance();
+    bool anyChanged = false;
+
+    // Check if this is our model
+    std::string currentModelPath = GetModelPath();
+    if (!currentModelPath.empty()) {
+        std::string resolvedModelPath;
+        if (assetDb.IsInitialized()) {
+            resolvedModelPath = assetDb.ResolveAsset(currentModelPath);
+        }
+
+        bool modelMatches = (currentModelPath == changedPath) ||
+                       (!resolvedModelPath.empty() && !resolvedChangedPath.empty() &&
+                        resolvedModelPath == resolvedChangedPath);
+
+        if (modelMatches) {
+            
+            m_MeshHandles.clear();
+            m_ModelAsset.Reset();
+            m_CurrentModelPath.clear();
+            m_MeshesNeedUpload = true;
+            m_MaterialSlots.clear();
+            return true;
+        }
+    }
+
+    // Check if this is one of our material slot textures
+    for (auto& slot : m_MaterialSlots) {
+        auto checkTexture = [&](const std::string& texPath, TextureHandle& handle,
+                                asset::AssetRef<asset::ImageAsset>& asset) -> bool {
+            if (texPath.empty()) return false;
+            std::string resolvedTexPath;
+            if (assetDb.IsInitialized()) {
+                resolvedTexPath = assetDb.ResolveAsset(texPath);
+            }
+            bool matches = (texPath == changedPath) ||
+                           (!resolvedTexPath.empty() && !resolvedChangedPath.empty() &&
+                            resolvedTexPath == resolvedChangedPath);
+            if (matches) {
+                
+                {
+                    std::lock_guard<std::mutex> lock(GetStaticMesh3DTextureCacheMutex());
+                    auto& cache = GetStaticMesh3DTextureCache();
+                    auto it = cache.find(texPath);
+                    if (it != cache.end()) { cache.erase(it); }
+                }
+                handle = TextureHandle();
+                asset.Reset();
+                slot.texturesNeedUpload = true;
+                return true;
+            }
+            return false;
+        };
+
+        if (checkTexture(slot.albedoTexturePath, slot.albedoTextureHandle, slot.albedoTextureAsset)) anyChanged = true;
+        if (checkTexture(slot.metallicRoughnessTexturePath, slot.metallicRoughnessTextureHandle, slot.metallicRoughnessTextureAsset)) anyChanged = true;
+        if (checkTexture(slot.normalTexturePath, slot.normalTextureHandle, slot.normalTextureAsset)) anyChanged = true;
+        if (checkTexture(slot.emissiveTexturePath, slot.emissiveTextureHandle, slot.emissiveTextureAsset)) anyChanged = true;
+    }
+
+    return anyChanged;
 }
 
 bool StaticMesh3D::GetCastShadow() const {

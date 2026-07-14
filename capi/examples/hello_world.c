@@ -4,6 +4,7 @@
  */
 
 #include <lupine_c.h>
+#include <math.h>
 #include <stdio.h>
 
 int main(void) {
@@ -83,6 +84,15 @@ int main(void) {
         lc_vec3(2.0f, 2.0f, 2.0f)
     );
     printf("  Direct TRS matrix created\n");
+
+    int trs_matches = 1;
+    for (int i = 0; i < 16; ++i) {
+        if (fabsf(trs_direct.m[i] - transform.m[i]) > 1e-4f) {
+            trs_matches = 0;
+            break;
+        }
+    }
+    printf("  Direct TRS matches composed T*R*S: %s\n", trs_matches ? "yes" : "no");
     printf("✓ Mat4 working!\n\n");
 
     // Test Color

@@ -1,0 +1,12 @@
+// Python Runtime Resources for Lupine Engine Export Templates
+// This file embeds the Python DLL and standard library into the executable
+
+// Resource IDs (must match EmbeddedPython.cpp)
+#define IDR_PYTHON_DLL      1001
+#define IDR_PYTHON_ZIP      1002
+
+// Embed Python DLL
+IDR_PYTHON_DLL PYTHON_RUNTIME "@PYTHON_DLL_PATH@"
+
+// Embed Python standard library (zipped)
+IDR_PYTHON_ZIP PYTHON_RUNTIME "@PYTHON_STDLIB_ZIP_PATH@"

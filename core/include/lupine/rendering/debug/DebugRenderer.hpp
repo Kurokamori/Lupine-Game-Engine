@@ -74,6 +74,20 @@ public:
      */
     virtual void clear() = 0;
 
+    /**
+     * Set the screen size for thick line rendering.
+     * This is needed for geometry shader-based line expansion.
+     * @param width Screen width in pixels
+     * @param height Screen height in pixels
+     */
+    virtual void setScreenSize(float width, float height) { (void)width; (void)height; }
+
+    /**
+     * Set the line width for thick line rendering.
+     * @param width Line width in pixels
+     */
+    virtual void setLineWidth(float width) { (void)width; }
+
     // ===== 2D Grid (Orthographic) =====
 
     /**

@@ -71,14 +71,20 @@ public:
      */
     TextureHandle GetTextureHandle() const { return m_TextureHandle; }
 
+    /**
+     * Called when an asset file changes on disk.
+     * Override to properly invalidate cached texture handles.
+     */
+    bool OnAssetFileChanged(const std::string& changedPath, const std::string& resolvedChangedPath) override;
+
     // ===== Property Accessors =====
-    
+
     // Texture path
     const std::string& GetTexturePath() const;
     void SetTexturePath(const std::string& path);
     
     // Modulation color (tint)
-    const math::Color& GetModulate() const;
+    math::Color GetModulate() const;
     void SetModulate(const math::Color& color);
     
     // Size in world units

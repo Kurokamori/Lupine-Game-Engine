@@ -1,4 +1,5 @@
 #include "lupine/components/Label3D.hpp"
+#include "lupine/localization/LocalizationManager.hpp"
 #include "lupine/components/Sprite3D.hpp"
 #include "lupine/core/Node.hpp"
 #include "lupine/core/Project.hpp"
@@ -8,6 +9,7 @@
 #include "lupine/rendering/Mesh.hpp"
 #include "lupine/rendering/gfx/IGfxDevice.hpp"
 #include "lupine/rendering/gfx/GfxDescriptors.hpp"
+#include "lupine/asset/AssetDatabase.hpp"
 #include "lupine/logger/Logger.hpp"
 #include "lupine/math/OBB.hpp"
 #include "lupine/math/Ray.hpp"
@@ -51,6 +53,10 @@ Label3D::~Label3D() {
 void Label3D::DefineProperties() {
 
     DefineProperty(PROPERTY_DEFAULT_GROUP(text, String, std::string("Label3D"), "Text"));
+
+    // localizationKey overrides "text" and resolves through the LocalizationManager.
+    DefineProperty(PROPERTY_DEFAULT_GROUP(localizationKey, String, std::string(""), "Localization"));
+    DefineProperty(PROPERTY_DEFAULT_GROUP(localizationTable, String, std::string(""), "Localization"));
     DefineProperty(PROPERTY_FILE_GROUP(fontPath, std::string(""), "*.ttf,*.otf", "Text"));
     DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(fontSize, 16.0f, 1.0f, 256.0f, 1.0f, "Text"));
     DefineProperty(PROPERTY_DEFAULT_GROUP(color, Color, Color::White(), "Text"));
@@ -81,7 +87,7 @@ void Label3D::OnRender() {
 
 }
 
-bool Label3D::OnGizmoScale(float scaleDelta, int axis, bool is3D) {
+bool Label3D::OnGizmoScale(float scaleDelta, int, bool is3D) {
     if (is3D) {
 
         float currentSize = GetFontSize();
@@ -237,6 +243,12 @@ Mat4 Label3D::CalculateBillboardTransform(const Mat4& viewMatrix) const {
 
 const std::string& Label3D::GetText() const {
     static std::string cachedText;
+    std::string locKey = GetPropertyValue<std::string>("localizationKey");
+    if (!locKey.empty()) {
+        cachedText = localization::LocalizationManager::GetInstance().Translate(
+            locKey, GetPropertyValue<std::string>("localizationTable"));
+        return cachedText;
+    }
     cachedText = GetPropertyValue<std::string>("text");
     return cachedText;
 }
@@ -253,7 +265,18 @@ const std::string& Label3D::GetFontPath() const {
 }
 
 void Label3D::SetFontPath(const std::string& path) {
-    SetPropertyValue("fontPath", path);
+    // Convert to res:// path if possible
+    std::string resPath = path;
+    if (!path.empty() && !(path.size() >= 6 && path.substr(0, 6) == "res://")) {
+        auto& assetDb = asset::AssetDatabase::GetInstance();
+        if (assetDb.IsInitialized()) {
+            std::string converted = assetDb.ToResourcePath(path);
+            if (!converted.empty()) {
+                resPath = converted;
+            }
+        }
+    }
+    SetPropertyValue("fontPath", resPath);
     m_MeshNeedsRegeneration = true;
 }
 
@@ -270,10 +293,8 @@ void Label3D::SetFontSize(float size) {
     m_MeshNeedsRegeneration = true;
 }
 
-const Color& Label3D::GetColor() const {
-    static Color cachedColor;
-    cachedColor = GetPropertyValue<Color>("color");
-    return cachedColor;
+Color Label3D::GetColor() const {
+    return GetPropertyValue<Color>("color");
 }
 
 void Label3D::SetColor(const Color& color) {
@@ -452,6 +473,12 @@ void Label3D::buildDrawCommands(RenderContext& ctx) {
         return;
     }
 
+    // A resolution change re-bakes the font atlas at a new oversampling density,
+    // which repacks glyph UVs; regenerate the cached text mesh so it matches.
+    if (ConsumeFontOversampleChanged()) {
+        m_MeshNeedsRegeneration = true;
+    }
+
     std::string fontPath = GetFontPath();
     float currentFontSize = GetFontSize();
     bool fontPathChanged = (fontPath != m_CurrentFontPath);
@@ -483,7 +510,8 @@ void Label3D::buildDrawCommands(RenderContext& ctx) {
     if (m_FontAsset.IsValid() && m_FontAsset->IsLoaded() && !m_FontHandle.isValid()) {
 
         FontDesc fontDesc;
-        fontDesc.fontPath = m_FontAsset->GetPath();
+        // Use GetPhysicalPath() to resolve res:// path to filesystem path for file loading
+        fontDesc.fontPath = m_FontAsset->GetPhysicalPath();
         fontDesc.fontSize = GetFontSize();
         fontDesc.atlasWidth = m_FontAsset->GetAtlasWidth();
         fontDesc.atlasHeight = m_FontAsset->GetAtlasHeight();
@@ -550,7 +578,7 @@ void Label3D::buildDrawCommands(RenderContext& ctx) {
 
     MaterialPropertyBlock overrides;
     overrides.setTexture("u_FontAtlas", fontAtlas->texture);
-    overrides.setColor("u_TextColor", GetColor());
+    overrides.setColor("u_TintColor", GetColor());
 
     MaterialHandle material = ctx.getDefaultText3DMaterial();
 
@@ -628,6 +656,33 @@ bool Label3D::IntersectRay(const math::Ray& ray, float& outDistance) const {
 
     math::Ray localRay(localRayOrigin, localRayDir);
     return localRay.IntersectAABB(localAABB, outDistance);
+}
+
+bool Label3D::OnAssetFileChanged(const std::string& changedPath, const std::string& resolvedChangedPath) {
+    std::string fontPath = GetFontPath();
+    if (fontPath.empty()) return false;
+
+    auto& assetDb = asset::AssetDatabase::GetInstance();
+    std::string resolvedFontPath;
+    if (assetDb.IsInitialized()) {
+        resolvedFontPath = assetDb.ResolveAsset(fontPath);
+    }
+
+    bool matches = (fontPath == changedPath) ||
+                   (!resolvedFontPath.empty() && !resolvedChangedPath.empty() &&
+                    resolvedFontPath == resolvedChangedPath);
+
+    if (matches) {
+        
+        m_FontHandle = FontHandle();
+        m_FontAsset.Reset();
+        m_CurrentFontPath.clear();
+        m_FontNeedsUpload = true;
+        m_MeshNeedsRegeneration = true;
+        return true;
+    }
+
+    return false;
 }
 
 }

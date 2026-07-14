@@ -16,11 +16,11 @@ struct Vertex {
     math::Vec3 position;
     math::Vec3 normal;
     math::Vec2 texCoord;
+    math::Vec4 color{1.0f, 1.0f, 1.0f, 1.0f};  // Vertex color (default white)
     math::Vec3 tangent;
     math::Vec3 bitangent;
-    
-    // Skinning data (up to 4 bone influences)
-    int boneIDs[4] = {-1, -1, -1, -1};
+
+    int boneIDs[4] = {0, 0, 0, 0};
     float boneWeights[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 };
 
@@ -172,6 +172,8 @@ private:
     Skeleton m_Skeleton;
     std::vector<AnimationClip> m_Animations;
     bool m_HasSkeleton{false};
+
+    void RefreshTrackedBytes();   // sum mesh vertex/index data and report to the profiler
 
     // Helper methods using void* to avoid exposing Assimp types in the public API
     void ProcessNode(void* node, const void* scene);

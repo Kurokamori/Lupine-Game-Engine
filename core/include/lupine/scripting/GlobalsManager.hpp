@@ -2,29 +2,34 @@
 
 #include "lupine/core/Core.hpp"
 #include "lupine/scripting/ScriptingCore.hpp"
-#include "lupine/scripting/PythonEnvironment.hpp"
 #include "lupine/scripting/LuaEnvironment.hpp"
 #include "lupine/scripting/MRubyEnvironment.hpp"
+#ifdef LUPINE_HAS_MICROPYTHON
+#include "lupine/scripting/MicroPythonEnvironment.hpp"
+#endif
 #include <memory>
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <nlohmann/json.hpp>
 
 namespace lupine {
 namespace scripting {
 
 /**
- * Global variable definition
+ * Global variable definition.
+ *
+ * The value is stored as JSON so every engine type is representable: the scalar
+ * types ("int", "float", "double", "bool", "string", "resource") encode as JSON
+ * scalars, while the structured types ("vec2"/"vec3"/"vec4"/"color"/"quat"/"rect"
+ * objects, "array"/"dictionary"/"string_array"/"int_array"/"float_array"
+ * containers) encode as JSON objects/arrays. The value reaches scripts through
+ * IScriptEnvironment::SetGlobalJson, which converts it to each VM's native type.
  */
 struct GlobalVariable {
     std::string name;
-    std::string type;  // "int", "float", "bool", "string"
-
-    // Value storage (only one will be used based on type)
-    int intValue = 0;
-    float floatValue = 0.0f;
-    bool boolValue = false;
-    std::string stringValue;
+    std::string type;       // canonical type name (see above)
+    nlohmann::json value;   // value encoded as JSON (scalar or structured)
 };
 
 /**
@@ -58,12 +63,12 @@ public:
     /**
      * Initialize global variables in all script environments
      * Must be called after script environments are initialized
-     * @param pythonEnv Python environment (can be nullptr if not using Python)
+     * @param micropythonEnv MicroPython environment (can be nullptr if not using MicroPython)
      * @param luaEnv Lua environment (can be nullptr if not using Lua)
      * @param mrubyEnv MRuby environment (can be nullptr if not using MRuby)
      */
     void InitializeGlobalVariables(
-        PythonEnvironment* pythonEnv,
+        MicroPythonEnvironment* micropythonEnv,
         LuaEnvironment* luaEnv,
         MRubyEnvironment* mrubyEnv
     );
@@ -71,14 +76,14 @@ public:
     /**
      * Load and execute all singleton scripts
      * Singletons are loaded in the order they appear in the config
-     * @param pythonEnv Python environment
+     * @param micropythonEnv MicroPython environment
      * @param luaEnv Lua environment
      * @param mrubyEnv MRuby environment
      * @param projectDir Project directory (for resolving script paths)
      * @return true if all singletons loaded successfully
      */
     bool LoadSingletons(
-        PythonEnvironment* pythonEnv,
+        MicroPythonEnvironment* micropythonEnv,
         LuaEnvironment* luaEnv,
         MRubyEnvironment* mrubyEnv,
         const std::string& projectDir
@@ -104,11 +109,11 @@ private:
     std::vector<SingletonScript> m_Singletons;
 
     // Helper methods
-    void InitializeVariableInPython(PythonEnvironment* env, const GlobalVariable& var);
+    void InitializeVariableInMicroPython(MicroPythonEnvironment* env, const GlobalVariable& var);
     void InitializeVariableInLua(LuaEnvironment* env, const GlobalVariable& var);
     void InitializeVariableInMRuby(MRubyEnvironment* env, const GlobalVariable& var);
 
-    bool LoadSingletonInPython(PythonEnvironment* env, const SingletonScript& singleton, const std::string& fullPath);
+    bool LoadSingletonInMicroPython(MicroPythonEnvironment* env, const SingletonScript& singleton, const std::string& fullPath);
     bool LoadSingletonInLua(LuaEnvironment* env, const SingletonScript& singleton, const std::string& fullPath);
     bool LoadSingletonInMRuby(MRubyEnvironment* env, const SingletonScript& singleton, const std::string& fullPath);
 };

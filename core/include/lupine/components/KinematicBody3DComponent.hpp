@@ -39,6 +39,7 @@ public:
     void OnAwake() override;
     void OnReady() override;
     void OnDestroy() override;
+    void OnPhysicsWorldRebuild(PhysicsWorldRebuildPhase phase) override;
     void OnPhysicsProcess(float deltaTime) override;
 
     // ===== Property Accessors =====
@@ -77,7 +78,12 @@ private:
     // Cached transform for synchronization
     math::Vec3 m_LastPosition;
     math::Quat m_LastRotation;
-    
+
+    // Cached velocities so values set before the physics body exists are
+    // preserved and applied once the body is created.
+    math::Vec3 m_LinearVelocity = math::Vec3::Zero();
+    math::Vec3 m_AngularVelocity = math::Vec3::Zero();
+
     // Create physics body in the physics world
     void CreatePhysicsBody();
     

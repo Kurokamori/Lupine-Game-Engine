@@ -41,6 +41,7 @@ public:
     // ISerializable interface
     std::string GetTypeName() const override { return "AnimatedSprite2D"; }
     void DefineProperties() override;
+    void DefineSignals() override;
 
     // Component interface
     void OnUpdate(float deltaTime) override;
@@ -49,6 +50,9 @@ public:
 
     // Property change notification
     void OnPropertyChanged(const std::string& propertyName, const nlohmann::json& newValue) override;
+
+    // Asset hot-reload support
+    bool OnAssetFileChanged(const std::string& changedPath, const std::string& resolvedChangedPath) override;
 
     // IRenderableComponent interface
     void buildDrawCommands(RenderContext& ctx) override;
@@ -65,7 +69,7 @@ public:
     const math::Vec2& GetOffset() const;
     bool GetFlipH() const;
     bool GetFlipV() const;
-    const math::Color& GetModulate() const;
+    math::Color GetModulate() const;
     bool GetPixelSnap() const;
     int GetCurrentFrame() const { return m_CurrentFrameIndex; }
 

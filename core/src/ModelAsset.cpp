@@ -1,15 +1,167 @@
 #include "lupine/asset/ModelAsset.hpp"
+#include "lupine/platform/PackFile.hpp"
 #include "lupine/logger/Logger.hpp"
 
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
 
+// These must be Assimp's own declarations on every platform. A locally redeclared
+// IOSystem/IOStream is an ODR violation: the vtable it produces has to match the one the
+// Assimp library was compiled against, slot for slot, and any drift silently sends a call
+// through the wrong slot. Native builds tolerated that; wasm type-checks every indirect
+// call and traps with "function signature mismatch" inside the importer.
+#include <assimp/IOSystem.hpp>
+#include <assimp/IOStream.hpp>
+
 #include <glm/glm.hpp>
 #include <algorithm>
+#include <cstdint>
+#include <limits>
 
 namespace lupine {
 namespace asset {
+
+// Upper bound on one uncompressed embedded texture. Anything above this is treated as a
+// corrupt or hostile dimension pair rather than a legitimate texture.
+static constexpr uint64_t kMaxEmbeddedTextureBytes = 1ull << 31;
+
+// Custom IOStream for reading from pack files
+class PackIOStream : public Assimp::IOStream {
+public:
+    PackIOStream(std::vector<uint8_t> data, const std::string& path)
+        : m_data(std::move(data)), m_path(path), m_pos(0) {}
+
+    ~PackIOStream() override = default;
+
+    size_t Read(void* pvBuffer, size_t pSize, size_t pCount) override {
+        // Assimp mirrors fread() semantics, which allow a zero element size; the return
+        // value is an element count, so pSize must be checked before it is divided by.
+        if (!pvBuffer || pSize == 0 || pCount == 0 || m_pos >= m_data.size()) {
+            return 0;
+        }
+
+        // Clamping the element count (rather than pSize * pCount) keeps the byte count
+        // from overflowing and reports only whole elements, as fread() does.
+        const size_t bytesAvailable = m_data.size() - m_pos;
+        const size_t elements = std::min(pCount, bytesAvailable / pSize);
+        if (elements == 0) {
+            return 0;
+        }
+
+        const size_t bytesRead = elements * pSize;
+        std::memcpy(pvBuffer, m_data.data() + m_pos, bytesRead);
+        m_pos += bytesRead;
+
+        return elements;
+    }
+
+    size_t Write(const void*, size_t, size_t) override { return 0; }
+
+    aiReturn Seek(size_t pOffset, aiOrigin pOrigin) override {
+        size_t newPos = 0;
+        switch (pOrigin) {
+            case aiOrigin_SET: newPos = pOffset; break;
+            case aiOrigin_CUR: newPos = m_pos + pOffset; break;
+            case aiOrigin_END: newPos = m_data.size() + pOffset; break;
+            default: return aiReturn_FAILURE;
+        }
+        if (newPos > m_data.size()) return aiReturn_FAILURE;
+        m_pos = newPos;
+        return aiReturn_SUCCESS;
+    }
+
+    size_t Tell() const override { return m_pos; }
+    size_t FileSize() const override { return m_data.size(); }
+    void Flush() override {}
+
+private:
+    std::vector<uint8_t> m_data;
+    std::string m_path;
+    size_t m_pos;
+};
+
+// Custom IOSystem that reads from pack files
+// Works on all platforms including Emscripten
+class PackIOSystem : public Assimp::IOSystem {
+public:
+    PackIOSystem(const std::string& basePath) : m_basePath(basePath) {
+        // Extract directory from base path
+        size_t lastSlash = m_basePath.rfind('/');
+        if (lastSlash == std::string::npos) lastSlash = m_basePath.rfind('\\');
+        if (lastSlash != std::string::npos) {
+            m_baseDir = m_basePath.substr(0, lastSlash + 1);
+        }
+        
+    }
+
+    ~PackIOSystem() override = default;
+
+    bool Exists(const char* pFile) const override {
+        std::string resolved = resolvePath(pFile);
+        auto& packFS = platform::PackFileSystem::Instance();
+        return packFS.exists(resolved);
+    }
+
+    char getOsSeparator() const override { return '/'; }
+
+    Assimp::IOStream* Open(const char* pFile, const char* /*pMode*/) override {
+        std::string resolved = resolvePath(pFile);
+        auto& packFS = platform::PackFileSystem::Instance();
+
+        std::vector<uint8_t> data = packFS.readFile(resolved);
+        if (data.empty()) {
+            LOG_ERROR(LogCategory::Core, "PackIOSystem::Open failed - no data for {}", resolved);
+            return nullptr;
+        }
+        return new PackIOStream(std::move(data), resolved);
+    }
+
+    void Close(Assimp::IOStream* pFile) override {
+        delete pFile;
+    }
+
+    // Override ChangeDirectory - no-op since we handle paths ourselves
+    bool ChangeDirectory(const std::string& path) override {
+        if (!path.empty()) {
+            if (path[0] == '/' || (path.size() > 6 && path.substr(0, 6) == "res://")) {
+                m_currentDir = path;
+            } else {
+                m_currentDir = m_baseDir + path;
+            }
+            if (!m_currentDir.empty() && m_currentDir.back() != '/') {
+                m_currentDir += '/';
+            }
+        }
+        return true;
+    }
+
+private:
+    std::string resolvePath(const char* pFile) const {
+        std::string path = pFile;
+
+        // If it's already a full res:// path, use it directly
+        if (path.size() >= 6 && path.substr(0, 6) == "res://") {
+            return path;
+        }
+
+        // If it's an absolute path, use it directly
+        if (!path.empty() && path[0] == '/') {
+            return path;
+        }
+
+        // Resolve relative to current directory or base directory
+        if (!m_currentDir.empty()) {
+            return m_currentDir + path;
+        }
+
+        return m_baseDir + path;
+    }
+
+    std::string m_basePath;
+    std::string m_baseDir;
+    mutable std::string m_currentDir;
+};
 
 static math::Vec3 AssimpToVec3(const aiVector3D& v) {
     return math::Vec3(v.x, v.y, v.z);
@@ -59,8 +211,11 @@ ModelAsset::~ModelAsset() {
 }
 
 bool ModelAsset::LoadFromFile(const std::string& filepath, bool optimizeMesh) {
-
+    // Store the path (will be converted to res:// format if possible)
     SetPath(filepath);
+
+    // Resolve the path using the asset system (handles UUID fallback)
+    std::string resolvedPath = ResolveAssetPath(filepath);
 
     Assimp::Importer importer;
 
@@ -70,10 +225,26 @@ bool ModelAsset::LoadFromFile(const std::string& filepath, bool optimizeMesh) {
         flags |= aiProcess_JoinIdenticalVertices | aiProcess_ImproveCacheLocality | aiProcess_OptimizeMeshes;
     }
 
-    const aiScene* scene = importer.ReadFile(filepath, flags);
+    const aiScene* scene = nullptr;
+
+    // Check if running from pack file first
+    auto& packFS = platform::PackFileSystem::Instance();
+
+    if (packFS.isPackMode() && packFS.exists(filepath)) {
+        // Use custom IOSystem that reads from pack files
+        // This allows Assimp to resolve relative paths (textures, .bin files) from the pack
+        // Works on all platforms including Emscripten
+        
+        importer.SetIOHandler(new PackIOSystem(filepath));
+        scene = importer.ReadFile(filepath, flags);
+    } else {
+        // Not in pack mode or file not in pack - use resolved physical path
+        scene = importer.ReadFile(resolvedPath, flags);
+    }
 
     if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode) {
-
+        LOG_ERROR(LogCategory::Core, "ModelAsset: Failed to load model: {} - {}",
+                  filepath, importer.GetErrorString());
         return false;
     }
 
@@ -104,39 +275,84 @@ bool ModelAsset::LoadFromFile(const std::string& filepath, bool optimizeMesh) {
 
         aiString texPath;
 
+        // Helper to resolve texture path relative to model directory
+        auto resolveTexturePath = [&filepath](const std::string& texturePath) -> std::string {
+            if (texturePath.empty()) return "";
+
+            std::string path = texturePath;
+
+            // Normalize path separators first
+            std::replace(path.begin(), path.end(), '\\', '/');
+
+            // Check for res:/ or res:// anywhere in the path (handles malformed paths)
+            // Look for "res:/" pattern and extract the path after it
+            size_t resPos = path.find("res:/");
+            if (resPos != std::string::npos) {
+                // Skip past "res:/"
+                size_t startPos = resPos + 5;
+                // Skip additional slashes if present (handles res:// or res:///)
+                while (startPos < path.size() && path[startPos] == '/') {
+                    startPos++;
+                }
+                // Reconstruct as proper res:// path
+                if (startPos < path.size()) {
+                    path = "res://" + path.substr(startPos);
+                    return path;
+                }
+            }
+
+            // If starts with /, it's an absolute path
+            if (!path.empty() && path[0] == '/') {
+                return path;
+            }
+
+            // Get directory of the model file
+            std::string modelDir;
+            size_t lastSlash = filepath.rfind('/');
+            if (lastSlash == std::string::npos) lastSlash = filepath.rfind('\\');
+            if (lastSlash != std::string::npos) {
+                modelDir = filepath.substr(0, lastSlash + 1);
+            }
+
+            // Resolve relative path
+            std::string resolved = modelDir + path;
+
+            return resolved;
+        };
+
         if (aiMat->GetTexture(aiTextureType_DIFFUSE, 0, &texPath) == AI_SUCCESS) {
-            mat.albedoMap = texPath.C_Str();
+            mat.albedoMap = resolveTexturePath(texPath.C_Str());
 
         } else if (aiMat->GetTexture(aiTextureType_BASE_COLOR, 0, &texPath) == AI_SUCCESS) {
-            mat.albedoMap = texPath.C_Str();
+            mat.albedoMap = resolveTexturePath(texPath.C_Str());
 
         }
 
         if (aiMat->GetTexture(aiTextureType_NORMALS, 0, &texPath) == AI_SUCCESS) {
-            mat.normalMap = texPath.C_Str();
+            mat.normalMap = resolveTexturePath(texPath.C_Str());
 
         } else if (aiMat->GetTexture(aiTextureType_HEIGHT, 0, &texPath) == AI_SUCCESS) {
-            mat.normalMap = texPath.C_Str();
+            mat.normalMap = resolveTexturePath(texPath.C_Str());
 
         }
 
         if (aiMat->GetTexture(aiTextureType_METALNESS, 0, &texPath) == AI_SUCCESS) {
-            mat.metallicMap = texPath.C_Str();
+            mat.metallicMap = resolveTexturePath(texPath.C_Str());
 
         }
 
         if (aiMat->GetTexture(aiTextureType_DIFFUSE_ROUGHNESS, 0, &texPath) == AI_SUCCESS) {
-            mat.roughnessMap = texPath.C_Str();
+            mat.roughnessMap = resolveTexturePath(texPath.C_Str());
 
         }
 
         if (aiMat->GetTexture(aiTextureType_AMBIENT_OCCLUSION, 0, &texPath) == AI_SUCCESS) {
-            mat.aoMap = texPath.C_Str();
+            mat.aoMap = resolveTexturePath(texPath.C_Str());
 
         }
 
         if (aiMat->GetTexture(aiTextureType_EMISSIVE, 0, &texPath) == AI_SUCCESS) {
-            mat.emissiveMap = texPath.C_Str();
+            mat.emissiveMap = resolveTexturePath(texPath.C_Str());
 
         }
 
@@ -157,8 +373,18 @@ bool ModelAsset::LoadFromFile(const std::string& filepath, bool optimizeMesh) {
     ProcessAnimations(scene);
 
     SetLoaded(true);
+    RefreshTrackedBytes();
 
     return true;
+}
+
+void ModelAsset::RefreshTrackedBytes() {
+    size_t total = 0;
+    for (const Mesh& mesh : m_Meshes) {
+        total += mesh.vertices.size() * sizeof(Vertex);
+        total += mesh.indices.size() * sizeof(uint32_t);
+    }
+    SetTrackedBytes(total);
 }
 
 void ModelAsset::ProcessNode(void* nodePtr, const void* scenePtr) {
@@ -401,12 +627,27 @@ void ModelAsset::ProcessEmbeddedTextures(const void* scenePtr) {
 
         } else {
 
+            // aiTexel is 4 bytes; the product must be computed in 64-bit because
+            // mWidth * mHeight * 4 wraps in 32-bit for very large embedded textures,
+            // which would silently truncate the copy below.
+            const uint64_t texelCount = static_cast<uint64_t>(aiTex->mWidth) *
+                                        static_cast<uint64_t>(aiTex->mHeight);
+            const uint64_t dataSize64 = texelCount * 4ull;
+
+            if (texelCount == 0 || dataSize64 > kMaxEmbeddedTextureBytes ||
+                dataSize64 > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+                LOG_ERROR(LogCategory::Core,
+                          "ModelAsset: skipping embedded texture {} with unusable dimensions {}x{}",
+                          i, aiTex->mWidth, aiTex->mHeight);
+                continue;
+            }
+
             embeddedTex.compressed = false;
             embeddedTex.width = aiTex->mWidth;
             embeddedTex.height = aiTex->mHeight;
 
             const uint8_t* srcData = reinterpret_cast<const uint8_t*>(aiTex->pcData);
-            size_t dataSize = aiTex->mWidth * aiTex->mHeight * 4;
+            const size_t dataSize = static_cast<size_t>(dataSize64);
             embeddedTex.data.assign(srcData, srcData + dataSize);
 
         }

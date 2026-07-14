@@ -158,11 +158,6 @@ void VoxelBuilder::RegenerateMesh() {
     vertices.reserve(m_Voxels.size() * 24);
     indices.reserve(m_Voxels.size() * 36);
 
-    if (!m_Voxels.empty()) {
-        const auto& firstVoxel = m_Voxels.begin()->second;
-
-    }
-
     for (const auto& [pos, voxel] : m_Voxels) {
         GenerateCubeMesh(voxel, vertices, indices);
     }
@@ -299,7 +294,7 @@ bool VoxelBuilder::FromJSON(const std::string& jsonStr) {
         return true;
     }
     catch (const std::exception& e) {
-
+        LOG_ERROR(LogCategory::Tools, "VoxelBuilder: failed to parse JSON: {}", e.what());
         return false;
     }
 }
@@ -352,8 +347,6 @@ std::string VoxelBuilder::ExportToOBJ(bool mergeFaces, bool textureAtlas) const 
         float uvs[4][2] = {
             {0, 0}, {1, 0}, {1, 1}, {0, 1}
         };
-
-        uint32_t faceVertexStart = vertexOffset;
 
         for (int f = 0; f < 6; ++f) {
             const Face& face = faces[f];
@@ -419,7 +412,7 @@ std::string VoxelBuilder::ExportToOBJ(bool mergeFaces, bool textureAtlas) const 
     return obj.str();
 }
 
-std::string VoxelBuilder::ExportToGLTF(bool mergeFaces, bool textureAtlas) const {
+std::string VoxelBuilder::ExportToGLTF(bool mergeFaces, bool) const {
     using json = nlohmann::json;
 
     if (m_Voxels.empty()) {

@@ -59,12 +59,12 @@ public:
      * Check if this command can be merged with another command
      * Used for combining similar consecutive commands (e.g., multiple property changes)
      */
-    virtual bool CanMergeWith(const Command* other) const { return false; }
+    virtual bool CanMergeWith(const Command* other) const { (void)other; return false; }
 
     /**
      * Merge this command with another command
      */
-    virtual void MergeWith(const Command* other) {}
+    virtual void MergeWith(const Command* other) { (void)other; }
 
     /**
      * Get unique ID for this command
@@ -81,6 +81,7 @@ protected:
  */
 class CompositeCommand : public Command {
 public:
+    CompositeCommand() = default;
     CompositeCommand(const std::string& description);
 
     /**

@@ -50,6 +50,9 @@ public:
     // Gizmo interaction
     bool OnGizmoScale(float scaleDelta, int axis, bool is3D) override;
 
+    // Asset hot-reload support
+    bool OnAssetFileChanged(const std::string& changedPath, const std::string& resolvedChangedPath) override;
+
     // Font management
     bool LoadFont(const std::string& filepath);
     void SetFont(const asset::AssetRef<asset::FontAsset>& font);
@@ -68,7 +71,7 @@ public:
     float GetFontSize() const;
     void SetFontSize(float size);
 
-    const math::Color& GetColor() const;
+    math::Color GetColor() const;
     void SetColor(const math::Color& color);
 
     bool GetCentered() const;

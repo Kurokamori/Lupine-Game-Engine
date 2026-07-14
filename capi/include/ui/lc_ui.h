@@ -9,11 +9,9 @@
 #define LUPINE_CAPI_UI_H
 
 #include "core/lc_core.h"
+#include "core/lc_node.h"
 #include "math/lc_math.h"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 /* ============================================================================
  * Label Functions
@@ -147,8 +145,5 @@ LC_API LCResult lc_label_get_offset(LCComponentHandle component, LCVec2* out_off
  */
 LC_API LCResult lc_label_set_offset(LCComponentHandle component, LCVec2 offset);
 
-#ifdef __cplusplus
-}
-#endif
 
 #endif /* LUPINE_CAPI_UI_H */

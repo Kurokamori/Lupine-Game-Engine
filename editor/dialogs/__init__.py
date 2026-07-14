@@ -13,6 +13,14 @@ from .input_mapping_dialog import InputMappingDialog
 from .theme_editor_dialog import ThemeEditorDialog
 from .set_main_scene_dialog import SetMainSceneDialog
 from .coming_soon_dialog import ComingSoonDialog
+from .godot_scene_import_dialog import GodotSceneImportDialog
+from .new_shader_dialog import NewShaderDialog
+from .archetype_definition_dialog import ArchetypeDefinitionDialog
+from .interface_definition_dialog import InterfaceDefinitionDialog
+from .connect_signal_dialog import ConnectSignalDialog
+from .localization_editor_dialog import LocalizationEditorDialog
+from .uitheme_editor_dialog import UIThemeEditorDialog
+from .plugins_dialog import PluginsDialog
 
 __all__ = [
     'ProjectSettingsDialog',
@@ -25,4 +33,12 @@ __all__ = [
     'ThemeEditorDialog',
     'SetMainSceneDialog',
     'ComingSoonDialog',
+    'GodotSceneImportDialog',
+    'NewShaderDialog',
+    'ArchetypeDefinitionDialog',
+    'InterfaceDefinitionDialog',
+    'ConnectSignalDialog',
+    'LocalizationEditorDialog',
+    'UIThemeEditorDialog',
+    'PluginsDialog',
 ]

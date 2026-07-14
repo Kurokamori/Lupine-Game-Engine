@@ -96,6 +96,12 @@ void CharacterController3D::OnPhysicsProcess(float deltaTime) {
     m_SnapToGround = GetPropertyValue<bool>("snapToGround");
     m_MaxBounces = GetPropertyValue<int>("maxBounces");
 
+    // Contact flags are re-derived from this step's sweeps and probes. Ground and wall are
+    // overwritten by UpdateGroundDetection/UpdateWallDetection below, but the ceiling flag is
+    // only ever raised by the swept pass, so it has to be cleared here or it latches forever.
+    m_IsOnCeiling = false;
+    m_IsOnWall = false;
+
     if (m_Gravity != 0.0f) {
 
         m_Velocity.y += m_Gravity * deltaTime;
@@ -115,13 +121,6 @@ void CharacterController3D::OnPhysicsProcess(float deltaTime) {
         m_TimeSinceGrounded = 0.0f;
     } else {
         m_TimeSinceGrounded += deltaTime;
-    }
-
-    static int frameCount = 0;
-    frameCount++;
-    if (frameCount % 60 == 0) {
-        float radius = GetCollisionRadius();
-
     }
 }
 
@@ -170,8 +169,11 @@ bool CharacterController3D::MoveAndCollide(const Vec3& velocity, float deltaTime
 
     Vec3 direction = movement / movementLength;
 
+    const UUID& ignoreBodyId = m_KinematicBody->GetPhysicsBody()->GetId();
+
     ShapeCastHit3D hit;
-    bool hasCollision = physicsWorld->SphereCast(currentPos, currentPos + movement, 0.5f, hit);
+    bool hasCollision = physicsWorld->SphereCast(currentPos, currentPos + movement,
+                                                 GetCollisionRadius(), hit, &ignoreBodyId);
 
     if (hasCollision) {
 
@@ -327,10 +329,15 @@ void CharacterController3D::UpdateWallDetection() {
         Vec3(0.0f, 0.0f, -1.0f)
     };
 
+    // The probe starts at the body centre, so it has to reach past the character's own
+    // collider before it can touch anything - exactly as the 2D controller does.
+    const float probeDistance = GetCollisionRadius() + m_WallDetectionDistance;
+    const UUID& ignoreBodyId = m_KinematicBody->GetPhysicsBody()->GetId();
+
     m_IsOnWall = false;
     for (const Vec3& dir : directions) {
         RaycastHit3D hit;
-        bool hasWall = physicsWorld->Raycast(currentPos, dir, m_WallDetectionDistance, hit);
+        bool hasWall = physicsWorld->Raycast(currentPos, dir, probeDistance, hit, &ignoreBodyId);
 
         if (hasWall && IsWall(hit.normal)) {
             m_IsOnWall = true;
@@ -344,7 +351,7 @@ void CharacterController3D::UpdateWallDetection() {
     }
 }
 
-Vec3 CharacterController3D::PerformSweptCollision(const Vec3& movement, float deltaTime) {
+Vec3 CharacterController3D::PerformSweptCollision(const Vec3& movement, float) {
     if (!m_KinematicBody || !m_KinematicBody->GetPhysicsBody()) return Vec3::Zero();
 
     auto* sceneManager = SceneManager::GetInstance();

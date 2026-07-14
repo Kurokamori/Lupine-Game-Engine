@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <nlohmann/json.hpp>
 
 namespace lupine {
 
@@ -18,10 +19,12 @@ using math::Vec3;
 namespace core {
     class Scene;
     class Node;
+    class Component;
 }
 
 namespace components {
     class WorldEnvironment;
+    class UIControl;
 }
 
 struct LightDescriptor;
@@ -98,6 +101,29 @@ public:
      */
     void setScene(core::Scene* scene) { m_scene = scene; }
     core::Scene* getScene() const { return m_scene; }
+
+    // ===== Embedded SubViewport Support =====
+
+    /**
+     * Set the render-root node for this view.
+     * When set, the view renders only the subtree rooted at this node instead of
+     * the entire scene graph. Used by SubViewport components to render a node
+     * subtree into an off-screen target (render-to-texture).
+     *
+     * The node must belong to the scene assigned via setScene(). Passing nullptr
+     * (the default) renders the full scene from its root.
+     */
+    void setRenderRootNode(core::Node* node) { m_renderRootNode = node; }
+    core::Node* getRenderRootNode() const { return m_renderRootNode; }
+
+    /**
+     * The scene node this view's camera was built from (a Camera2D / Camera3D / CameraUI),
+     * when known. Used by the renderer to gather per-camera stackable effect components
+     * (CameraEffect) attached to that node. Null for views whose camera is synthetic
+     * (e.g. internal blits) — such views simply run no camera effects.
+     */
+    void setSourceCameraNode(core::Node* node) { m_sourceCameraNode = node; }
+    core::Node* getSourceCameraNode() const { return m_sourceCameraNode; }
 
     // ===== Render Settings =====
 
@@ -206,6 +232,19 @@ public:
     GizmoType getGizmoDragOperation() const { return m_gizmoDragOperation; }
     void setGizmoDragOperation(GizmoType operation) { m_gizmoDragOperation = operation; }
 
+    // Direction of the grabbed 2D scale-rectangle handle in the gizmo's local
+    // frame (e.g. (1,1) = top-right corner, (-1,0) = left edge, (0,0) = uniform).
+    const math::Vec2& getGizmoScaleHandleDir() const { return m_gizmoScaleHandleDir; }
+    void setGizmoScaleHandleDir(const math::Vec2& dir) { m_gizmoScaleHandleDir = dir; }
+
+    // Rotation (radians) the 2D scale rectangle was drawn with at drag start.
+    float getGizmoDragRotation2D() const { return m_gizmoDragRotation2D; }
+    void setGizmoDragRotation2D(float rotation) { m_gizmoDragRotation2D = rotation; }
+
+    // Oriented half-extents (world units) of the 2D selection rectangle at drag start.
+    const math::Vec2& getGizmoDragHalfExtents() const { return m_gizmoDragHalfExtents; }
+    void setGizmoDragHalfExtents(const math::Vec2& extents) { m_gizmoDragHalfExtents = extents; }
+
     // Forward declare NodeInitialTransform for public access
     struct NodeInitialTransform {
         math::Vec2 position2D;
@@ -215,6 +254,28 @@ public:
         math::Quat rotation3D;
         math::Vec3 scale3D;
         bool is2D;
+
+        // Component scaling tracking (for components that override OnGizmoScale)
+        std::weak_ptr<core::Component> scalingComponent;
+        std::string componentTypeName;  // e.g., "Sprite2D", "Label", "Button"
+
+        // Initial property values (stored as JSON for flexibility)
+        nlohmann::json componentInitialProperties;
+
+        // A UIControl on this node whose position is NOT its Node2D position: in Anchors
+        // mode the rect is recomputed from anchors+offsets every frame and written back over
+        // the node, so a move gizmo that set the node position was undone before the next
+        // draw and the control snapped straight back. Dragging such a control translates its
+        // OFFSETS, which is what actually places it -- these are the values at drag start.
+        //
+        // uiControlDrivesPosition is false for a Position-mode control (the node position is
+        // real) and for a container-driven one (the parent owns the rect and the drag must be
+        // refused outright).
+        std::weak_ptr<components::UIControl> layoutControl;
+        bool uiControlDrivesPosition = false;
+        bool uiControlContainerDriven = false;
+        math::Vec2 initialOffsetMin;
+        math::Vec2 initialOffsetMax;
     };
 
     /**
@@ -258,6 +319,14 @@ private:
     // Scene
     core::Scene* m_scene = nullptr;
 
+    // Optional render-root node. When non-null, gathering starts from this node's
+    // subtree instead of the scene root (used by embedded SubViewports).
+    core::Node* m_renderRootNode = nullptr;
+
+    // Source camera node (Camera2D/Camera3D/CameraUI) this view was built from, when
+    // known. Used to gather per-camera CameraEffect components. Not owned.
+    core::Node* m_sourceCameraNode = nullptr;
+
     // Editor selection
     std::shared_ptr<core::Node> m_selectedNode;
     std::vector<std::shared_ptr<core::Node>> m_selectedNodes;
@@ -283,6 +352,9 @@ private:
     math::Vec3 m_gizmoDragStartWorldPos;
     math::Vec2 m_gizmoDragStartScreenPos;
     GizmoType m_gizmoDragOperation = GizmoType::Translation;  // What operation is being performed
+    math::Vec2 m_gizmoScaleHandleDir = math::Vec2(0.0f, 0.0f);  // Grabbed 2D scale handle direction
+    float m_gizmoDragRotation2D = 0.0f;                        // Rotation of the 2D scale rect at drag start
+    math::Vec2 m_gizmoDragHalfExtents = math::Vec2(0.0f, 0.0f); // 2D selection half-extents at drag start
 
     // Multi-selection gizmo state - store initial transforms for all selected nodes
     std::vector<NodeInitialTransform> m_gizmoDragInitialTransforms;
@@ -293,11 +365,39 @@ private:
     // Per-view lighting state (to prevent light data sharing between scenes)
     // These are managed by RenderWorld but stored per-view to ensure isolation
     friend class RenderWorld;
-    std::vector<class LightDescriptor> m_activeLights;
+    std::vector<struct LightDescriptor> m_activeLights;
     struct LightUniformBuffer* m_lightUniformData = nullptr;  // Allocated by RenderWorld
+
+    // Per-view GPU light UBO handles (ring-buffered to prevent CPU/GPU race conditions)
+    // Each view needs its own GPU buffers to prevent conflicts when multiple scenes render concurrently
+    static constexpr uint32_t MAX_LIGHT_UBO_FRAMES = 3;
+    UniformBufferHandle m_lightUniformBuffers[MAX_LIGHT_UBO_FRAMES];
+    uint32_t m_currentLightBufferIndex = 0;
+
+    // Per-view shadow maps - each view needs its own shadow maps to prevent GPU conflicts
+    // when multiple scenes with lights render concurrently (Vulkan-specific requirement)
+    static constexpr uint32_t MAX_SHADOW_MAPS = 8;
+    std::vector<TextureHandle> m_shadowMaps;              // 2D shadow maps for directional/spot lights
+    std::vector<RenderTargetHandle> m_shadowMapFramebuffers;
+    std::vector<uint32_t> m_shadowMapResolutions;
+    std::vector<TextureHandle> m_shadowCubeMaps;          // Cube maps for point lights
+    std::vector<RenderTargetHandle> m_shadowCubeMapFramebuffers;
+    std::vector<uint32_t> m_shadowCubeMapResolutions;
 
     // Per-view world environment (skybox, fog, ambient light)
     class components::WorldEnvironment* m_activeWorldEnvironment = nullptr;
+
+    // Static-shadow cache state. Shadow maps persist across frames (this view is
+    // reused), so when nothing that affects them has changed the depth-map rasterization
+    // is skipped entirely and the previously rendered maps + light shadow matrices are
+    // reused. "Changed" = the render epoch (caster/light transform, visibility, content),
+    // the tree-structure version (caster/light added/removed), a dynamic caster being
+    // present, or - only when cascaded shadow maps are enabled, since cascades fit the
+    // camera - the camera view-projection.
+    uint64_t m_LastShadowEpoch = 0;
+    uint64_t m_LastShadowTreeVersion = 0;
+    bool m_HasRenderedShadows = false;
+    math::Mat4 m_LastShadowCameraVP;
 };
 
 } // namespace lupine

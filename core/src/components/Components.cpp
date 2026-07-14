@@ -1,49 +1,7 @@
 #include "lupine/components/Components.hpp"
-#include "lupine/components/Sprite2D.hpp"
-#include "lupine/components/Sprite3D.hpp"
-#include "lupine/components/AnimatedSprite2D.hpp"
-#include "lupine/components/AnimatedSprite3D.hpp"
-#include "lupine/components/PrimitiveMesh3D.hpp"
-#include "lupine/components/StaticMesh3D.hpp"
-#include "lupine/components/SkeletalMesh3D.hpp"
-#include "lupine/components/MultiMeshGeneric.hpp"
-#include "lupine/components/Label.hpp"
-#include "lupine/components/Label3D.hpp"
-#include "lupine/components/DirectionalLight3D.hpp"
-#include "lupine/components/OmniLight3D.hpp"
-#include "lupine/components/SpotLight3D.hpp"
-#include "lupine/components/ColorRect.hpp"
-#include "lupine/components/Image2D.hpp"
-#include "lupine/components/Timer.hpp"
-#include "lupine/components/YSort.hpp"
-#include "lupine/components/Panel.hpp"
-#include "lupine/components/Panel3D.hpp"
-#include "lupine/components/Container.hpp"
-#include "lupine/components/Button.hpp"
-#include "lupine/components/Button3D.hpp"
-#include "lupine/components/ProgressBar.hpp"
-#include "lupine/components/ProgressBar3D.hpp"
-#include "lupine/components/Shape2D.hpp"
-#include "lupine/components/Line2D.hpp"
-#include "lupine/components/WorldEnvironment.hpp"
-#include "lupine/components/AudioPlayer.hpp"
-#include "lupine/components/AudioListener.hpp"
-#include "lupine/components/RigidBody2DComponent.hpp"
-#include "lupine/components/StaticBody2DComponent.hpp"
-#include "lupine/components/KinematicBody2DComponent.hpp"
-#include "lupine/components/AreaTrigger2DComponent.hpp"
-#include "lupine/components/CollisionBody2DComponent.hpp"
-#include "lupine/components/RigidBody3DComponent.hpp"
-#include "lupine/components/StaticBody3DComponent.hpp"
-#include "lupine/components/KinematicBody3DComponent.hpp"
-#include "lupine/components/AreaTrigger3DComponent.hpp"
-#include "lupine/components/CollisionMesh3DComponent.hpp"
-#include "lupine/components/CharacterController2D.hpp"
-#include "lupine/components/CharacterController3D.hpp"
-#include "lupine/components/TestPlatform.hpp"
-#include "lupine/components/Test3D.hpp"
-#include "lupine/components/TestTopdown.hpp"
+#include "lupine/components/ComponentRegistry.hpp"
 #include "lupine/audio/AudioManager.hpp"
+#include "lupine/network/NetworkManager.hpp"
 #include "lupine/core/Serialization.hpp"
 #include "lupine/logger/Logger.hpp"
 
@@ -52,13 +10,22 @@ namespace components {
 
 // Register component types using the macro
 REGISTER_COMPONENT_TYPE(Sprite2D)
+REGISTER_COMPONENT_TYPE(Particles2D)
 REGISTER_COMPONENT_TYPE(Sprite3D)
+REGISTER_COMPONENT_TYPE(Particles3D)
+REGISTER_COMPONENT_TYPE(Light2D)
+REGISTER_COMPONENT_TYPE(LightOccluder2D)
 REGISTER_COMPONENT_TYPE(AnimatedSprite2D)
 REGISTER_COMPONENT_TYPE(AnimatedSprite3D)
+REGISTER_COMPONENT_TYPE(GifPlayer)
+REGISTER_COMPONENT_TYPE(VideoPlayer)
 REGISTER_COMPONENT_TYPE(PrimitiveMesh3D)
 REGISTER_COMPONENT_TYPE(StaticMesh3D)
 REGISTER_COMPONENT_TYPE(SkeletalMesh3D)
 REGISTER_COMPONENT_TYPE(MultiMeshGeneric)
+REGISTER_COMPONENT_TYPE(ScatterMultiMesh)
+REGISTER_COMPONENT_TYPE(CollisionScatterMultiMesh)
+REGISTER_COMPONENT_TYPE(NodeScatter)
 REGISTER_COMPONENT_TYPE(Label)
 REGISTER_COMPONENT_TYPE(Label3D)
 REGISTER_COMPONENT_TYPE(DirectionalLight3D)
@@ -67,16 +34,73 @@ REGISTER_COMPONENT_TYPE(SpotLight3D)
 REGISTER_COMPONENT_TYPE(ColorRect)
 REGISTER_COMPONENT_TYPE(Image2D)
 REGISTER_COMPONENT_TYPE(Timer)
+REGISTER_COMPONENT_TYPE(Tween)
+REGISTER_COMPONENT_TYPE(TweenSequence)
+REGISTER_COMPONENT_TYPE(AnimationPlayer)
+REGISTER_COMPONENT_TYPE(AnimationTree)
+REGISTER_COMPONENT_TYPE(SubViewport)
+REGISTER_COMPONENT_TYPE(CameraEffectColorGrade)
+REGISTER_COMPONENT_TYPE(CameraEffectTonemap)
+REGISTER_COMPONENT_TYPE(CameraEffectVignette)
+REGISTER_COMPONENT_TYPE(CameraEffectFilmGrain)
+REGISTER_COMPONENT_TYPE(CameraEffectColorInvert)
+REGISTER_COMPONENT_TYPE(CameraEffectPosterize)
+REGISTER_COMPONENT_TYPE(CameraEffectHueShift)
+REGISTER_COMPONENT_TYPE(CameraEffectBlur)
+REGISTER_COMPONENT_TYPE(CameraEffectGlow)
+REGISTER_COMPONENT_TYPE(CameraEffectOutline)
+REGISTER_COMPONENT_TYPE(CameraEffectPixelate)
+REGISTER_COMPONENT_TYPE(CameraEffectSharpen)
+REGISTER_COMPONENT_TYPE(CameraEffectChromaticAberration)
 REGISTER_COMPONENT_TYPE(YSort)
+REGISTER_COMPONENT_TYPE(ParallaxBackground)
+REGISTER_COMPONENT_TYPE(ParallaxLayer)
 REGISTER_COMPONENT_TYPE(Panel)
 REGISTER_COMPONENT_TYPE(Panel3D)
 REGISTER_COMPONENT_TYPE(Container)
+REGISTER_COMPONENT_TYPE(PaddingContainer)
+REGISTER_COMPONENT_TYPE(CenterContainer)
+REGISTER_COMPONENT_TYPE(HorizontalContainer)
+REGISTER_COMPONENT_TYPE(VerticalContainer)
+REGISTER_COMPONENT_TYPE(GridContainer)
+REGISTER_COMPONENT_TYPE(DockContainer)
+REGISTER_COMPONENT_TYPE(Stack)
+REGISTER_COMPONENT_TYPE(Wrap)
+REGISTER_COMPONENT_TYPE(SplitContainer)
+REGISTER_COMPONENT_TYPE(AspectRatioContainer)
+REGISTER_COMPONENT_TYPE(Spacer)
+REGISTER_COMPONENT_TYPE(LayoutSlot)
+REGISTER_COMPONENT_TYPE(ScrollContainer)
+REGISTER_COMPONENT_TYPE(TabContainer)
 REGISTER_COMPONENT_TYPE(Button)
 REGISTER_COMPONENT_TYPE(Button3D)
+REGISTER_COMPONENT_TYPE(TextureButton)
+REGISTER_COMPONENT_TYPE(ToggleButton)
+REGISTER_COMPONENT_TYPE(TextureToggleButton)
+REGISTER_COMPONENT_TYPE(RadioButton)
+REGISTER_COMPONENT_TYPE(RadioList)
+REGISTER_COMPONENT_TYPE(Checkbox)
+REGISTER_COMPONENT_TYPE(CheckList)
+REGISTER_COMPONENT_TYPE(NineSlicePanel)
 REGISTER_COMPONENT_TYPE(ProgressBar)
 REGISTER_COMPONENT_TYPE(ProgressBar3D)
+REGISTER_COMPONENT_TYPE(Slider)
+REGISTER_COMPONENT_TYPE(LineEdit)
+REGISTER_COMPONENT_TYPE(SpinBox)
+REGISTER_COMPONENT_TYPE(TextEdit)
+REGISTER_COMPONENT_TYPE(ItemList)
+REGISTER_COMPONENT_TYPE(Dropdown)
+REGISTER_COMPONENT_TYPE(PopupMenu)
+REGISTER_COMPONENT_TYPE(RichTextLabel)
+REGISTER_COMPONENT_TYPE(Tree)
 REGISTER_COMPONENT_TYPE(Shape2D)
 REGISTER_COMPONENT_TYPE(Line2D)
+REGISTER_COMPONENT_TYPE(Curve2D)
+REGISTER_COMPONENT_TYPE(Path2D)
+REGISTER_COMPONENT_TYPE(Curve3D)
+REGISTER_COMPONENT_TYPE(Path3D)
+REGISTER_COMPONENT_TYPE(PathFollow3D)
+REGISTER_COMPONENT_TYPE(VectorGraphic2D)
 REGISTER_COMPONENT_TYPE(WorldEnvironment)
 REGISTER_COMPONENT_TYPE(AudioPlayer)
 REGISTER_COMPONENT_TYPE(AudioListener)
@@ -85,16 +109,38 @@ REGISTER_COMPONENT_TYPE(StaticBody2DComponent)
 REGISTER_COMPONENT_TYPE(KinematicBody2DComponent)
 REGISTER_COMPONENT_TYPE(AreaTrigger2DComponent)
 REGISTER_COMPONENT_TYPE(CollisionBody2DComponent)
+REGISTER_COMPONENT_TYPE(RayCast2D)
+REGISTER_COMPONENT_TYPE(ShapeCast2D)
 REGISTER_COMPONENT_TYPE(RigidBody3DComponent)
 REGISTER_COMPONENT_TYPE(StaticBody3DComponent)
 REGISTER_COMPONENT_TYPE(KinematicBody3DComponent)
 REGISTER_COMPONENT_TYPE(AreaTrigger3DComponent)
 REGISTER_COMPONENT_TYPE(CollisionMesh3DComponent)
+REGISTER_COMPONENT_TYPE(RayCast3D)
+REGISTER_COMPONENT_TYPE(ShapeCast3D)
 REGISTER_COMPONENT_TYPE(CharacterController2D)
 REGISTER_COMPONENT_TYPE(CharacterController3D)
 REGISTER_COMPONENT_TYPE(TestPlatform)
 REGISTER_COMPONENT_TYPE(Test3D)
 REGISTER_COMPONENT_TYPE(TestTopdown)
+REGISTER_COMPONENT_TYPE(TileMap2D)
+REGISTER_COMPONENT_TYPE(NavigationRegion2D)
+REGISTER_COMPONENT_TYPE(NavigationAgent2D)
+REGISTER_COMPONENT_TYPE(NavigationObstacle2D)
+REGISTER_COMPONENT_TYPE(NavigationRegion3D)
+REGISTER_COMPONENT_TYPE(NavigationAgent3D)
+REGISTER_COMPONENT_TYPE(NavigationObstacle3D)
+REGISTER_COMPONENT_TYPE(NetworkObject)
+REGISTER_COMPONENT_TYPE(NetworkSynchronizer)
+REGISTER_COMPONENT_TYPE(NetworkTransform2D)
+REGISTER_COMPONENT_TYPE(NetworkTransform3D)
+REGISTER_COMPONENT_TYPE(NetworkSpawner)
+REGISTER_COMPONENT_TYPE(NetworkController)
+REGISTER_COMPONENT_TYPE(NetworkAnimator)
+REGISTER_COMPONENT_TYPE(NetworkRigidBody2D)
+REGISTER_COMPONENT_TYPE(NetworkRigidBody3D)
+REGISTER_COMPONENT_TYPE(Empty2D)
+REGISTER_COMPONENT_TYPE(Empty3D)
 
 void InitializeComponents() {
 
@@ -104,12 +150,19 @@ void InitializeComponents() {
     // Initialize audio manager
     audio::AudioManager::GetInstance().Initialize();
 
+    // Initialize networking manager (registers its session signals). Stays idle
+    // and zero-cost until a game explicitly starts or joins a session.
+    network::NetworkManager::GetInstance().Initialize();
+
 }
 
 void ShutdownComponents() {
 
     // Shutdown audio manager
     audio::AudioManager::GetInstance().Shutdown();
+
+    // Shutdown networking manager (ends any active session, closes transports).
+    network::NetworkManager::GetInstance().Shutdown();
 }
 
 } // namespace components

@@ -1,4 +1,5 @@
 #include "lupine/core/Command.hpp"
+#include "lupine/core/EditorCommands.hpp"  // CreateCommandForType
 #include "lupine/logger/Logger.hpp"
 
 namespace lupine {
@@ -83,8 +84,23 @@ nlohmann::json CompositeCommand::Serialize() const {
 }
 
 bool CompositeCommand::Deserialize(const nlohmann::json& json) {
+    m_Description = json.value("description", std::string());
+    m_Executed = json.value("executed", false);
+    m_Commands.clear();
 
-    return false;
+    if (!json.contains("commands") || !json["commands"].is_array()) {
+        return false;
+    }
+    for (const auto& cmdJson : json["commands"]) {
+        const std::string type = cmdJson.value("type", std::string());
+        std::shared_ptr<Command> cmd = CreateCommandForType(type);
+        if (!cmd || !cmd->Deserialize(cmdJson)) {
+            LOG_WARN(LogCategory::Tools, "CompositeCommand: skipping sub-command of unknown/invalid type '{}'", type);
+            continue;
+        }
+        m_Commands.push_back(cmd);
+    }
+    return true;
 }
 
 CommandHistory::CommandHistory()
@@ -225,8 +241,30 @@ nlohmann::json CommandHistory::Serialize() const {
 }
 
 bool CommandHistory::Deserialize(const nlohmann::json& json) {
+    if (!json.contains("commands") || !json["commands"].is_array()) {
+        return false;
+    }
 
-    return false;
+    m_MaxHistorySize = json.value("max_history_size", m_MaxHistorySize);
+    m_Commands.clear();
+
+    for (const auto& cmdJson : json["commands"]) {
+        const std::string type = cmdJson.value("type", std::string());
+        std::shared_ptr<Command> cmd = CreateCommandForType(type);
+        if (!cmd || !cmd->Deserialize(cmdJson)) {
+            LOG_WARN(LogCategory::Tools, "CommandHistory: skipping command of unknown/invalid type '{}'", type);
+            continue;
+        }
+        m_Commands.push_back(cmd);
+    }
+
+    // Clamp the restored cursor to the number of commands that actually deserialized
+    // (some may have been skipped) so undo/redo bounds stay valid.
+    m_CurrentIndex = json.value("current_index", static_cast<size_t>(0));
+    if (m_CurrentIndex > m_Commands.size()) {
+        m_CurrentIndex = m_Commands.size();
+    }
+    return true;
 }
 
 void CommandHistory::TrimHistory() {

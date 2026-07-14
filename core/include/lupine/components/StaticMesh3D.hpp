@@ -4,6 +4,7 @@
 #include "lupine/rendering/RenderWorld.hpp"
 #include "lupine/rendering/ResourceHandles.hpp"
 #include "lupine/rendering/PBRMaterial.hpp"
+#include "lupine/rendering/Material.hpp"
 #include "lupine/math/Color.hpp"
 #include "lupine/math/AABB.hpp"
 #include "lupine/asset/ImageAsset.hpp"
@@ -11,12 +12,16 @@
 #include <optional>
 #include <vector>
 #include <string>
+#include <unordered_map>
 
 namespace lupine {
 namespace components {
 
 using namespace core;
 using namespace math;
+
+// Use ShaderType from PBRMaterial.hpp
+using lupine::ShaderType;
 
 /**
  * Material slot for StaticMesh3D
@@ -26,7 +31,37 @@ struct MaterialSlot {
     std::string name;                           // Material name from model
     uint32_t materialIndex;                     // Index in model's material array
     bool enableOverride = false;                // Whether to use override or model's material
-    
+
+    // Shader selection
+    ShaderType shaderType = ShaderType::PBR;    // Which shader to use
+    std::string customVertShaderPath;           // Custom vertex shader path
+    std::string customFragShaderPath;           // Custom fragment shader path
+    std::string customLshShaderPath;            // Custom .lsh shader (translated at runtime,
+                                                // honors #render_mode; takes precedence)
+
+    // Toon shader specific parameters
+    float shadowBands = 3.0f;                   // Number of shadow bands for toon shading
+    float shadowThreshold = 0.5f;               // Shadow cutoff threshold
+    float shadowSoftness = 0.02f;               // Softness of shadow band edges
+    float specularBands = 2.0f;                 // Number of specular bands
+    float specularPower = 32.0f;                // Specular highlight sharpness
+    float rimIntensity = 0.0f;                  // Rim lighting intensity
+    float rimPower = 3.0f;                      // Rim lighting falloff
+
+    // Stylized shader specific parameters (legacy - kept for backward compatibility)
+    float stylizedShadowSoftness = 0.3f;        // How soft the shadow transitions are
+    float stylizedSpecularSoftness = 0.15f;     // How soft the specular edge is
+    float stylizedShadowBrightness = 0.4f;      // How bright shadows are (0-1)
+    float stylizedShadowWarmth = 0.5f;          // Warm/cool color shift in shadows (0-1)
+    float stylizedSpecularIntensity = 0.5f;     // Specular highlight intensity
+    float stylizedHalfLambertPower = 1.5f;      // Controls wrap-around lighting softness
+
+    // Generic shader parameters - uniform name to value mapping
+    // This allows any shader to define custom parameters without C++ code changes
+    // Keys are uniform names (e.g., "u_GlowParams", "u_StylizedParams")
+    // Values can be float, Vec2, Vec3, Vec4, Color, int, bool
+    std::unordered_map<std::string, MaterialPropertyValue> shaderParams;
+
     // PBR Material override properties
     Color albedoColor = Color::White();
     std::string albedoTexturePath;
@@ -96,7 +131,13 @@ public:
      * Get current model asset
      */
     const asset::AssetRef<asset::ModelAsset>& GetModelAsset() const { return m_ModelAsset; }
-    
+
+    /**
+     * Called when an asset file changes on disk.
+     * Override to properly invalidate cached mesh and texture handles.
+     */
+    bool OnAssetFileChanged(const std::string& changedPath, const std::string& resolvedChangedPath) override;
+
     // ===== Property Accessors =====
 
     // Model path
@@ -147,10 +188,16 @@ public:
 
     void buildDrawCommands(RenderContext& ctx) override;
     AABB getWorldBounds() const override;
+    // Static geometry: once the mesh is GPU-ready its content only changes through the
+    // (epoch-tracked) mesh/material properties and the node transform, so its view is
+    // safe to cache. While the mesh is still (async) loading - m_MeshHandles empty - it
+    // reports dynamic so the renderer keeps re-gathering until the mesh appears.
+    bool isRenderContentDynamic() const override { return m_MeshHandles.empty(); }
     RenderLayer getRenderLayer() const override;
     SpatialType getSpatialType() const override { return SpatialType::World3D; }
     bool IntersectRay(const math::Ray& ray, float& outDistance) const override;
     math::OBB getOrientedBounds() const override;
+    void prepareGPUResources(IGfxDevice* device) override;
 
 private:
     // Model asset
@@ -167,9 +214,15 @@ private:
     bool m_MeshesNeedUpload;
 
     /**
-     * Upload meshes to GPU if needed
+     * Upload meshes to GPU if needed (using RenderContext)
      */
     void UploadMeshesToGPU(RenderContext& ctx);
+
+    /**
+     * Upload meshes to GPU if needed (using device directly)
+     * Used for pre-upload optimization to avoid first-frame stutter
+     */
+    void UploadMeshesToGPU(IGfxDevice* device);
 
     /**
      * Upload material textures to GPU for a specific slot

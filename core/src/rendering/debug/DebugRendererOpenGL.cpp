@@ -1,9 +1,28 @@
 #include "lupine/rendering/debug/DebugRendererOpenGL.hpp"
+#include "lupine/rendering/GizmoUtils.hpp"
+#include "lupine/rendering/debug/DebugTextGeometry.hpp"
 #include "lupine/rendering/debug/DebugShaders.hpp"
 #include "lupine/rendering/MeshBuilder.hpp"
 #include "lupine/logger/Logger.hpp"
 #include <GL/glew.h>
+#include <algorithm>
 #include <cmath>
+
+#ifdef LUPINE_HAS_VULKAN
+#include "lupine/rendering/debug/DebugRendererVulkan.hpp"
+#endif
+
+#ifdef LUPINE_HAS_DIRECTX11
+#include "lupine/rendering/debug/DebugRendererDX11.hpp"
+#endif
+
+#ifdef LUPINE_HAS_METAL
+#include "lupine/rendering/debug/DebugRendererMetal.hpp"
+#endif
+
+#ifdef LUPINE_HAS_DIRECTX12
+#include "lupine/rendering/debug/DebugRendererDX12.hpp"
+#endif
 
 namespace lupine {
 
@@ -73,6 +92,13 @@ bool DebugRendererOpenGL::initialize(IGfxDevice* device) {
     if (!m_impl->device) {
 
         return false;
+    }
+
+    // Debug: Log shader source info
+    
+    if (DebugShaders::DebugLine_Vertex) {
+        std::string preview(DebugShaders::DebugLine_Vertex, std::min(size_t(50), strlen(DebugShaders::DebugLine_Vertex)));
+        
     }
 
     ShaderDesc vertDesc;
@@ -347,7 +373,10 @@ void DebugRendererOpenGL::draw3DOrientedBoundingBox(const OBB& obb, const Color&
 }
 
 void DebugRendererOpenGL::draw2DGizmo(const DebugGizmo& gizmo) {
-    renderGizmo(gizmo, Mat4::Identity(), false);
+    std::vector<GizmoSegment> segments = GizmoUtils::BuildGizmo2DGeometry(gizmo);
+    for (const GizmoSegment& seg : segments) {
+        drawLine(seg.start, seg.end, seg.color, 0.0f, false);
+    }
 }
 
 void DebugRendererOpenGL::draw3DGizmo(const DebugGizmo& gizmo) {
@@ -484,67 +513,7 @@ void DebugRendererOpenGL::drawArrow(const Vec3& start, const Vec3& end, const Co
 
 void DebugRendererOpenGL::drawText(const Vec3& position, const std::string& text,
                                    const Color& color, float size, float duration) {
-
-    /*
-
-    FontAtlas* atlas = m_impl->device->getFontAtlas("DebugFont");
-    if (!atlas) {
-
-        atlas = m_impl->device->createFontAtlas("DebugFont", "fonts/debug.ttf", 16);
-    }
-
-    std::vector<LineVertex> textVertices;
-    std::vector<uint32_t> textIndices;
-
-    Vec3 cursor = position;
-    float scale = size / atlas->fontSize;
-
-    for (char c : text) {
-        const FontGlyph& glyph = atlas->glyphs[c];
-
-        Vec3 glyphPos = cursor + Vec3(glyph.bearing.x * scale, -glyph.bearing.y * scale, 0);
-        Vec2 glyphSize = Vec2(glyph.size.x * scale, glyph.size.y * scale);
-
-        uint32_t baseIndex = static_cast<uint32_t>(textVertices.size());
-
-        textVertices.push_back({glyphPos, color, glyph.uvMin});
-        textVertices.push_back({glyphPos + Vec3(glyphSize.x, 0, 0), color, Vec2(glyph.uvMax.x, glyph.uvMin.y)});
-        textVertices.push_back({glyphPos + Vec3(glyphSize.x, glyphSize.y, 0), color, glyph.uvMax});
-        textVertices.push_back({glyphPos + Vec3(0, glyphSize.y, 0), color, Vec2(glyph.uvMin.x, glyph.uvMax.y)});
-
-        textIndices.push_back(baseIndex + 0);
-        textIndices.push_back(baseIndex + 1);
-        textIndices.push_back(baseIndex + 2);
-        textIndices.push_back(baseIndex + 0);
-        textIndices.push_back(baseIndex + 2);
-        textIndices.push_back(baseIndex + 3);
-
-        cursor.x += glyph.advance * scale;
-    }
-
-    MeshData textMesh;
-    textMesh.vertices.reserve(textVertices.size());
-    for (const auto& v : textVertices) {
-        textMesh.vertices.push_back({v.position, Vec3(0, 0, 1), Vec2(0, 0), Vec4(v.color.r, v.color.g, v.color.b, v.color.a)});
-    }
-    textMesh.indices = textIndices;
-    textMesh.calculateBounds();
-
-    MeshHandle textMeshHandle = m_impl->device->createMesh(textMesh);
-
-    */
-
-    Vec3 cursor = position;
-    float charWidth = size * 0.6f;
-    float charHeight = size;
-
-    for (size_t i = 0; i < text.length(); ++i) {
-
-        drawBox(cursor + Vec3(charWidth * 0.5f, charHeight * 0.5f, 0),
-                Vec3(charWidth * 0.8f, charHeight * 0.8f, 0.1f),
-                color, true, duration, true);
-        cursor.x += charWidth;
-    }
+    debug::EmitDebugText(*this, position, text, color, size, duration);
 }
 
 void DebugRendererOpenGL::drawAxes(const Vec3& position, float size, float duration) {
@@ -676,7 +645,7 @@ void DebugRendererOpenGL::renderLines(IGfxCommandList* cmd, const Mat4& viewProj
 
 }
 
-void DebugRendererOpenGL::renderGrid(const DebugGrid& grid, const Mat4& viewProjection) {
+void DebugRendererOpenGL::renderGrid(const DebugGrid& grid, const Mat4&) {
 
     float cellSize = grid.cellSize;
     int halfCells = grid.cellCount / 2;
@@ -720,7 +689,7 @@ void DebugRendererOpenGL::renderGrid(const DebugGrid& grid, const Mat4& viewProj
     }
 }
 
-void DebugRendererOpenGL::renderGizmo(const DebugGizmo& gizmo, const Mat4& viewProjection, bool is3D) {
+void DebugRendererOpenGL::renderGizmo(const DebugGizmo& gizmo, const Mat4&, bool is3D) {
     float size = gizmo.size;
 
     if (is3D) {
@@ -831,8 +800,27 @@ std::unique_ptr<DebugRenderer> createDebugRenderer(GraphicsBackend backend) {
         case GraphicsBackend::OpenGL:
             return std::make_unique<DebugRendererOpenGL>();
 
-        default:
+#ifdef LUPINE_HAS_VULKAN
+        case GraphicsBackend::Vulkan:
+            return std::make_unique<DebugRendererVulkan>();
+#endif
 
+#ifdef LUPINE_HAS_DIRECTX11
+        case GraphicsBackend::DirectX11:
+            return std::make_unique<DebugRendererDX11>();
+#endif
+
+#ifdef LUPINE_HAS_DIRECTX12
+        case GraphicsBackend::DirectX12:
+            return std::make_unique<DebugRendererDX12>();
+#endif
+
+#ifdef LUPINE_HAS_METAL
+        case GraphicsBackend::Metal:
+            return std::make_unique<DebugRendererMetal>();
+#endif
+
+        default:
             return nullptr;
     }
 }

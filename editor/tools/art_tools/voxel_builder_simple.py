@@ -25,6 +25,7 @@ if str(editor_path) not in sys.path:
 
 from panels.base_panel import EditorPanel
 from theme import get_theme_manager
+from native_render_widget import NativeRenderWidget
 
 try:
     import lupine_engine as le
@@ -80,13 +81,12 @@ class VoxelViewport(QWidget):
         self.setAutoFillBackground(True)
         self.setPalette(palette)
 
-        # Render widget
-        self.render_widget = QWidget(self)
-        self.render_widget.setAutoFillBackground(True)
+        # Render widget. The engine renders into this widget's native window
+        # handle, so it must be a NativeRenderWidget that Qt never paints/erases;
+        # a plain background-filled QWidget here flashes to its fill colour for one
+        # Qt frame on every resize/repaint before the engine redraws (flicker).
+        self.render_widget = NativeRenderWidget(self, surface_color=(30, 30, 30))
         self.render_widget.setMinimumSize(400, 300)
-        render_palette = self.render_widget.palette()
-        render_palette.setColor(QPalette.ColorRole.Window, QColor(30, 30, 30))
-        self.render_widget.setPalette(render_palette)
         self.render_widget.setMouseTracking(True)
         self.render_widget.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.render_widget.installEventFilter(self)
@@ -192,6 +192,7 @@ class VoxelViewport(QWidget):
 
             # Render the view itself
             self.editor_bridge.render_view(self.view_id)
+            self.render_widget.notify_rendered()
         except Exception as e:
             print(f"[VoxelViewport] Error rendering: {e}")
 

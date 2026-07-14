@@ -1,7 +1,9 @@
 #include "lupine/core/Prefab.hpp"
 #include "lupine/platform/Platform.hpp"
+#include "lupine/platform/PackFile.hpp"
 #include "lupine/logger/Logger.hpp"
 #include "lupine/core/Component.hpp"
+#include "lupine/core/UUIDRemap.hpp"
 #include <nlohmann/json.hpp>
 
 namespace lupine {
@@ -46,14 +48,27 @@ void Prefab::Deserialize(const nlohmann::json& json) {
 bool Prefab::Load(const std::string& filepath) {
     m_FilePath = filepath;
 
-    auto result = platform::FileSystem::ReadFile(filepath);
-    if (!result.success) {
+    std::string fileContents;
 
-        return false;
+    // Check if running from pack file first
+    auto& packFS = platform::PackFileSystem::Instance();
+    if (packFS.isPackMode() && packFS.exists(filepath)) {
+        fileContents = packFS.readFileAsString(filepath);
+        if (fileContents.empty()) {
+            
+            return false;
+        }
+    } else {
+        auto result = platform::FileSystem::ReadFile(filepath);
+        if (!result.success) {
+            
+            return false;
+        }
+        fileContents = std::move(result.data);
     }
 
     try {
-        nlohmann::json json = nlohmann::json::parse(result.data);
+        nlohmann::json json = nlohmann::json::parse(fileContents);
 
         RegisterProperties();
 
@@ -61,7 +76,7 @@ bool Prefab::Load(const std::string& filepath) {
 
         return true;
     } catch (const std::exception& e) {
-
+        LOG_ERROR(LogCategory::Asset, "Prefab: failed to load '{}': {}", filepath, e.what());
         return false;
     }
 }
@@ -126,7 +141,7 @@ std::shared_ptr<Node> Prefab::Instantiate() {
 
         return instance;
     } catch (const std::exception& e) {
-
+        LOG_ERROR(LogCategory::Asset, "Prefab: failed to instantiate '{}': {}", m_Name, e.what());
         return nullptr;
     }
 }
@@ -146,12 +161,26 @@ std::shared_ptr<Node> Prefab::InstantiateAsChild(std::shared_ptr<Node> parent) {
     return instance;
 }
 
+std::shared_ptr<Node> Prefab::InstantiateForEditing() {
+    if (!m_RootNodeData) {
+
+        return nullptr;
+    }
+
+    try {
+        return CloneNodeTree(*m_RootNodeData, false);
+    } catch (const std::exception& e) {
+        LOG_ERROR(LogCategory::Asset, "Prefab: failed to instantiate '{}' for editing: {}", m_Name, e.what());
+        return nullptr;
+    }
+}
+
 void Prefab::Clear() {
     m_RootNodeData = nullptr;
 
 }
 
-std::shared_ptr<Node> Prefab::CloneNodeTree(const nlohmann::json& nodeJson) {
+std::shared_ptr<Node> Prefab::CloneNodeTree(const nlohmann::json& nodeJson, bool regenerateUUIDs) {
     if (!nodeJson.contains("type")) {
 
         return nullptr;
@@ -168,23 +197,15 @@ std::shared_ptr<Node> Prefab::CloneNodeTree(const nlohmann::json& nodeJson) {
 
     node->Deserialize(nodeJson);
 
-    RegenerateUUIDs(node);
+    if (regenerateUUIDs) {
+        RegenerateUUIDs(node);
+    }
 
     return node;
 }
 
 void Prefab::RegenerateUUIDs(std::shared_ptr<Node> node) {
-    if (!node) return;
-
-    const_cast<core::UUID&>(node->GetUUID()) = core::UUID();
-
-    for (const auto& component : node->GetComponents()) {
-        const_cast<core::UUID&>(component->GetUUID()) = core::UUID();
-    }
-
-    for (const auto& child : node->GetChildren()) {
-        RegenerateUUIDs(child);
-    }
+    core::uuidremap::RegenerateSubtree(node);
 }
 
 }

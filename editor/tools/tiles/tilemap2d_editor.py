@@ -59,11 +59,44 @@ class TileLayer:
         self.tiles.clear()
 
 
+def _resolve_res_path(res_path: str, project_root: str = None) -> str:
+    """Resolve a res:// path to an absolute path"""
+    if not res_path:
+        return res_path
+
+    if res_path.startswith("res://"):
+        # Try to get project root from AssetDatabase first
+        if not project_root:
+            try:
+                import lupine_engine as le
+                asset_db = le.AssetDatabase.get_instance()
+                if asset_db.is_initialized():
+                    project_root = asset_db.get_project_root()
+            except Exception:
+                pass
+
+        if not project_root:
+            # Try panels.inspector_panel
+            try:
+                from panels.inspector_panel import get_project_root
+                project_root = get_project_root()
+            except Exception:
+                pass
+
+        if project_root:
+            relative_path = res_path[6:]  # Remove "res://"
+            return str(Path(project_root) / relative_path)
+
+    return res_path
+
+
 class TilesetData:
     """Represents a loaded tileset"""
     def __init__(self, file_path: str):
-        self.file_path = file_path
-        self.name = Path(file_path).stem
+        self.file_path = file_path  # Store as res:// path
+        # Resolve for name extraction
+        resolved = _resolve_res_path(file_path)
+        self.name = Path(resolved).stem
         self.image_pixmap = None
         self.tile_width = 32
         self.tile_height = 32
@@ -72,15 +105,21 @@ class TilesetData:
     def load(self):
         """Load tileset from file"""
         try:
-            with open(self.file_path, 'r', encoding='utf-8') as f:
+            # Resolve res:// path to absolute path for file access
+            resolved_file_path = _resolve_res_path(self.file_path)
+
+            with open(resolved_file_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
 
             self.tile_width = data.get('tile_width', 32)
             self.tile_height = data.get('tile_height', 32)
             tileset_image_path = data.get('tileset_image_path', '')
 
-            if tileset_image_path and Path(tileset_image_path).exists():
-                self.image_pixmap = QPixmap(str(tileset_image_path))
+            # Resolve the tileset image path (may be res:// path)
+            resolved_image_path = _resolve_res_path(tileset_image_path)
+
+            if resolved_image_path and Path(resolved_image_path).exists():
+                self.image_pixmap = QPixmap(str(resolved_image_path))
 
                 # Calculate tile count
                 cols = self.image_pixmap.width() // self.tile_width
@@ -792,6 +831,8 @@ class LayerListWidget(QWidget):
 class TileMap2DEditor(EditorPanel):
     """TileMap 2D Editor tool for creating tilemaps with multiple layers"""
 
+    tilemap_saved = pyqtSignal(str)  # Emitted when tilemap is saved, with file path
+
     def __init__(self, parent=None, project_root=None):
         self.project_root = project_root
         self.current_file = None
@@ -1058,11 +1099,15 @@ class TileMap2DEditor(EditorPanel):
 
     def _do_load(self, file_path):
         """Perform the load operation"""
+        from panels.inspector_panel import convert_to_res_path
+
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
+            resolved_file_path = _resolve_res_path(file_path)
+
+            with open(resolved_file_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
 
-            self.current_file = file_path
+            self.current_file = resolved_file_path
             self.map_width = data.get('width', 32)
             self.map_height = data.get('height', 32)
 
@@ -1079,13 +1124,28 @@ class TileMap2DEditor(EditorPanel):
             # Load tilesets
             self._clear_tilesets()
             tileset_paths = data.get('tilesets', [])
+            missing_tilesets = []
             for tileset_path in tileset_paths:
-                if Path(tileset_path).exists():
-                    tileset = TilesetData(tileset_path)
-                    if tileset.load():
-                        self.tilesets.append(tileset)
-                        self.tileset_list.addItem(tileset.name)
-                        self.palette_widget.add_tileset(tileset)
+                # Tileset references are stored as res:// paths, which the filesystem
+                # cannot stat directly - resolve before checking that they exist.
+                resolved_path = _resolve_res_path(tileset_path)
+                if not resolved_path or not Path(resolved_path).exists():
+                    missing_tilesets.append(tileset_path)
+                    continue
+
+                # Normalize legacy absolute references back to res:// so that re-saving
+                # this tilemap upgrades them instead of baking in a machine-specific path.
+                stored_path = tileset_path
+                if not stored_path.startswith("res://"):
+                    stored_path = convert_to_res_path(resolved_path) or tileset_path
+
+                tileset = TilesetData(stored_path)
+                if tileset.load():
+                    self.tilesets.append(tileset)
+                    self.tileset_list.addItem(tileset.name)
+                    self.palette_widget.add_tileset(tileset)
+                else:
+                    missing_tilesets.append(tileset_path)
 
             self.canvas_widget.tilesets = self.tilesets
 
@@ -1120,7 +1180,21 @@ class TileMap2DEditor(EditorPanel):
 
             self._apply_texture_filtering()
 
-            QMessageBox.information(self, "Success", "TileMap loaded successfully")
+            if missing_tilesets:
+                # Saving now would drop these references from the file entirely, so the
+                # user has to know before they touch anything.
+                missing_list = "\n".join(f"  - {p}" for p in missing_tilesets)
+                QMessageBox.warning(
+                    self,
+                    "Missing Tilesets",
+                    "TileMap loaded, but these tilesets could not be opened and were not "
+                    "added to the palette:\n\n"
+                    f"{missing_list}\n\n"
+                    "Saving now will remove them from the tilemap. Restore the files or "
+                    "re-add the tilesets first."
+                )
+            else:
+                QMessageBox.information(self, "Success", "TileMap loaded successfully")
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed to load tilemap:\\n{str(e)}")
 
@@ -1188,12 +1262,17 @@ class TileMap2DEditor(EditorPanel):
             with open(file_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2)
 
+            # Emit signal with saved file path
+            self.tilemap_saved.emit(file_path)
+
             QMessageBox.information(self, "Success", "TileMap saved successfully")
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed to save tilemap:\\n{str(e)}")
 
     def _load_tileset(self):
         """Load a tileset"""
+        from panels.inspector_panel import convert_to_res_path
+
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Load Tileset",
@@ -1202,7 +1281,9 @@ class TileMap2DEditor(EditorPanel):
         )
 
         if file_path:
-            tileset = TilesetData(file_path)
+            # Convert to res:// path for storage
+            res_path = convert_to_res_path(file_path)
+            tileset = TilesetData(res_path)
             if tileset.load():
                 self.tilesets.append(tileset)
                 self.tileset_list.addItem(tileset.name)

@@ -35,11 +35,13 @@ public:
     // ISerializable interface
     std::string GetTypeName() const override { return "RigidBody2DComponent"; }
     void DefineProperties() override;
+    void DefineSignals() override;
 
     // Lifecycle hooks
     void OnAwake() override;
     void OnReady() override;
     void OnDestroy() override;
+    void OnPhysicsWorldRebuild(PhysicsWorldRebuildPhase phase) override;
     void OnPhysicsProcess(float deltaTime) override;
 
     // ===== Property Accessors =====
@@ -113,7 +115,12 @@ private:
     // Cached transform for synchronization
     math::Vec2 m_LastPosition;
     float m_LastRotation;
-    
+
+    // Cached velocities so values set before the physics body exists are
+    // preserved and applied once the body is created.
+    math::Vec2 m_LinearVelocity = math::Vec2(0.0f, 0.0f);
+    float m_AngularVelocity = 0.0f;
+
     // Create physics body in the physics world
     void CreatePhysicsBody();
     
@@ -128,6 +135,12 @@ private:
     
     // Update gravity scale based on settings
     void UpdateGravityScale();
+
+    // Wire physics-world collision callbacks to the body_entered/body_exited signals.
+    void RegisterCollisionCallbacks();
+    void OnCollisionEnterInternal(const physics2d::CollisionInfo& info);
+    void OnCollisionExitInternal(const physics2d::CollisionInfo& info);
+    nlohmann::json ResolveOtherBodyNodeArg(const core::UUID& otherBodyId) const;
 };
 
 } // namespace components

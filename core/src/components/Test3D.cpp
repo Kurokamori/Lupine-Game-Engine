@@ -47,7 +47,7 @@ void Test3D::OnAwake() {
     }
 }
 
-void Test3D::OnInput(float deltaTime) {
+void Test3D::OnInput(float) {
     if (!m_Owner || !m_CharacterController) return;
 
     InputManager& input = InputManager::Get();
@@ -86,7 +86,7 @@ void Test3D::OnInput(float deltaTime) {
     m_CharacterController->SetVelocity(velocity);
 }
 
-void Test3D::OnPhysicsProcess(float deltaTime) {
+void Test3D::OnPhysicsProcess(float) {
 
     if (m_CharacterController) {
         m_IsOnGround = m_CharacterController->IsOnGround();

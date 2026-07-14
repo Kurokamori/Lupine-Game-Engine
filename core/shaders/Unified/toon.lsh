@@ -1,0 +1,236 @@
+#shader "Toon"
+#description "Cel/Toon shading with configurable shadow bands, specular bands, and rim lighting"
+
+#feature lighting
+#feature shadows
+#feature normal_mapping
+#feature fog
+
+#begin properties
+    uniform mat4 u_ViewProjection;
+    uniform mat4 u_View;
+    uniform mat4 u_Model;
+    uniform mat4 u_NormalMatrix;
+    uniform vec3 u_CameraPosition = vec3(0.0);
+    uniform vec4 u_TintColor = vec4(1.0);
+
+    uniform vec4 u_AlbedoColor = vec4(1.0);
+    uniform vec4 u_EmissiveColor = vec4(0.0);
+    uniform vec4 u_TextureFlags = vec4(0.0);
+    uniform vec4 u_MaterialParams1 = vec4(0.0, 0.5, 1.0, 0.0);
+    uniform vec4 u_ToonMaterialParams = vec4(2.0, 2.0, 1.0, 1.0);
+    uniform vec4 u_ToonMaterialParams2 = vec4(0.0, 3.0, 0.0, 32.0);
+    uniform vec4 u_ToonParams = vec4(0.5, 0.02, 0.3, 0.05);
+    uniform int u_ReceiveShadow = 1;
+
+    uniform sampler2D u_AlbedoTexture;
+    uniform sampler2D u_NormalTexture;
+    uniform sampler2D u_EmissiveTexture;
+#end properties
+
+#begin shared
+    // Wrap NdotL from [-1, 1] to [0, 1] range for robust skeletal mesh lighting
+    float wrapLighting(float NdotL) {
+        return NdotL * 0.5 + 0.5;
+    }
+
+    // Cel shading: quantize value into discrete bands
+    float celShade(float value, float bands, float threshold, float softness) {
+        float adjustedValue = smoothstep(threshold - softness, threshold + softness, value);
+        if (bands <= 1.0) {
+            return adjustedValue;
+        }
+        float quantized = floor(adjustedValue * bands) / (bands - 1.0);
+        return clamp(quantized, 0.0, 1.0);
+    }
+
+    // Improved cel shading with stacking bands
+    float celShadeStacked(float value, float bands) {
+        if (bands <= 1.0) {
+            return step(0.5, value);
+        }
+        float quantized = floor(value * bands) / (bands - 1.0);
+        return clamp(quantized, 0.0, 1.0);
+    }
+
+    // Calculate rim lighting (fresnel-based edge glow)
+    float calculateRimLighting(vec3 N, vec3 V, float rimPower, float rimIntensity) {
+        float rim = 1.0 - max(dot(N, V), 0.0);
+        rim = pow(rim, rimPower) * rimIntensity;
+        return rim;
+    }
+#end shared
+
+#begin vertex
+    #input vec3 a_Position : POSITION 0
+    #input vec3 a_Normal : NORMAL 1
+    #input vec2 a_TexCoord : TEXCOORD0 2
+    #input vec4 a_Color : COLOR 3
+
+    #output vec3 v_WorldPos
+    #output vec3 v_ViewPos
+    #output vec3 v_Normal
+    #output vec2 v_TexCoord
+    #output vec4 v_Color
+    #output vec3 v_ViewDir
+
+    void main() {
+        vec4 worldPos = MUL(u_Model, vec4(a_Position, 1.0));
+        v_WorldPos = worldPos.xyz;
+        v_ViewPos = MUL(u_View, worldPos).xyz;
+        v_Normal = MUL(MAT3(u_NormalMatrix), a_Normal);
+        v_TexCoord = a_TexCoord;
+        v_Color = a_Color;
+        v_ViewDir = normalize(u_CameraPosition.xyz - worldPos.xyz);
+        VERTEX_OUTPUT = MUL(u_ViewProjection, worldPos);
+    }
+#end vertex
+
+#begin fragment
+    #output vec4 FragColor
+
+    void main() {
+        // Sample albedo texture
+        vec4 albedo = u_AlbedoColor;
+        if (u_TextureFlags.x > 0.5) {
+            albedo *= SAMPLE(u_AlbedoTexture, v_TexCoord);
+        }
+
+        // Alpha test (u_ToonMaterialParams2.x = alphaCutoff)
+        if (albedo.a < u_ToonMaterialParams2.x) {
+            DISCARD;
+        }
+
+        // Unpack toon parameters with defaults
+        // u_ToonMaterialParams: x=shadowBands, y=specularBands, z=normalScale, w=emissiveStrength
+        float shadowBands = max(u_ToonMaterialParams.x, 2.0);
+        float specularBands = max(u_ToonMaterialParams.y, 2.0);
+        float normalScale = u_ToonMaterialParams.z;
+        // u_ToonParams: x=shadowThreshold, y=shadowSoftness, z=specularThreshold, w=specularSoftness
+        float shadowThreshold = u_ToonParams.x > 0.0 ? u_ToonParams.x : 0.5;
+        float shadowSoftness = u_ToonParams.y > 0.0 ? u_ToonParams.y : 0.02;
+        float specularThreshold = u_ToonParams.z > 0.0 ? u_ToonParams.z : 0.3;
+        float specularSoftness = u_ToonParams.w > 0.0 ? u_ToonParams.w : 0.05;
+        // u_ToonMaterialParams2: x=alphaCutoff, y=rimPower, z=rimIntensity, w=specularPower
+        float rimPower = u_ToonMaterialParams2.y > 0.0 ? u_ToonMaterialParams2.y : 3.0;
+        float rimIntensity = u_ToonMaterialParams2.z;
+        float specularPower = u_ToonMaterialParams2.w > 0.0 ? u_ToonMaterialParams2.w : 32.0;
+
+        // Normal mapping (screen-space TBN)
+        vec3 N = normalize(v_Normal);
+        if (u_TextureFlags.z > 0.5) {
+            vec3 tangentNormal = SAMPLE(u_NormalTexture, v_TexCoord).rgb * 2.0 - 1.0;
+            tangentNormal.xy *= normalScale;
+            vec3 Q1 = dFdx(v_WorldPos);
+            vec3 Q2 = dFdy(v_WorldPos);
+            vec2 st1 = dFdx(v_TexCoord);
+            vec2 st2 = dFdy(v_TexCoord);
+            vec3 T = normalize(Q1 * st2.y - Q2 * st1.y);
+            vec3 B = -normalize(cross(N, T));
+            mat3 TBN = mat3(T, B, N);
+            N = normalize(MUL(TBN, tangentNormal));
+        }
+
+        vec3 V = normalize(v_ViewDir);
+
+        // Ambient from light UBO
+        vec3 ambient = u_Lights.ambientLight.rgb;
+
+        // Accumulate lighting from all dynamic lights
+        vec3 totalDiffuse = vec3(0.0);
+        vec3 totalSpecular = vec3(0.0);
+        int numLights = int(u_Lights.lightCounts.x);
+
+        for (int i = 0; i < 16; i++) {
+            if (i >= numLights) break;
+
+            vec3 lightColor = u_Lights.lights[i].color.rgb;
+            float lightIntensity = u_Lights.lights[i].color.w;
+            int lightType = int(u_Lights.lights[i].flags.x);
+            vec3 lightPos = u_Lights.lights[i].positionOrDirection.xyz;
+
+            // Compute light direction
+            vec3 L;
+            float attenuation = 1.0;
+
+            if (lightType == 0) {
+                // Directional light
+                L = normalize(-u_Lights.lights[i].direction.xyz);
+            } else {
+                // Point or spot light
+                vec3 toLight = lightPos - v_WorldPos;
+                float dist = length(toLight);
+                L = normalize(toLight);
+                float lightRange = u_Lights.lights[i].params.x;
+                float distFactor = clamp(dist / lightRange, 0.0, 1.0);
+                attenuation = 1.0 / (1.0 + distFactor * distFactor);
+                attenuation *= smoothstep(1.0, 0.5, distFactor);
+
+                if (lightType == 2) {
+                    // Spot light cone attenuation
+                    vec3 spotDir = normalize(-u_Lights.lights[i].direction.xyz);
+                    float cosAngle = dot(L, spotDir);
+                    float innerCone = u_Lights.lights[i].params.y;
+                    float outerCone = u_Lights.lights[i].params.z;
+                    float epsilon = max(innerCone - outerCone, 0.0001);
+                    attenuation *= clamp((cosAngle - outerCone) / epsilon, 0.0, 1.0);
+                }
+            }
+
+            vec3 H = normalize(V + L);
+
+            // Cel-shaded diffuse using wrapped NdotL
+            float rawNdotL = dot(N, L);
+            float wrappedNdotL = wrapLighting(rawNdotL);
+            float NdotL = max(rawNdotL, 0.0);
+
+            float celDiffuse = celShade(wrappedNdotL, shadowBands, shadowThreshold, shadowSoftness);
+
+            // Cel-shaded specular (Blinn-Phong based)
+            float NdotH = max(dot(N, H), 0.0);
+            float specularRaw = pow(NdotH, specularPower);
+            float specularFactor = specularRaw * NdotL;
+            float specularStep = smoothstep(specularThreshold - specularSoftness,
+                                            specularThreshold + specularSoftness,
+                                            specularFactor);
+            float celSpecular = specularBands > 1.0 ?
+                celShadeStacked(specularStep, specularBands) : specularStep;
+
+            // Shadow
+            float shadow = 1.0;
+            if (u_ReceiveShadow != 0 && u_Lights.lights[i].flags.y > 0.5) {
+                shadow = calculateShadow(int(u_Lights.lights[i].flags.z), v_WorldPos, N, L, lightPos);
+            }
+
+            vec3 litColor = lightColor * lightIntensity * attenuation * shadow;
+            totalDiffuse += litColor * celDiffuse;
+            totalSpecular += litColor * celSpecular;
+        }
+
+        // Rim lighting
+        float rim = calculateRimLighting(N, V, rimPower, rimIntensity);
+        vec3 rimColor = ambient * rim;
+
+        // Emissive (u_ToonMaterialParams.w = emissiveStrength)
+        vec3 emissive = u_EmissiveColor.rgb * u_ToonMaterialParams.w;
+        if (u_TextureFlags.w > 0.5) {
+            emissive *= SAMPLE(u_EmissiveTexture, v_TexCoord).rgb;
+        }
+
+        // Final color composition
+        vec3 diffuseColor = albedo.rgb * (ambient + totalDiffuse);
+        vec3 specularColor = totalSpecular;
+        vec3 color = diffuseColor + specularColor + rimColor + emissive;
+
+        // Apply tint
+        color *= u_TintColor.rgb;
+
+        // Distance fog
+        color = applyFog(color, v_WorldPos, u_CameraPosition);
+
+        // Gamma correction
+        color = pow(color, vec3(1.0 / 2.2));
+
+        FragColor = vec4(color, albedo.a);
+    }
+#end fragment

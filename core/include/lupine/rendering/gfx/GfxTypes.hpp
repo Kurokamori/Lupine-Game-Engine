@@ -39,14 +39,45 @@ inline bool IsBottomLeftOrigin(GraphicsBackend backend) {
 
 /**
  * Check if a graphics backend uses top-left origin for framebuffers/viewports.
- * 
+ *
  * @param backend The graphics backend to check
  * @return true if backend uses top-left origin (Vulkan/DirectX/Metal), false otherwise
  */
 inline bool IsTopLeftOrigin(GraphicsBackend backend) {
-    return backend == GraphicsBackend::Vulkan || 
-           backend == GraphicsBackend::DirectX11 || 
-           backend == GraphicsBackend::DirectX12 || 
+    return backend == GraphicsBackend::Vulkan ||
+           backend == GraphicsBackend::DirectX11 ||
+           backend == GraphicsBackend::DirectX12 ||
+           backend == GraphicsBackend::Metal;
+}
+
+/**
+ * Check if a graphics backend requires Y-flip in the projection matrix.
+ *
+ * Graphics APIs with top-left origin need Y to be flipped to match OpenGL conventions:
+ * - Vulkan: Handles Y-flip via negative viewport height, no projection flip needed
+ * - DirectX11/DirectX12/Metal: Don't support negative viewports, need projection Y-flip
+ * - OpenGL/WebGL: Already use bottom-left origin, no flip needed
+ *
+ * @param backend The graphics backend to check
+ * @return true if projection matrix needs Y-flip (DX11/DX12/Metal), false otherwise
+ */
+inline bool NeedsProjectionYFlip(GraphicsBackend backend) {
+    return backend == GraphicsBackend::DirectX11 ||
+           backend == GraphicsBackend::DirectX12 ||
+           backend == GraphicsBackend::Metal;
+}
+
+/**
+ * Check if a graphics backend uses zero-to-one depth range.
+ * OpenGL/WebGL use [-1, 1], while DirectX/Vulkan/Metal use [0, 1].
+ *
+ * @param backend The graphics backend to check
+ * @return true if backend uses [0, 1] depth range, false if [-1, 1]
+ */
+inline bool IsZeroToOneDepth(GraphicsBackend backend) {
+    return backend == GraphicsBackend::Vulkan ||
+           backend == GraphicsBackend::DirectX11 ||
+           backend == GraphicsBackend::DirectX12 ||
            backend == GraphicsBackend::Metal;
 }
 
@@ -292,6 +323,18 @@ enum class IndexFormat {
 };
 
 /**
+ * Vertex input rate for a vertex buffer binding.
+ * Vertex   - attributes advance once per vertex (the normal case).
+ * Instance - attributes advance once per instance (GPU instancing); the same
+ *            value is fed to every vertex of an instance. The advance step is
+ *            controlled by a divisor of 1 (one new value per instance).
+ */
+enum class VertexInputRate {
+    Vertex,
+    Instance
+};
+
+/**
  * Native window handle for creating swapchains
  */
 struct NativeWindowHandle {
@@ -319,6 +362,11 @@ struct ScissorRect {
     int32_t y = 0;
     uint32_t width = 0;
     uint32_t height = 0;
+
+    bool operator==(const ScissorRect& o) const {
+        return x == o.x && y == o.y && width == o.width && height == o.height;
+    }
+    bool operator!=(const ScissorRect& o) const { return !(*this == o); }
 };
 
 } // namespace lupine

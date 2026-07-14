@@ -12,9 +12,6 @@
 #include "core/lc_node.h"
 #include "math/lc_math.h"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 /* ============================================================================
  * Camera Types
@@ -355,8 +352,100 @@ LC_API LCResult lc_camera_ui_get_position(LCNodeHandle camera, LCVec2* out_posit
  */
 LC_API LCResult lc_camera_ui_set_position(LCNodeHandle camera, LCVec2 position);
 
-#ifdef __cplusplus
-}
-#endif
+/**
+ * @brief Get the canvas rotation of a CameraUI (radians, about the origin)
+ * @param camera CameraUI node handle
+ * @param out_rotation Output parameter for rotation in radians
+ * @return LC_SUCCESS on success, error code otherwise
+ * @threadsafety Thread-safe
+ */
+LC_API LCResult lc_camera_ui_get_rotation(LCNodeHandle camera, float* out_rotation);
+
+/**
+ * @brief Set the canvas rotation of a CameraUI (radians, about the origin)
+ * @param camera CameraUI node handle
+ * @param rotation Rotation in radians
+ * @return LC_SUCCESS on success, error code otherwise
+ * @threadsafety Thread-safe
+ */
+LC_API LCResult lc_camera_ui_set_rotation(LCNodeHandle camera, float rotation);
+
+/**
+ * @brief Get the canvas zoom of a CameraUI (uniform, about the origin)
+ * @param camera CameraUI node handle
+ * @param out_zoom Output parameter for the zoom (1 = normal, 2 = 2x in)
+ * @return LC_SUCCESS on success, error code otherwise
+ * @threadsafety Thread-safe
+ */
+LC_API LCResult lc_camera_ui_get_zoom(LCNodeHandle camera, float* out_zoom);
+
+/**
+ * @brief Set the canvas zoom of a CameraUI (uniform, about the origin)
+ * @param camera CameraUI node handle
+ * @param zoom Zoom factor; 1 = normal, 2 = 2x in, 0.5 = 2x out
+ * @return LC_SUCCESS on success, error code otherwise
+ * @threadsafety Thread-safe
+ */
+LC_API LCResult lc_camera_ui_set_zoom(LCNodeHandle camera, float zoom);
+
+/* ============================================================================
+ * Screen <-> World Conversion
+ * ============================================================================
+ *
+ * These resolve against the active Camera2D / Camera3D in the current scene and
+ * the window size. Screen coordinates are window pixels with the origin at the
+ * top-left (matching lc_input_get_mouse_position). They return LC_ERROR_NOT_FOUND
+ * when there is no current scene; when a scene exists but has no active camera or
+ * known window size the conversion succeeds and returns the input unchanged (2D)
+ * or zero (3D), matching the scripting-language behaviour.
+ */
+
+/**
+ * @brief Convert a screen-space point to 2D world space
+ * @param screen_pos Screen-space point in window pixels (top-left origin)
+ * @param out_world Output parameter for the world-space point
+ * @return LC_SUCCESS on success, error code otherwise
+ * @threadsafety Thread-safe
+ */
+LC_API LCResult lc_screen_to_world_2d(LCVec2 screen_pos, LCVec2* out_world);
+
+/**
+ * @brief Convert a 2D world-space point to screen space
+ * @param world_pos World-space point
+ * @param out_screen Output parameter for the screen-space point in window pixels
+ * @return LC_SUCCESS on success, error code otherwise
+ * @threadsafety Thread-safe
+ */
+LC_API LCResult lc_world_to_screen_2d(LCVec2 world_pos, LCVec2* out_screen);
+
+/**
+ * @brief Convert a screen-space point to a 3D world-space point at a distance
+ * @param screen_pos Screen-space point in window pixels (top-left origin)
+ * @param distance Distance along the view ray from the camera
+ * @param out_world Output parameter for the world-space point
+ * @return LC_SUCCESS on success, error code otherwise
+ * @threadsafety Thread-safe
+ */
+LC_API LCResult lc_screen_to_world_3d(LCVec2 screen_pos, float distance, LCVec3* out_world);
+
+/**
+ * @brief Convert a 3D world-space point to screen space
+ * @param world_pos World-space point
+ * @param out_screen Output parameter (xy = window pixels, z = NDC depth)
+ * @return LC_SUCCESS on success, error code otherwise
+ * @threadsafety Thread-safe
+ */
+LC_API LCResult lc_world_to_screen_3d(LCVec3 world_pos, LCVec3* out_screen);
+
+/**
+ * @brief Build a world-space picking ray from a screen-space point
+ * @param screen_pos Screen-space point in window pixels (top-left origin)
+ * @param out_origin Output parameter for the ray origin (world space)
+ * @param out_direction Output parameter for the normalized ray direction
+ * @return LC_SUCCESS on success, error code otherwise
+ * @threadsafety Thread-safe
+ */
+LC_API LCResult lc_screen_to_world_ray_3d(LCVec2 screen_pos, LCVec3* out_origin, LCVec3* out_direction);
+
 
 #endif /* LUPINE_CAPI_CAMERA_H */

@@ -20,12 +20,22 @@ class AddNodePrefabDialog(QDialog):
     node_type_selected = pyqtSignal(str)  # Emits the node type name
     prefab_selected = pyqtSignal(str)  # Emits the prefab path
 
+    # Item data roles (uniform across every tree in the dialog)
+    KIND_ROLE = Qt.ItemDataRole.UserRole          # None for categories, else "node"/"prefab"/"component_default"
+    VALUE_ROLE = int(Qt.ItemDataRole.UserRole) + 1  # node type name / prefab file path / component type name
+    BASE_NODE_ROLE = int(Qt.ItemDataRole.UserRole) + 2  # base node type for component_default items
+
+    # Category that groups the auto-generated per-component prefabs
+    COMPONENT_DEFAULT_CATEGORY = "Component Default"
+
     def __init__(self, editor_bridge, parent=None):
         super().__init__(parent)
         self.editor_bridge = editor_bridge
-        self.selected_type = None
-        self.selected_path = None
-        self.selection_mode = None  # "node" or "prefab"
+
+        # Current selection
+        self.selection_kind = None      # "node" | "prefab" | "component_default"
+        self.selected_value = None      # node type / prefab path / component type
+        self.selected_base_node = None  # base node type (component_default only)
 
         self.setWindowTitle("Add Node/Prefab")
         self.setMinimumSize(600, 650)
@@ -33,6 +43,11 @@ class AddNodePrefabDialog(QDialog):
 
         self._setup_ui()
         self._load_types()
+
+        # Open fully expanded with the search box focused so typing searches immediately
+        for tree in (self.all_tree, self.nodes_tree, self.prefabs_tree):
+            self._expand_all(tree)
+        self.search_input.setFocus()
 
     def _setup_ui(self):
         """Setup the dialog UI"""
@@ -48,7 +63,7 @@ class AddNodePrefabDialog(QDialog):
         search_layout.addWidget(self.search_input)
         layout.addLayout(search_layout)
 
-        # Tab widget for nodes and prefabs
+        # Tab widget for All / Nodes / Prefabs
         self.tab_widget = QTabWidget()
 
         # Store theme for later use
@@ -58,79 +73,20 @@ class AddNodePrefabDialog(QDialog):
         # Create arrow icons for categories
         self._create_arrow_icons()
 
-        # Nodes tab
-        self.nodes_tree = QTreeWidget()
-        self.nodes_tree.setHeaderLabel("Node Types")
-        self.nodes_tree.itemDoubleClicked.connect(lambda item, col: self._on_item_double_clicked(item, col, "node"))
-        self.nodes_tree.itemClicked.connect(lambda item, col: self._on_item_clicked(item, col, "node"))
-        self.nodes_tree.itemExpanded.connect(lambda item: self._on_item_expanded(item, "node"))
-        self.nodes_tree.itemCollapsed.connect(lambda item: self._on_item_collapsed(item, "node"))
+        # All tab (default) - shows both nodes and prefabs
+        self.all_tree = self._create_tree("Nodes & Prefabs")
+        self.tab_widget.addTab(self.all_tree, "All")
 
-        # Hide default branch indicators for nodes tree
-        self.nodes_tree.setStyleSheet(f"""
-            QTreeView::branch {{
-                background: transparent;
-            }}
-            QTreeView::branch:has-siblings:!adjoins-item {{
-                background: transparent;
-            }}
-            QTreeView::branch:has-siblings:adjoins-item {{
-                background: transparent;
-            }}
-            QTreeView::branch:!has-children:!has-siblings:adjoins-item {{
-                background: transparent;
-            }}
-            QTreeView::branch:has-children:!has-siblings:closed,
-            QTreeView::branch:closed:has-children:has-siblings {{
-                background: transparent;
-                border: none;
-                image: none;
-            }}
-            QTreeView::branch:open:has-children:!has-siblings,
-            QTreeView::branch:open:has-children:has-siblings {{
-                background: transparent;
-                border: none;
-                image: none;
-            }}
-        """)
+        # Nodes tab
+        self.nodes_tree = self._create_tree("Node Types")
         self.tab_widget.addTab(self.nodes_tree, "Nodes")
 
         # Prefabs tab
-        self.prefabs_tree = QTreeWidget()
-        self.prefabs_tree.setHeaderLabel("Prefabs")
-        self.prefabs_tree.itemDoubleClicked.connect(lambda item, col: self._on_item_double_clicked(item, col, "prefab"))
-        self.prefabs_tree.itemClicked.connect(lambda item, col: self._on_item_clicked(item, col, "prefab"))
-        self.prefabs_tree.itemExpanded.connect(lambda item: self._on_item_expanded(item, "prefab"))
-        self.prefabs_tree.itemCollapsed.connect(lambda item: self._on_item_collapsed(item, "prefab"))
-
-        # Hide default branch indicators for prefabs tree
-        self.prefabs_tree.setStyleSheet(f"""
-            QTreeView::branch {{
-                background: transparent;
-            }}
-            QTreeView::branch:has-siblings:!adjoins-item {{
-                background: transparent;
-            }}
-            QTreeView::branch:has-siblings:adjoins-item {{
-                background: transparent;
-            }}
-            QTreeView::branch:!has-children:!has-siblings:adjoins-item {{
-                background: transparent;
-            }}
-            QTreeView::branch:has-children:!has-siblings:closed,
-            QTreeView::branch:closed:has-children:has-siblings {{
-                background: transparent;
-                border: none;
-                image: none;
-            }}
-            QTreeView::branch:open:has-children:!has-siblings,
-            QTreeView::branch:open:has-children:has-siblings {{
-                background: transparent;
-                border: none;
-                image: none;
-            }}
-        """)
+        self.prefabs_tree = self._create_tree("Prefabs")
         self.tab_widget.addTab(self.prefabs_tree, "Prefabs")
+
+        # All tab is the default
+        self.tab_widget.setCurrentIndex(0)
 
         layout.addWidget(self.tab_widget)
 
@@ -150,6 +106,44 @@ class AddNodePrefabDialog(QDialog):
         layout.addLayout(button_layout)
 
         self.setLayout(layout)
+
+    def _create_tree(self, header_label):
+        """Create and configure a tree widget with the shared styling and handlers"""
+        tree = QTreeWidget()
+        tree.setHeaderLabel(header_label)
+        tree.itemDoubleClicked.connect(self._on_item_double_clicked)
+        tree.itemClicked.connect(self._on_item_clicked)
+        tree.itemExpanded.connect(self._on_item_expanded)
+        tree.itemCollapsed.connect(self._on_item_collapsed)
+
+        # Hide default branch indicators (we draw our own arrow icons)
+        tree.setStyleSheet(f"""
+            QTreeView::branch {{
+                background: transparent;
+            }}
+            QTreeView::branch:has-siblings:!adjoins-item {{
+                background: transparent;
+            }}
+            QTreeView::branch:has-siblings:adjoins-item {{
+                background: transparent;
+            }}
+            QTreeView::branch:!has-children:!has-siblings:adjoins-item {{
+                background: transparent;
+            }}
+            QTreeView::branch:has-children:!has-siblings:closed,
+            QTreeView::branch:closed:has-children:has-siblings {{
+                background: transparent;
+                border: none;
+                image: none;
+            }}
+            QTreeView::branch:open:has-children:!has-siblings,
+            QTreeView::branch:open:has-children:has-siblings {{
+                background: transparent;
+                border: none;
+                image: none;
+            }}
+        """)
+        return tree
 
     def _create_arrow_icons(self):
         """Create custom colored arrow icons for category items"""
@@ -199,25 +193,19 @@ class AddNodePrefabDialog(QDialog):
         self.closed_icon = QIcon(closed_pixmap)
         self.open_icon = QIcon(open_pixmap)
 
-    def _on_item_expanded(self, item, mode):
-        """Update icon when item is expanded"""
-        if mode == "node":
-            if item.data(0, Qt.ItemDataRole.UserRole) is None:  # It's a category
-                item.setIcon(0, self.open_icon)
-        else:  # prefab
-            type_name = item.data(1, Qt.ItemDataRole.UserRole)
-            if type_name is None:  # It's a category
-                item.setIcon(0, self.open_icon)
+    def _is_category(self, item):
+        """True if the item is a category (no selectable kind)"""
+        return item.data(0, self.KIND_ROLE) is None
 
-    def _on_item_collapsed(self, item, mode):
+    def _on_item_expanded(self, item):
+        """Update icon when item is expanded"""
+        if self._is_category(item):
+            item.setIcon(0, self.open_icon)
+
+    def _on_item_collapsed(self, item):
         """Update icon when item is collapsed"""
-        if mode == "node":
-            if item.data(0, Qt.ItemDataRole.UserRole) is None:  # It's a category
-                item.setIcon(0, self.closed_icon)
-        else:  # prefab
-            type_name = item.data(1, Qt.ItemDataRole.UserRole)
-            if type_name is None:  # It's a category
-                item.setIcon(0, self.closed_icon)
+        if self._is_category(item):
+            item.setIcon(0, self.closed_icon)
 
     def _format_display_name(self, name):
         """
@@ -232,14 +220,30 @@ class AddNodePrefabDialog(QDialog):
         spaced = re.sub(r'([a-zA-Z])(\d)', r'\1 \2', spaced)
         return spaced
 
-    def _build_nested_tree(self, items_with_categories, tree_widget, mode):
+    def _base_node_for_component(self, component_type):
         """
-        Build a nested tree structure from items with slash-separated category paths.
+        Pick the base node type (Node2D / Node3D) for a component default prefab
+        based on the component's spatial type, inferred from its subcategory and
+        type name (matching how the engine classifies components).
+        """
+        type_name = component_type.type_name or ""
+        subcategory = component_type.subcategory or ""
+        segments = subcategory.split('/')
+
+        if any(seg == "3D" or seg.endswith("3D") for seg in segments) or type_name.endswith("3D"):
+            return "Node3D"
+        if any(seg == "2D" or seg.endswith("2D") for seg in segments) or type_name.endswith("2D"):
+            return "Node2D"
+        # UI / Canvas and everything else default to the 2D base node
+        return "Node2D"
+
+    def _build_nested_tree(self, category_paths, tree_widget):
+        """
+        Build a nested tree structure from slash-separated category paths.
 
         Args:
-            items_with_categories: List of tuples (category_path, item_data)
+            category_paths: Iterable of category path strings like "Physics/2D"
             tree_widget: The tree widget to populate
-            mode: "node" or "prefab"
 
         Returns:
             Dict mapping category paths to QTreeWidgetItem objects
@@ -247,16 +251,14 @@ class AddNodePrefabDialog(QDialog):
         # Dictionary to store all category nodes: path -> QTreeWidgetItem
         category_nodes = {}
 
-        # First, create all category nodes
+        # First, gather all intermediate category paths
         all_category_paths = set()
-        for category_path, _ in items_with_categories:
+        for category_path in category_paths:
             parts = category_path.split('/')
-            # Add all intermediate paths
             for i in range(1, len(parts) + 1):
-                path = '/'.join(parts[:i])
-                all_category_paths.add(path)
+                all_category_paths.add('/'.join(parts[:i]))
 
-        # Sort paths by depth (shortest first) to ensure parents exist before children
+        # Sort paths by depth (shortest first) so parents exist before children
         sorted_paths = sorted(all_category_paths, key=lambda p: p.count('/'))
 
         # Create category nodes
@@ -266,16 +268,13 @@ class AddNodePrefabDialog(QDialog):
             depth = len(parts)
 
             if depth == 1:
-                # Top-level category - secondary accent background color, +4pt font, start collapsed
+                # Top-level category - secondary accent background, +4pt font
                 category_item = QTreeWidgetItem(tree_widget)
                 category_item.setText(0, category_name)
-                category_item.setData(0, Qt.ItemDataRole.UserRole, None)
-                if mode == "prefab":
-                    category_item.setData(1, Qt.ItemDataRole.UserRole, None)
-                category_item.setExpanded(False)  # Start collapsed
-                category_item.setIcon(0, self.closed_icon)  # Set arrow icon
+                category_item.setData(0, self.KIND_ROLE, None)
+                category_item.setExpanded(False)
+                category_item.setIcon(0, self.closed_icon)
 
-                # Apply styling: secondary accent background color and larger font
                 font = category_item.font(0)
                 font.setPointSize(font.pointSize() + 4)
                 font.setBold(True)
@@ -285,19 +284,16 @@ class AddNodePrefabDialog(QDialog):
 
                 category_nodes[path] = category_item
             else:
-                # Nested category - tertiary background color, +2pt font, start collapsed
+                # Nested category - tertiary background, +2pt font
                 parent_path = '/'.join(parts[:-1])
                 parent_item = category_nodes.get(parent_path)
                 if parent_item:
                     category_item = QTreeWidgetItem(parent_item)
                     category_item.setText(0, category_name)
-                    category_item.setData(0, Qt.ItemDataRole.UserRole, None)
-                    if mode == "prefab":
-                        category_item.setData(1, Qt.ItemDataRole.UserRole, None)
-                    category_item.setExpanded(False)  # Start collapsed
-                    category_item.setIcon(0, self.closed_icon)  # Set arrow icon
+                    category_item.setData(0, self.KIND_ROLE, None)
+                    category_item.setExpanded(False)
+                    category_item.setIcon(0, self.closed_icon)
 
-                    # Apply styling: tertiary background color and medium font
                     font = category_item.font(0)
                     font.setPointSize(font.pointSize() + 2)
                     font.setBold(True)
@@ -309,137 +305,169 @@ class AddNodePrefabDialog(QDialog):
 
         return category_nodes
 
-    def _load_types(self):
-        """Load all types from the editor bridge"""
-        self._load_node_types()
-        self._load_prefab_types()
+    def _add_leaf_item(self, parent_item, display_name, kind, value, tooltip, base_node=None):
+        """Create a selectable leaf item under a category"""
+        item = QTreeWidgetItem(parent_item)
+        item.setText(0, display_name)
+        item.setData(0, self.KIND_ROLE, kind)
+        item.setData(0, self.VALUE_ROLE, value)
+        if base_node is not None:
+            item.setData(0, self.BASE_NODE_ROLE, base_node)
+        item.setToolTip(0, tooltip)
 
-    def _load_node_types(self):
-        """Load node types and populate the nodes tree"""
-        self.nodes_tree.clear()
+        item_font = item.font(0)
+        item_font.setPointSize(item_font.pointSize() + 1)
+        item.setFont(0, item_font)
+        return item
 
-        # Get all node types
-        node_types = self.editor_bridge.get_node_types()
+    def _group_by_category(self, types, prefix=""):
+        """
+        Group type infos by their subcategory path, optionally prefixed.
 
-        # Organize by subcategory path
+        Returns a dict mapping full category path -> list of type infos.
+        """
         items_by_category = {}
-        for node_type in node_types:
-            category_path = node_type.subcategory if node_type.subcategory else "Other"
-            if category_path not in items_by_category:
-                items_by_category[category_path] = []
-            items_by_category[category_path].append(node_type)
+        for type_info in types:
+            category_path = type_info.subcategory if type_info.subcategory else "Other"
+            if prefix:
+                category_path = f"{prefix}/{category_path}"
+            items_by_category.setdefault(category_path, []).append(type_info)
+        return items_by_category
 
-        # Build nested tree structure
-        items_with_categories = [(path, items) for path, items in items_by_category.items()]
-        category_nodes = self._build_nested_tree(items_with_categories, self.nodes_tree, "node")
+    def _load_types(self):
+        """Load all types into the three trees"""
+        node_types = self.editor_bridge.get_node_types()
+        prefab_types = self.editor_bridge.get_prefab_types()
+        component_types = self.editor_bridge.get_component_types()
 
-        # Add node types under their respective categories
+        # Nodes tab
+        self.nodes_tree.clear()
+        self._populate_nodes(self.nodes_tree, node_types, prefix="")
+
+        # Prefabs tab (real prefabs + per-component default prefabs)
+        self.prefabs_tree.clear()
+        self._populate_prefabs(self.prefabs_tree, prefab_types, component_types, prefix="")
+
+        # All tab (nodes grouped under "Nodes", prefabs under "Prefabs")
+        self.all_tree.clear()
+        self._populate_nodes(self.all_tree, node_types, prefix="Nodes")
+        self._populate_prefabs(self.all_tree, prefab_types, component_types, prefix="Prefabs")
+
+    def _populate_nodes(self, tree_widget, node_types, prefix=""):
+        """Populate node type leaves into a tree under an optional prefix category"""
+        items_by_category = self._group_by_category(node_types, prefix)
+        category_nodes = self._build_nested_tree(items_by_category.keys(), tree_widget)
+
         for category_path, nodes in items_by_category.items():
             parent_item = category_nodes.get(category_path)
-            if parent_item:
-                for node_type in sorted(nodes, key=lambda t: t.type_name):
-                    type_item = QTreeWidgetItem(parent_item)
-                    display_name = self._format_display_name(node_type.type_name)
-                    if node_type.is_built_in:
-                        display_name += " (Built-in)"
-                    type_item.setText(0, display_name)
-                    type_item.setData(0, Qt.ItemDataRole.UserRole, node_type.type_name)
-                    type_item.setToolTip(0, f"Type: {node_type.type_name}\nPath: {node_type.file_path if node_type.file_path else 'Built-in'}")
+            if not parent_item:
+                continue
+            for node_type in sorted(nodes, key=lambda t: t.type_name):
+                display_name = self._format_display_name(node_type.type_name)
+                if node_type.is_built_in:
+                    display_name += " (Built-in)"
+                tooltip = f"Type: {node_type.type_name}\nPath: {node_type.file_path if node_type.file_path else 'Built-in'}"
+                self._add_leaf_item(parent_item, display_name, "node", node_type.type_name, tooltip)
 
-                    # Increase font size for node items
-                    item_font = type_item.font(0)
-                    item_font.setPointSize(item_font.pointSize() + 1)
-                    type_item.setFont(0, item_font)
+    def _populate_prefabs(self, tree_widget, prefab_types, component_types, prefix=""):
+        """Populate real prefab leaves plus per-component default prefab leaves"""
+        # Real prefabs grouped by their own subcategory
+        items_by_category = self._group_by_category(prefab_types, prefix)
 
-    def _load_prefab_types(self):
-        """Load prefab types and populate the prefabs tree"""
-        self.prefabs_tree.clear()
+        # Per-component default prefabs grouped under "Component Default/<component subcategory>"
+        comp_default_root = self.COMPONENT_DEFAULT_CATEGORY
+        if prefix:
+            comp_default_root = f"{prefix}/{comp_default_root}"
+        component_defaults_by_category = {}
+        for component_type in component_types:
+            sub = component_type.subcategory if component_type.subcategory else "Other"
+            category_path = f"{comp_default_root}/{sub}"
+            component_defaults_by_category.setdefault(category_path, []).append(component_type)
 
-        # Get all prefab types
-        prefab_types = self.editor_bridge.get_prefab_types()
+        # Build the full category tree from both sets at once
+        all_category_paths = list(items_by_category.keys()) + list(component_defaults_by_category.keys())
+        category_nodes = self._build_nested_tree(all_category_paths, tree_widget)
 
-        # Organize by subcategory path
-        items_by_category = {}
-        for prefab_type in prefab_types:
-            category_path = prefab_type.subcategory if prefab_type.subcategory else "Other"
-            if category_path not in items_by_category:
-                items_by_category[category_path] = []
-            items_by_category[category_path].append(prefab_type)
-
-        # Build nested tree structure
-        items_with_categories = [(path, items) for path, items in items_by_category.items()]
-        category_nodes = self._build_nested_tree(items_with_categories, self.prefabs_tree, "prefab")
-
-        # Add prefab types under their respective categories
+        # Add real prefab leaves
         for category_path, prefabs in items_by_category.items():
             parent_item = category_nodes.get(category_path)
-            if parent_item:
-                for prefab_type in sorted(prefabs, key=lambda t: t.type_name):
-                    type_item = QTreeWidgetItem(parent_item)
-                    display_name = self._format_display_name(prefab_type.type_name)
-                    if prefab_type.is_built_in:
-                        display_name += " (Built-in)"
-                    type_item.setText(0, display_name)
-                    type_item.setData(0, Qt.ItemDataRole.UserRole, prefab_type.file_path)
-                    type_item.setData(1, Qt.ItemDataRole.UserRole, prefab_type.type_name)
-                    type_item.setToolTip(0, f"Name: {prefab_type.type_name}\nPath: {prefab_type.file_path if prefab_type.file_path else 'Built-in'}")
+            if not parent_item:
+                continue
+            for prefab_type in sorted(prefabs, key=lambda t: t.type_name):
+                display_name = self._format_display_name(prefab_type.type_name)
+                if prefab_type.is_built_in:
+                    display_name += " (Built-in)"
+                tooltip = f"Name: {prefab_type.type_name}\nPath: {prefab_type.file_path if prefab_type.file_path else 'Built-in'}"
+                self._add_leaf_item(parent_item, display_name, "prefab", prefab_type.file_path, tooltip)
 
-                    # Increase font size for prefab items
-                    item_font = type_item.font(0)
-                    item_font.setPointSize(item_font.pointSize() + 1)
-                    type_item.setFont(0, item_font)
+        # Add per-component default prefab leaves
+        for category_path, components in component_defaults_by_category.items():
+            parent_item = category_nodes.get(category_path)
+            if not parent_item:
+                continue
+            for component_type in sorted(components, key=lambda t: t.type_name):
+                base_node = self._base_node_for_component(component_type)
+                display_name = self._format_display_name(component_type.type_name)
+                tooltip = (f"Default prefab: {base_node} + {component_type.type_name}\n"
+                           f"Creates a {base_node} node named '{component_type.type_name}' "
+                           f"with a {component_type.type_name} component.")
+                self._add_leaf_item(parent_item, display_name, "component_default",
+                                    component_type.type_name, tooltip, base_node=base_node)
 
     def _on_search_changed(self, text):
-        """Filter both trees based on search text"""
+        """Filter all trees based on search text"""
         search_text = text.lower()
+        for tree in (self.all_tree, self.nodes_tree, self.prefabs_tree):
+            self._filter_tree(tree, search_text)
 
-        # Filter nodes tree
-        self._filter_tree(self.nodes_tree, search_text, "node")
-        # Filter prefabs tree
-        self._filter_tree(self.prefabs_tree, search_text, "prefab")
-
-    def _filter_tree(self, tree_widget, search_text, mode):
+    def _filter_tree(self, tree_widget, search_text):
         """Filter a tree widget based on search text"""
         if not search_text:
             self._show_all_items(tree_widget)
             return
 
-        # Filter tree recursively
         root = tree_widget.invisibleRootItem()
         for i in range(root.childCount()):
-            self._filter_tree_recursive(root.child(i), search_text, mode)
+            self._filter_tree_recursive(root.child(i), search_text)
 
-    def _filter_tree_recursive(self, item, search_text, mode):
+    def _filter_tree_recursive(self, item, search_text):
         """
         Recursively filter tree items based on search text.
 
         Returns True if this item or any of its children match the search.
         """
-        # Check if this is a type item (has type data)
-        if mode == "node":
-            type_name = item.data(0, Qt.ItemDataRole.UserRole)
-        else:  # prefab
-            type_name = item.data(1, Qt.ItemDataRole.UserRole)
-
+        value = item.data(0, self.VALUE_ROLE)
         is_match = False
 
-        if type_name:
-            # This is a type item
-            is_match = search_text in type_name.lower()
+        if not self._is_category(item):
+            # This is a selectable leaf - match on its underlying value/type name
+            match_text = str(value) if value is not None else item.text(0)
+            is_match = search_text in match_text.lower()
         else:
             # This is a category - check all children
             for i in range(item.childCount()):
-                child = item.child(i)
-                if self._filter_tree_recursive(child, search_text, mode):
+                if self._filter_tree_recursive(item.child(i), search_text):
                     is_match = True
 
-        # Show/hide this item based on match
         item.setHidden(not is_match)
-        if is_match and not type_name:
-            # If this is a matching category, expand it
+        if is_match and self._is_category(item):
             item.setExpanded(True)
 
         return is_match
+
+    def _expand_all(self, tree_widget):
+        """Expand every category in a tree and set the open arrow icon"""
+        root = tree_widget.invisibleRootItem()
+        for i in range(root.childCount()):
+            self._expand_all_recursive(root.child(i))
+
+    def _expand_all_recursive(self, item):
+        """Recursively expand categories and update their arrow icons"""
+        if self._is_category(item):
+            item.setExpanded(True)
+            item.setIcon(0, self.open_icon)
+        for i in range(item.childCount()):
+            self._expand_all_recursive(item.child(i))
 
     def _show_all_items(self, tree_widget):
         """Show all items in a tree"""
@@ -453,61 +481,52 @@ class AddNodePrefabDialog(QDialog):
         for i in range(item.childCount()):
             self._show_all_items_recursive(item.child(i))
 
-    def _on_item_clicked(self, item, column, mode):
-        """Handle item click"""
-        if mode == "node":
-            type_name = item.data(0, Qt.ItemDataRole.UserRole)
-            if type_name:
-                self.selected_type = type_name
-                self.selected_path = None
-                self.selection_mode = "node"
-                self.ok_button.setEnabled(True)
-            else:
-                # It's a category - toggle expansion
-                self._clear_selection()
-                item.setExpanded(not item.isExpanded())
-        else:  # prefab
-            file_path = item.data(0, Qt.ItemDataRole.UserRole)
-            if file_path:
-                self.selected_path = file_path
-                self.selected_type = None
-                self.selection_mode = "prefab"
-                self.ok_button.setEnabled(True)
-            else:
-                # It's a category - toggle expansion
-                self._clear_selection()
-                item.setExpanded(not item.isExpanded())
+    def _apply_selection(self, item):
+        """Record the selection from a leaf item, return True if selectable"""
+        kind = item.data(0, self.KIND_ROLE)
+        if kind is None:
+            return False
 
-    def _on_item_double_clicked(self, item, column, mode):
+        self.selection_kind = kind
+        self.selected_value = item.data(0, self.VALUE_ROLE)
+        self.selected_base_node = item.data(0, self.BASE_NODE_ROLE) if kind == "component_default" else None
+        return True
+
+    def _on_item_clicked(self, item, column):
+        """Handle item click"""
+        if self._apply_selection(item):
+            self.ok_button.setEnabled(True)
+        else:
+            # It's a category - toggle expansion
+            self._clear_selection()
+            item.setExpanded(not item.isExpanded())
+
+    def _on_item_double_clicked(self, item, column):
         """Handle item double-click"""
-        if mode == "node":
-            type_name = item.data(0, Qt.ItemDataRole.UserRole)
-            if type_name:
-                self.selected_type = type_name
-                self.selected_path = None
-                self.selection_mode = "node"
-                self.accept()
-        else:  # prefab
-            file_path = item.data(0, Qt.ItemDataRole.UserRole)
-            if file_path:
-                self.selected_path = file_path
-                self.selected_type = None
-                self.selection_mode = "prefab"
-                self.accept()
+        if self._apply_selection(item):
+            self.accept()
 
     def _clear_selection(self):
         """Clear the current selection"""
-        self.selected_type = None
-        self.selected_path = None
-        self.selection_mode = None
+        self.selection_kind = None
+        self.selected_value = None
+        self.selected_base_node = None
         self.ok_button.setEnabled(False)
 
     def get_selection(self):
-        """Get the selection (mode, value)"""
-        if self.selection_mode == "node":
-            return ("node", self.selected_type)
-        elif self.selection_mode == "prefab":
-            return ("prefab", self.selected_path)
+        """
+        Get the selection as (mode, value).
+
+        - ("node", type_name)
+        - ("prefab", file_path)
+        - ("component_default", (base_node_type, component_type_name))
+        """
+        if self.selection_kind == "node":
+            return ("node", self.selected_value)
+        elif self.selection_kind == "prefab":
+            return ("prefab", self.selected_value)
+        elif self.selection_kind == "component_default":
+            return ("component_default", (self.selected_base_node, self.selected_value))
         return (None, None)
 
     def reload_types(self):

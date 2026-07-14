@@ -4,28 +4,24 @@
 in vec2 v_TexCoord;
 in vec4 v_Color;
 
-uniform sampler2D u_Texture;
+uniform mat4 u_ViewProjection;
+uniform mat4 u_Model;
 uniform vec4 u_TintColor;
-uniform bool u_UseTexture;
-uniform vec4 u_UVRect;  // (min_u, min_v, max_u, max_v)
+uniform int u_UseTexture;
+uniform vec4 u_UVRect;
+uniform sampler2D u_Texture;
 
 out vec4 FragColor;
 
-void main() {
-    vec4 color = v_Color * u_TintColor;
-    if (u_UseTexture) {
-        // Apply UV rect transformation
-        vec2 uv = v_TexCoord;
-        uv = mix(u_UVRect.xy, u_UVRect.zw, uv);
 
-        vec4 texColor = texture(u_Texture, uv);
-        color *= texColor;
+    void main() {
+        vec4 color = v_Color * u_TintColor;
+        if (u_UseTexture != 0) {
+            vec2 uv = mix(u_UVRect.xy, u_UVRect.zw, v_TexCoord);
+            color *= texture(u_Texture, uv);
+        }
+        if (color.a < 0.01) {
+            discard;
+        }
+        FragColor = color;
     }
-
-    // Ensure we output something visible
-    if (color.a < 0.01) {
-        discard;
-    }
-
-    FragColor = color;
-}

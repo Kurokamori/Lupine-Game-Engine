@@ -27,6 +27,8 @@ public:
     void resizeSwapchain(SwapchainHandle swapchain, uint32_t width, uint32_t height) override;
     void present(SwapchainHandle swapchain) override;
     RenderTargetHandle getSwapchainBackbuffer(SwapchainHandle swapchain) override;
+    void makeContextCurrent(SwapchainHandle swapchain) override;
+    void setSwapchainHintForOffscreen(SwapchainHandle swapchain) override;
 
     TextureHandle createTexture(const TextureDesc& desc) override;
     void destroyTexture(TextureHandle texture) override;
@@ -72,12 +74,20 @@ public:
     FontHandle createFontAtlas(const FontDesc& desc) override;
     const FontAtlas* getFontAtlas(FontHandle handle) const override;
     void destroyFontAtlas(FontHandle handle) override;
+    void refreshFontAtlases() override;
 
 private:
     /**
      * Ensure GLEW is initialized (lazy initialization on first swapchain creation)
      */
     bool ensureGLEWInitialized();
+
+    /**
+     * Upload a CPU-baked font atlas into a GPU texture and assemble a FontAtlas.
+     * Returns an atlas with an invalid texture handle on failure. Shared by
+     * createFontAtlas and refreshFontAtlases.
+     */
+    FontAtlas buildBakedAtlas(const struct BakedFontAtlas& baked);
 
     struct Impl;
     std::unique_ptr<Impl> m_impl;

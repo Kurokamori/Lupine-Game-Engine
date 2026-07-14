@@ -102,6 +102,23 @@ public:
      */
     virtual RenderTargetHandle getSwapchainBackbuffer(SwapchainHandle swapchain) = 0;
 
+    /**
+     * Make the graphics context current for a swapchain.
+     * This ensures the GPU context is active for resource creation and rendering.
+     * For OpenGL: calls wglMakeCurrent/glXMakeCurrent/eglMakeCurrent
+     * For Vulkan/DX11/DX12: may be a no-op or ensure device is ready
+     * For WebGL: ensures the correct canvas context is active
+     */
+    virtual void makeContextCurrent(SwapchainHandle swapchain) = 0;
+
+    /**
+     * Set the swapchain to use for synchronization when rendering to off-screen targets.
+     * This is critical for Vulkan when multiple views are rendering - each view's off-screen
+     * rendering (like shadow maps) should use that view's swapchain for proper sync.
+     * Call this before beginFrame() for off-screen targets.
+     */
+    virtual void setSwapchainHintForOffscreen(SwapchainHandle swapchain) = 0;
+
     // ===== Resource Creation =====
 
     /**
@@ -155,6 +172,22 @@ public:
     virtual void destroyPipeline(PipelineHandle pipeline) = 0;
 
     /**
+     * Return a variant of `base` whose color (render-target) format is `colorFormat`,
+     * creating and caching it on first request. Backends that bake the render-target
+     * format into the pipeline state (DirectX 12) require the bound RTV format to match
+     * the pipeline exactly, so a pipeline created for the swapchain (e.g. RGBA8) cannot
+     * be used to render into an HDR target (RGBA16F) without a matching variant.
+     *
+     * Default: returns `base` unchanged (backends that don't bake the format - OpenGL,
+     * Vulkan, WebGL, Metal, DirectX 11 - need no variant). Returns `base` when
+     * colorFormat is Unknown or already matches the base pipeline's format.
+     */
+    virtual PipelineHandle getColorFormatVariant(PipelineHandle base, TextureFormat colorFormat) {
+        (void)colorFormat;
+        return base;
+    }
+
+    /**
      * Create a render target (off-screen rendering).
      */
     virtual RenderTargetHandle createRenderTarget(const RenderTargetDesc& desc) = 0;
@@ -175,6 +208,17 @@ public:
      * Returns an invalid handle if the render target doesn't exist or has no depth attachment.
      */
     virtual TextureHandle getRenderTargetDepthTexture(RenderTargetHandle target) = 0;
+
+    /**
+     * Get the color (render-target) format of a render target, including swapchain
+     * backbuffers. Used to pick the matching pipeline variant (see getColorFormatVariant)
+     * for the target currently being rendered into. Default returns Unknown for backends
+     * that don't need format-matched pipelines.
+     */
+    virtual TextureFormat getRenderTargetColorFormat(RenderTargetHandle target) {
+        (void)target;
+        return TextureFormat::Unknown;
+    }
 
     /**
      * Attach a specific cube map face to a render target's framebuffer.
@@ -274,12 +318,41 @@ public:
      */
     virtual void destroyFontAtlas(FontHandle handle) = 0;
 
+    /**
+     * Re-bake every live font atlas at the current global font oversampling factor
+     * (see SetFontOversample). Each atlas is regenerated in place under the same
+     * FontHandle, so existing handles stay valid; only the underlying texture and
+     * glyph metrics change. Called by the runtime after a resolution change so UI
+     * text stays crisp. The default implementation is a no-op for backends without
+     * oversampling support.
+     */
+    virtual void refreshFontAtlases() {}
+
     // ===== Utility =====
 
     /**
      * Get a human-readable name for debugging.
      */
     virtual const char* getName() const = 0;
+
+    /**
+     * Check if the graphics context is valid and ready for rendering.
+     * For WebGL: returns false if the context was lost (e.g., GPU driver reset, tab switched).
+     * For other backends: typically returns true unless device is lost.
+     *
+     * Call this before rendering to gracefully handle context loss scenarios.
+     * If false is returned, avoid making GL calls until context is restored.
+     */
+    virtual bool isContextValid() const { return true; }
+
+    /**
+     * Attempt to recover from context loss.
+     * For WebGL: attempts to recreate the context and reload resources.
+     * For other backends: may attempt device reset.
+     *
+     * @return true if recovery was successful, false otherwise
+     */
+    virtual bool tryRecoverContext() { return true; }
 };
 
 /**

@@ -24,6 +24,8 @@ public:
     void resizeSwapchain(SwapchainHandle swapchain, uint32_t width, uint32_t height) override;
     void present(SwapchainHandle swapchain) override;
     RenderTargetHandle getSwapchainBackbuffer(SwapchainHandle swapchain) override;
+    void makeContextCurrent(SwapchainHandle swapchain) override;
+    void setSwapchainHintForOffscreen(SwapchainHandle swapchain) override;
 
     TextureHandle createTexture(const TextureDesc& desc) override;
     void destroyTexture(TextureHandle texture) override;

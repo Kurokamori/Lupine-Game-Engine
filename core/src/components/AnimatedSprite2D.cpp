@@ -1,7 +1,9 @@
 #include "lupine/components/AnimatedSprite2D.hpp"
 #include "lupine/core/Node.hpp"
+#include "lupine/asset/AssetDatabase.hpp"
 #include "lupine/logger/Logger.hpp"
 #include "lupine/rendering/RenderWorld.hpp"
+#include "lupine/rendering/TextureUpload.hpp"
 
 namespace lupine {
 namespace components {
@@ -77,15 +79,12 @@ bool AnimatedSprite2D::GetFlipV() const {
     return GetPropertyValue<bool>("flipV");
 }
 
-const Color& AnimatedSprite2D::GetModulate() const {
-    static Color cachedColor;
+Color AnimatedSprite2D::GetModulate() const {
     const core::ComponentProperty* prop = m_CustomProperties.GetProperty("modulate");
     if (prop) {
-        cachedColor = prop->GetValue<Color>();
-        return cachedColor;
+        return prop->GetValue<Color>();
     }
-    static Color defaultColor = Color::White();
-    return defaultColor;
+    return Color::White();
 }
 
 bool AnimatedSprite2D::GetPixelSnap() const {
@@ -93,7 +92,18 @@ bool AnimatedSprite2D::GetPixelSnap() const {
 }
 
 void AnimatedSprite2D::SetAnimationFilePath(const std::string& filepath) {
-    SetPropertyValue<std::string>("animationFilePath", filepath);
+    // Convert to res:// path if possible
+    std::string resPath = filepath;
+    if (!filepath.empty() && !(filepath.size() >= 6 && filepath.substr(0, 6) == "res://")) {
+        auto& assetDb = asset::AssetDatabase::GetInstance();
+        if (assetDb.IsInitialized()) {
+            std::string converted = assetDb.ToResourcePath(filepath);
+            if (!converted.empty()) {
+                resPath = converted;
+            }
+        }
+    }
+    SetPropertyValue<std::string>("animationFilePath", resPath);
 
     m_TextureUploaded = false;
     m_TextureHandle = TextureHandle();
@@ -330,6 +340,7 @@ void AnimatedSprite2D::SetFrame(int frameIndex) {
     if (on_frame_changed) {
         on_frame_changed(m_CurrentFrameIndex);
     }
+    Emit("frame_changed", { m_CurrentFrameIndex });
 }
 
 void AnimatedSprite2D::UpdateAnimation(float deltaTime) {
@@ -390,6 +401,7 @@ void AnimatedSprite2D::AdvanceFrame() {
             if (on_animation_finished) {
                 on_animation_finished();
             }
+            Emit("animation_finished");
         }
     }
 
@@ -400,7 +412,15 @@ void AnimatedSprite2D::AdvanceFrame() {
         if (on_frame_changed) {
             on_frame_changed(m_CurrentFrameIndex);
         }
+        Emit("frame_changed", { m_CurrentFrameIndex });
     }
+}
+
+void AnimatedSprite2D::DefineSignals() {
+    RegisterSignal({"animation_finished", {}, "Emitted when a non-looping animation completes."});
+    RegisterSignal({"frame_changed",
+                    {{"frame", core::PropertyValueType::Int}},
+                    "Emitted when the current animation frame changes."});
 }
 
 void AnimatedSprite2D::UpdateCurrentFrameTexture() {
@@ -430,26 +450,18 @@ void AnimatedSprite2D::UploadTexture(RenderContext& ctx) {
         return;
     }
 
-    if (m_TextureHandle.isValid()) {
-        IGfxDevice* device = ctx.getDevice();
-        if (device) {
-            device->destroyTexture(m_TextureHandle);
-            m_TextureHandle = TextureHandle();
-        }
-    }
-
-    TextureDesc desc;
-    desc.width = m_CurrentFrameTexture->GetWidth();
-    desc.height = m_CurrentFrameTexture->GetHeight();
-    desc.format = TextureFormat::RGBA8_SRGB;
-    desc.usage = TextureUsage::Sampled;
-    desc.initialData = m_CurrentFrameTexture->GetData();
-
     IGfxDevice* device = ctx.getDevice();
-    if (device) {
-        m_TextureHandle = device->createTexture(desc);
-        m_TextureUploaded = true;
+    if (!device) {
+        return;
     }
+
+    if (m_TextureHandle.isValid()) {
+        device->destroyTexture(m_TextureHandle);
+        m_TextureHandle = TextureHandle();
+    }
+
+    m_TextureHandle = lupine::CreateTexture2DFromImage(device, *m_CurrentFrameTexture, TextureFormat::RGBA8_UNORM);
+    m_TextureUploaded = true;
 }
 
 void AnimatedSprite2D::buildDrawCommands(RenderContext& ctx) {
@@ -580,6 +592,39 @@ Vec2 AnimatedSprite2D::CalculateRenderSize() const {
     // Don't apply scale here - this should return the base size
     // The scale is applied during rendering
     return Vec2(spriteWidth, spriteHeight);
+}
+
+bool AnimatedSprite2D::OnAssetFileChanged(const std::string& changedPath, const std::string& resolvedChangedPath) {
+    std::string currentPath = GetAnimationFilePath();
+    if (currentPath.empty()) {
+        return false;
+    }
+
+    // Resolve our path for comparison
+    std::string resolvedCurrentPath;
+    auto& assetDb = AssetDatabase::GetInstance();
+    if (assetDb.IsInitialized()) {
+        resolvedCurrentPath = assetDb.ResolveAsset(currentPath);
+    }
+
+    // Check if this is our animation file
+    bool matches = (currentPath == changedPath) ||
+                   (!resolvedCurrentPath.empty() && !resolvedChangedPath.empty() &&
+                    resolvedCurrentPath == resolvedChangedPath);
+
+    if (matches) {
+
+        // Invalidate instance state - force reload on next update
+        m_TextureHandle = TextureHandle();
+        m_CurrentFrameTexture.Reset();
+        m_AnimationAsset.Reset();
+        m_CurrentClip = nullptr;
+        m_TextureUploaded = false;
+
+        return true;
+    }
+
+    return false;
 }
 
 }

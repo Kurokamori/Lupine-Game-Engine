@@ -25,6 +25,38 @@ if str(editor_path) not in sys.path:
 from panels.base_panel import EditorPanel
 
 
+def _resolve_res_path(res_path: str) -> str:
+    """Resolve a res:// path to an absolute path"""
+    if not res_path:
+        return res_path
+
+    if res_path.startswith("res://"):
+        project_root = None
+
+        # Try to get project root from AssetDatabase
+        try:
+            import lupine_engine as le
+            asset_db = le.AssetDatabase.get_instance()
+            if asset_db.is_initialized():
+                project_root = asset_db.get_project_root()
+        except Exception:
+            pass
+
+        if not project_root:
+            # Try panels.inspector_panel
+            try:
+                from panels.inspector_panel import get_project_root
+                project_root = get_project_root()
+            except Exception:
+                pass
+
+        if project_root:
+            relative_path = res_path[6:]  # Remove "res://"
+            return str(Path(project_root) / relative_path)
+
+    return res_path
+
+
 class TileData:
     """Represents a single tile with metadata and collision data"""
     def __init__(self, index: int, rect: QRect):
@@ -837,8 +869,8 @@ class Tileset2DBuilder(EditorPanel):
                     data = json.load(f)
 
                 self.current_file = file_path
-                self.asset_uuid = data.get('uuid', str(uuid.uuid4()))
-                self.tileset_path = data.get('tileset_image_path', '')
+                self.asset_uuid = data.get('uuid') or str(uuid.uuid4())
+                self.tileset_path = data.get('tileset_image_path') or ''
 
                 # Load tileset image
                 tile_width = data.get('tile_width', 32)
@@ -851,8 +883,11 @@ class Tileset2DBuilder(EditorPanel):
                 self.tile_width_spin.blockSignals(False)
                 self.tile_height_spin.blockSignals(False)
 
-                if self.tileset_path and Path(self.tileset_path).exists():
-                    self.tileset_widget.load_tileset(self.tileset_path, tile_width, tile_height)
+                # Resolve res:// path for loading
+                resolved_tileset_path = _resolve_res_path(self.tileset_path)
+
+                if resolved_tileset_path and Path(resolved_tileset_path).exists():
+                    self.tileset_widget.load_tileset(resolved_tileset_path, tile_width, tile_height)
 
                     # Load tile data
                     tiles_data = data.get('tiles', [])
@@ -926,8 +961,8 @@ class Tileset2DBuilder(EditorPanel):
                 tiles_data.append(tile_json)
 
             data = {
-                'uuid': self.asset_uuid,
-                'tileset_image_path': self.tileset_path,
+                'uuid': self.asset_uuid or str(uuid.uuid4()),
+                'tileset_image_path': self.tileset_path or '',
                 'tile_width': self.tileset_widget.tile_width,
                 'tile_height': self.tileset_widget.tile_height,
                 'tiles': tiles_data
@@ -968,7 +1003,7 @@ class Tileset2DBuilder(EditorPanel):
 
                 # Try to load as tileset2D format
                 if 'tiles' in data:
-                    self.tileset_path = data.get('tileset_image_path', '')
+                    self.tileset_path = data.get('tileset_image_path') or ''
                     tile_width = data.get('tile_width', 32)
                     tile_height = data.get('tile_height', 32)
 
@@ -976,7 +1011,9 @@ class Tileset2DBuilder(EditorPanel):
                     self.tile_height_spin.setValue(tile_height)
 
                     if self.tileset_path:
-                        self.tileset_widget.load_tileset(self.tileset_path, tile_width, tile_height)
+                        # Resolve res:// path for loading
+                        resolved_tileset_path = _resolve_res_path(self.tileset_path)
+                        self.tileset_widget.load_tileset(resolved_tileset_path, tile_width, tile_height)
 
                         # Load tile data
                         tiles_data = data.get('tiles', [])
@@ -1003,6 +1040,8 @@ class Tileset2DBuilder(EditorPanel):
 
     def _load_tileset_image(self):
         """Load a tileset image"""
+        from panels.inspector_panel import convert_to_res_path
+
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Load Tileset Image",
@@ -1011,10 +1050,12 @@ class Tileset2DBuilder(EditorPanel):
         )
 
         if file_path:
-            self.tileset_path = file_path
+            # Convert to res:// path for storage
+            self.tileset_path = convert_to_res_path(file_path)
             tile_width = self.tile_width_spin.value()
             tile_height = self.tile_height_spin.value()
 
+            # Use the original absolute path for loading the image
             success = self.tileset_widget.load_tileset(file_path, tile_width, tile_height)
             if success:
                 self._update_tile_info()

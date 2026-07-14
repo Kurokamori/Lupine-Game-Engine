@@ -1,6 +1,7 @@
 #include "lupine/core/Core.hpp"
 #include "lupine/core/Node.hpp"
 #include "lupine/core/CameraNodes.hpp"
+#include "lupine/core/UILayerNode.hpp"
 #include "lupine/core/SceneInstance.hpp"
 #include "lupine/core/Component.hpp"
 #include "lupine/core/Scene.hpp"
@@ -9,57 +10,13 @@
 #include "lupine/core/Serialization.hpp"
 #include "lupine/logger/Logger.hpp"
 #include "lupine/scripting/ScriptingCore.hpp"
-#include "lupine/core/SceneInstance.hpp"
+#include "lupine/core/PrefabInstance.hpp"
 #include "lupine/core/ScriptComponent.hpp"
-#include "lupine/components/Sprite2D.hpp"
-#include "lupine/components/Sprite3D.hpp"
-#include "lupine/components/AnimatedSprite2D.hpp"
-#include "lupine/components/AnimatedSprite3D.hpp"
-#include "lupine/components/PrimitiveMesh3D.hpp"
-#include "lupine/components/StaticMesh3D.hpp"
-#include "lupine/components/SkeletalMesh3D.hpp"
-#include "lupine/components/MultiMeshGeneric.hpp"
-#include "lupine/components/DirectionalLight3D.hpp"
-#include "lupine/components/OmniLight3D.hpp"
-#include "lupine/components/SpotLight3D.hpp"
-#include "lupine/components/Label.hpp"
-#include "lupine/components/Label3D.hpp"
-#include "lupine/components/ColorRect.hpp"
-#include "lupine/components/Image2D.hpp"
-#include "lupine/components/Timer.hpp"
-#include "lupine/components/Panel.hpp"
-#include "lupine/components/Panel3D.hpp"
-#include "lupine/components/Button.hpp"
-#include "lupine/components/Button3D.hpp"
-#include "lupine/components/ProgressBar.hpp"
-#include "lupine/components/ProgressBar3D.hpp"
-#include "lupine/components/Shape2D.hpp"
-#include "lupine/components/Line2D.hpp"
-#include "lupine/components/WorldEnvironment.hpp"
-#include "lupine/components/AudioPlayer.hpp"
-#include "lupine/components/AudioListener.hpp"
-#include "lupine/components/RigidBody2DComponent.hpp"
-#include "lupine/components/StaticBody2DComponent.hpp"
-#include "lupine/components/KinematicBody2DComponent.hpp"
-#include "lupine/components/AreaTrigger2DComponent.hpp"
-#include "lupine/components/CollisionBody2DComponent.hpp"
-#include "lupine/components/RigidBody3DComponent.hpp"
-#include "lupine/components/StaticBody3DComponent.hpp"
-#include "lupine/components/KinematicBody3DComponent.hpp"
-#include "lupine/components/AreaTrigger3DComponent.hpp"
-#include "lupine/components/CollisionMesh3DComponent.hpp"
+#include "lupine/components/ComponentRegistry.hpp"
+
 #include "lupine/platform/VirtualFileSystem.hpp"
-#include "lupine/components/CharacterController2D.hpp"
-#include "lupine/components/CharacterController3D.hpp"
+#include "lupine/platform/PackFile.hpp"
 
-
-#include "lupine/components/TestTopdown.hpp"
-#include "lupine/components/TestPlatform.hpp"
-#include "lupine/components/Test3D.hpp"
-
-
-#include <pybind11/embed.h>
-#include <Python.h>
 #include <string>
 #include <filesystem>
 
@@ -67,14 +24,22 @@
 #include <windows.h>
 #endif
 
-namespace py = pybind11;
 namespace fs = std::filesystem;
 
 namespace lupine {
 namespace core {
 
-static py::scoped_interpreter* g_PythonInterpreter = nullptr;
 static bool g_CoreInitialized = false;
+
+static std::vector<std::string> g_CommandLineArgs;
+
+void SetCommandLineArgs(const std::vector<std::string>& args) {
+    g_CommandLineArgs = args;
+}
+
+const std::vector<std::string>& GetCommandLineArgs() {
+    return g_CommandLineArgs;
+}
 
 void InitializeCore() {
 
@@ -83,85 +48,24 @@ void InitializeCore() {
         return;
     }
 
-    auto& vfs = platform::VirtualFileSystem::GetInstance();
+    // The VFS is initialized in pack mode too. The PackFileSystem is a read-only
+    // archive that only backs packed (res://) content - it does not provide the
+    // writable user:// space, so without these mounts an exported game cannot resolve
+    // user://, and every save, settings write and config read fails with ENOENT on the
+    // unresolved virtual path. VFS reads consult the pack first, so the res:// mount
+    // here is only a fallback for anything the pack does not hold.
+    platform::VirtualFileSystem& vfs = platform::VirtualFileSystem::GetInstance();
     if (!vfs.IsInitialized()) {
         if (!vfs.Initialize("")) {
-
-        } else {
-
-        }
-    }
-
-#ifdef LUPINE_PYTHON_MODULE
-
-    bool shouldInitializePython = false;
-
-#else
-
-    bool shouldInitializePython = true;
-#endif
-
-    if (shouldInitializePython) {
-
-        try {
-
-#ifdef _WIN32
-
-            wchar_t pythonPath[MAX_PATH];
-            bool foundPython = false;
-
-            FILE* pipe = _wpopen(L"py -3 -c \"import sys; print(sys.prefix)\"", L"r");
-            if (pipe) {
-                char buffer[MAX_PATH];
-                if (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-
-                    size_t len = strlen(buffer);
-                    if (len > 0 && buffer[len - 1] == '\n') {
-                        buffer[len - 1] = '\0';
-                    }
-
-                    MultiByteToWideChar(CP_UTF8, 0, buffer, -1, pythonPath, MAX_PATH);
-                    Py_SetPythonHome(pythonPath);
-                    foundPython = true;
-
-                }
-                _pclose(pipe);
-            }
-
-            if (!foundPython) {
-                pipe = _wpopen(L"python -c \"import sys; print(sys.prefix)\"", L"r");
-                if (pipe) {
-                    char buffer[MAX_PATH];
-                    if (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-
-                        size_t len = strlen(buffer);
-                        if (len > 0 && buffer[len - 1] == '\n') {
-                            buffer[len - 1] = '\0';
-                        }
-
-                        MultiByteToWideChar(CP_UTF8, 0, buffer, -1, pythonPath, MAX_PATH);
-                        Py_SetPythonHome(pythonPath);
-                        foundPython = true;
-
-                    }
-                    _pclose(pipe);
-                }
-            }
-
-            if (!foundPython) {
-
-            }
-#endif
-
-            g_PythonInterpreter = new py::scoped_interpreter();
-
-        }
-        catch (const std::exception& e) {
-
+            LOG_ERROR(LogCategory::Core,
+                      "InitializeCore: virtual filesystem failed to initialize; "
+                      "user:// (saves, settings) will not resolve");
         }
     }
 
     scripting::InitializeScripting();
+
+    RegisterBuiltInTypes();
 
     g_CoreInitialized = true;
 
@@ -174,12 +78,6 @@ void ShutdownCore() {
     }
 
     scripting::ShutdownScripting();
-
-    if (g_PythonInterpreter) {
-        delete g_PythonInterpreter;
-        g_PythonInterpreter = nullptr;
-
-    }
 
     auto& vfs = platform::VirtualFileSystem::GetInstance();
     if (vfs.IsInitialized()) {
@@ -223,20 +121,34 @@ void RegisterBuiltInTypes() {
             return std::make_shared<CameraUI>();
         });
 
+    TypeRegistry::GetInstance().RegisterType("UILayer",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<UILayer>();
+        });
+
     TypeRegistry::GetInstance().RegisterType("Component",
         []() -> std::shared_ptr<ISerializable> {
             return std::make_shared<Component>();
         });
 
+#ifdef LUPINE_HAS_MICROPYTHON
     TypeRegistry::GetInstance().RegisterType("PythonScriptComponent",
         []() -> std::shared_ptr<ISerializable> {
             return std::make_shared<PythonScriptComponent>();
         });
+#endif
 
     TypeRegistry::GetInstance().RegisterType("LuaScriptComponent",
         []() -> std::shared_ptr<ISerializable> {
             return std::make_shared<LuaScriptComponent>();
         });
+
+#ifdef LUPINE_HAS_MRUBY
+    TypeRegistry::GetInstance().RegisterType("MRubyScriptComponent",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<MRubyScriptComponent>();
+        });
+#endif
 
     TypeRegistry::GetInstance().RegisterType("Sprite2D",
         []() -> std::shared_ptr<ISerializable> {
@@ -248,6 +160,11 @@ void RegisterBuiltInTypes() {
             return std::make_shared<components::Sprite3D>();
         });
 
+    TypeRegistry::GetInstance().RegisterType("Light2D",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<components::Light2D>();
+        });
+
     TypeRegistry::GetInstance().RegisterType("AnimatedSprite2D",
         []() -> std::shared_ptr<ISerializable> {
             return std::make_shared<components::AnimatedSprite2D>();
@@ -256,6 +173,16 @@ void RegisterBuiltInTypes() {
     TypeRegistry::GetInstance().RegisterType("AnimatedSprite3D",
         []() -> std::shared_ptr<ISerializable> {
             return std::make_shared<components::AnimatedSprite3D>();
+        });
+
+    TypeRegistry::GetInstance().RegisterType("GifPlayer",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<components::GifPlayer>();
+        });
+
+    TypeRegistry::GetInstance().RegisterType("VideoPlayer",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<components::VideoPlayer>();
         });
 
     TypeRegistry::GetInstance().RegisterType("PrimitiveMesh3D",
@@ -276,6 +203,21 @@ void RegisterBuiltInTypes() {
     TypeRegistry::GetInstance().RegisterType("MultiMeshGeneric",
         []() -> std::shared_ptr<ISerializable> {
             return std::make_shared<components::MultiMeshGeneric>();
+        });
+
+    TypeRegistry::GetInstance().RegisterType("ScatterMultiMesh",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<components::ScatterMultiMesh>();
+        });
+
+    TypeRegistry::GetInstance().RegisterType("CollisionScatterMultiMesh",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<components::CollisionScatterMultiMesh>();
+        });
+
+    TypeRegistry::GetInstance().RegisterType("NodeScatter",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<components::NodeScatter>();
         });
 
     TypeRegistry::GetInstance().RegisterType("DirectionalLight3D",
@@ -390,6 +332,36 @@ void RegisterBuiltInTypes() {
         []() -> std::shared_ptr<ISerializable> {
             return std::make_shared<components::Timer>();
         });
+        TypeRegistry::GetInstance().RegisterType("SubViewport",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<components::SubViewport>();
+        });
+        TypeRegistry::GetInstance().RegisterType("CameraEffectColorGrade",
+        []() -> std::shared_ptr<ISerializable> { return std::make_shared<components::CameraEffectColorGrade>(); });
+        TypeRegistry::GetInstance().RegisterType("CameraEffectTonemap",
+        []() -> std::shared_ptr<ISerializable> { return std::make_shared<components::CameraEffectTonemap>(); });
+        TypeRegistry::GetInstance().RegisterType("CameraEffectVignette",
+        []() -> std::shared_ptr<ISerializable> { return std::make_shared<components::CameraEffectVignette>(); });
+        TypeRegistry::GetInstance().RegisterType("CameraEffectFilmGrain",
+        []() -> std::shared_ptr<ISerializable> { return std::make_shared<components::CameraEffectFilmGrain>(); });
+        TypeRegistry::GetInstance().RegisterType("CameraEffectColorInvert",
+        []() -> std::shared_ptr<ISerializable> { return std::make_shared<components::CameraEffectColorInvert>(); });
+        TypeRegistry::GetInstance().RegisterType("CameraEffectPosterize",
+        []() -> std::shared_ptr<ISerializable> { return std::make_shared<components::CameraEffectPosterize>(); });
+        TypeRegistry::GetInstance().RegisterType("CameraEffectHueShift",
+        []() -> std::shared_ptr<ISerializable> { return std::make_shared<components::CameraEffectHueShift>(); });
+        TypeRegistry::GetInstance().RegisterType("CameraEffectBlur",
+        []() -> std::shared_ptr<ISerializable> { return std::make_shared<components::CameraEffectBlur>(); });
+        TypeRegistry::GetInstance().RegisterType("CameraEffectGlow",
+        []() -> std::shared_ptr<ISerializable> { return std::make_shared<components::CameraEffectGlow>(); });
+        TypeRegistry::GetInstance().RegisterType("CameraEffectOutline",
+        []() -> std::shared_ptr<ISerializable> { return std::make_shared<components::CameraEffectOutline>(); });
+        TypeRegistry::GetInstance().RegisterType("CameraEffectPixelate",
+        []() -> std::shared_ptr<ISerializable> { return std::make_shared<components::CameraEffectPixelate>(); });
+        TypeRegistry::GetInstance().RegisterType("CameraEffectSharpen",
+        []() -> std::shared_ptr<ISerializable> { return std::make_shared<components::CameraEffectSharpen>(); });
+        TypeRegistry::GetInstance().RegisterType("CameraEffectChromaticAberration",
+        []() -> std::shared_ptr<ISerializable> { return std::make_shared<components::CameraEffectChromaticAberration>(); });
         TypeRegistry::GetInstance().RegisterType("Label",
         []() -> std::shared_ptr<ISerializable> {
             return std::make_shared<components::Label>();
@@ -414,6 +386,99 @@ void RegisterBuiltInTypes() {
         []() -> std::shared_ptr<ISerializable> {
             return std::make_shared<components::Button3D>();
         });
+        TypeRegistry::GetInstance().RegisterType("Container",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<components::Container>();
+        });
+        TypeRegistry::GetInstance().RegisterType("PaddingContainer",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<components::PaddingContainer>();
+        });
+        TypeRegistry::GetInstance().RegisterType("CenterContainer",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<components::CenterContainer>();
+        });
+        TypeRegistry::GetInstance().RegisterType("HorizontalContainer",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<components::HorizontalContainer>();
+        });
+        TypeRegistry::GetInstance().RegisterType("VerticalContainer",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<components::VerticalContainer>();
+        });
+        TypeRegistry::GetInstance().RegisterType("GridContainer",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<components::GridContainer>();
+        });
+        TypeRegistry::GetInstance().RegisterType("DockContainer",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<components::DockContainer>();
+        });
+        TypeRegistry::GetInstance().RegisterType("Stack",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<components::Stack>();
+        });
+        TypeRegistry::GetInstance().RegisterType("Wrap",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<components::Wrap>();
+        });
+        TypeRegistry::GetInstance().RegisterType("SplitContainer",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<components::SplitContainer>();
+        });
+        TypeRegistry::GetInstance().RegisterType("AspectRatioContainer",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<components::AspectRatioContainer>();
+        });
+        TypeRegistry::GetInstance().RegisterType("Spacer",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<components::Spacer>();
+        });
+
+        TypeRegistry::GetInstance().RegisterType("VectorGraphic2D",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<components::VectorGraphic2D>();
+        });
+
+    // Networking components. Registered here (not only via REGISTER_COMPONENT_TYPE
+    // in Components.cpp) so they are creatable in every context that calls
+    // InitializeCore - including the C-API DLL, which does not link Components.cpp.
+    TypeRegistry::GetInstance().RegisterType("NetworkObject",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<components::NetworkObject>();
+        });
+    TypeRegistry::GetInstance().RegisterType("NetworkSynchronizer",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<components::NetworkSynchronizer>();
+        });
+    TypeRegistry::GetInstance().RegisterType("NetworkTransform2D",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<components::NetworkTransform2D>();
+        });
+    TypeRegistry::GetInstance().RegisterType("NetworkTransform3D",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<components::NetworkTransform3D>();
+        });
+    TypeRegistry::GetInstance().RegisterType("NetworkSpawner",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<components::NetworkSpawner>();
+        });
+    TypeRegistry::GetInstance().RegisterType("NetworkController",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<components::NetworkController>();
+        });
+    TypeRegistry::GetInstance().RegisterType("NetworkAnimator",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<components::NetworkAnimator>();
+        });
+    TypeRegistry::GetInstance().RegisterType("NetworkRigidBody2D",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<components::NetworkRigidBody2D>();
+        });
+    TypeRegistry::GetInstance().RegisterType("NetworkRigidBody3D",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<components::NetworkRigidBody3D>();
+        });
 
     TypeRegistry::GetInstance().RegisterType("Scene",
         []() -> std::shared_ptr<ISerializable> {
@@ -423,6 +488,31 @@ void RegisterBuiltInTypes() {
     TypeRegistry::GetInstance().RegisterType("SceneInstance",
         []() -> std::shared_ptr<ISerializable> {
             return std::make_shared<SceneInstance>();
+        });
+
+    TypeRegistry::GetInstance().RegisterType("SceneInstance2D",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<SceneInstance2D>();
+        });
+
+    TypeRegistry::GetInstance().RegisterType("SceneInstance3D",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<SceneInstance3D>();
+        });
+
+    TypeRegistry::GetInstance().RegisterType("PrefabInstance",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<PrefabInstance>();
+        });
+
+    TypeRegistry::GetInstance().RegisterType("PrefabInstance2D",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<PrefabInstance2D>();
+        });
+
+    TypeRegistry::GetInstance().RegisterType("PrefabInstance3D",
+        []() -> std::shared_ptr<ISerializable> {
+            return std::make_shared<PrefabInstance3D>();
         });
 
     TypeRegistry::GetInstance().RegisterType("ProjectSettings",

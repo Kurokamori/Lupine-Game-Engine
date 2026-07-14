@@ -46,6 +46,20 @@ public:
     std::shared_ptr<Node> FindNode(const std::string& path) const;
     std::shared_ptr<Node> FindNodeByUUID(const UUID& uuid) const;
 
+    // Groups: collect every node in the scene tree that belongs to `group`.
+    // Walks the tree from the root (consistent with FindNode), so only nodes
+    // currently in the tree are returned.
+    std::vector<Node*> GetNodesInGroup(const std::string& group) const;
+
+    // Interfaces: collect every node in the scene tree that implements
+    // `interfaceName` (any of its components declares it, directly or through
+    // interface inheritance). The runtime counterpart of "find every Damageable".
+    std::vector<Node*> GetNodesImplementingInterface(const std::string& interfaceName) const;
+
+    // Dispatch a single discrete input event to the whole scene tree (event-based
+    // input; see input::InputEvent). No-op when the scene is inactive.
+    void DispatchInputEvent(const nlohmann::json& event);
+
     // Scene lifecycle
     void Initialize();
     void Shutdown();
@@ -68,6 +82,14 @@ private:
     void FindNodeByUUIDRecursive(const std::shared_ptr<Node>& node,
                                   const UUID& uuid,
                                   std::shared_ptr<Node>& result) const;
+
+    void CollectNodesInGroupRecursive(const std::shared_ptr<Node>& node,
+                                       const std::string& group,
+                                       std::vector<Node*>& result) const;
+
+    void CollectNodesImplementingInterfaceRecursive(const std::shared_ptr<Node>& node,
+                                                     const std::string& interfaceName,
+                                                     std::vector<Node*>& result) const;
 
     void RegisterNodePropertiesRecursive(std::shared_ptr<Node> node);
 

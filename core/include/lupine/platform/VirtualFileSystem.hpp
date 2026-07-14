@@ -90,6 +90,14 @@ public:
     FileResult<std::string> ResolvePath(const std::string& virtualPath) const;
 
     /**
+     * Resolves a path or UUID to a physical path.
+     * First attempts UUID resolution via AssetDatabase, then falls back to path resolution.
+     * @param pathOrUUID Either a virtual path or a UUID string
+     * @return FileResult containing the physical path or error
+     */
+    FileResult<std::string> ResolveAsset(const std::string& pathOrUUID) const;
+
+    /**
      * Lists all registered mount points.
      * @return Vector of mount point prefixes
      */

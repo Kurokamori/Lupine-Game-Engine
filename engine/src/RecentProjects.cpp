@@ -150,7 +150,7 @@ bool RecentProjects::Load() {
 
         return true;
     } catch (const std::exception& e) {
-
+        LOG_ERROR(LogCategory::Tools, "RecentProjects: failed to load recent-projects file: {}", e.what());
         return false;
     }
 }
@@ -177,7 +177,7 @@ bool RecentProjects::Save() {
 
         return true;
     } catch (const std::exception& e) {
-
+        LOG_ERROR(LogCategory::Tools, "RecentProjects: failed to save recent-projects file: {}", e.what());
         return false;
     }
 }

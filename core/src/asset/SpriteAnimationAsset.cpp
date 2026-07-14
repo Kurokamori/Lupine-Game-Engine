@@ -1,5 +1,6 @@
 #include "lupine/asset/SpriteAnimationAsset.hpp"
 #include "lupine/platform/FileSystem.hpp"
+#include "lupine/platform/PackFile.hpp"
 #include "lupine/logger/Logger.hpp"
 #include <nlohmann/json.hpp>
 
@@ -28,15 +29,37 @@ bool SpriteAnimationAsset::LoadFromFile(const std::string& filepath) {
 
     SetPath(filepath);
 
-    auto result = platform::FileSystem::ReadFile(filepath);
-    if (!result.success) {
+    std::string fileContents;
 
-        return false;
+    // Check if running from pack file first
+    auto& packFS = platform::PackFileSystem::Instance();
+    if (packFS.isPackMode() && packFS.exists(filepath)) {
+        fileContents = packFS.readFileAsString(filepath);
+        if (fileContents.empty()) {
+            
+            return false;
+        }
+    } else {
+        // Resolve res://, user://, temp:// virtual paths to a physical path. This asset is
+        // loaded by file path directly (not via the asset database), so a raw filesystem read
+        // would not understand the res:// mount and would fail, leaving AnimatedSprite2D with
+        // no frames (a blank sprite). ResolveAssetPath routes res:// through the AssetDatabase,
+        // which knows the project root; the VFS mounts res:// to the engine's own resources
+        // directory, so resolving through it lands on the wrong root entirely.
+        std::string realPath = ResolveAssetPath(filepath);
+
+        platform::FileResult<std::string> result = platform::FileSystem::ReadFile(realPath);
+        if (!result.success) {
+            LOG_ERROR(LogCategory::Asset, "SpriteAnimationAsset: failed to read {} (resolved: {}): {}",
+                      filepath, realPath, result.error);
+            return false;
+        }
+        fileContents = std::move(result.data);
     }
 
     try {
 
-        nlohmann::json json = nlohmann::json::parse(result.data);
+        nlohmann::json json = nlohmann::json::parse(fileContents);
 
         if (json.contains("image_paths")) {
             m_ImagePaths = json["image_paths"].get<std::vector<std::string>>();
@@ -82,7 +105,7 @@ bool SpriteAnimationAsset::LoadFromFile(const std::string& filepath) {
         return true;
 
     } catch (const std::exception& e) {
-
+        LOG_ERROR(LogCategory::Asset, "SpriteAnimationAsset: failed to load '{}': {}", filepath, e.what());
         return false;
     }
 }

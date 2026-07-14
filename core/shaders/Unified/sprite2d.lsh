@@ -1,0 +1,37 @@
+#shader "Sprite2D"
+#description "2D sprite rendering with texture and tint color"
+
+#begin properties
+    uniform mat4 u_ViewProjection;
+    uniform mat4 u_Model;
+    uniform vec4 u_TintColor = vec4(1.0);
+    uniform int u_UseTexture = 0;
+    uniform sampler2D u_Texture;
+#end properties
+
+#begin vertex
+    #input vec3 a_Position : POSITION 0
+    #input vec2 a_TexCoord : TEXCOORD0 1
+    #input vec4 a_Color : COLOR 2
+
+    #output vec2 v_TexCoord
+    #output vec4 v_Color
+
+    void main() {
+        v_TexCoord = a_TexCoord;
+        v_Color = a_Color;
+        VERTEX_OUTPUT = MUL(u_ViewProjection, MUL(u_Model, vec4(a_Position, 1.0)));
+    }
+#end vertex
+
+#begin fragment
+    #output vec4 FragColor
+
+    void main() {
+        vec4 color = v_Color * u_TintColor;
+        if (u_UseTexture != 0) {
+            color *= SAMPLE(u_Texture, v_TexCoord);
+        }
+        FragColor = color;
+    }
+#end fragment

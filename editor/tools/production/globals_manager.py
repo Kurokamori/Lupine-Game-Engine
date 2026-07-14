@@ -24,6 +24,145 @@ from panels.base_panel import EditorPanel
 from theme import get_theme_manager
 
 
+# Canonical global-variable type vocabulary. These mirror the engine's
+# PropertyValueType names and are delivered to scripts through SetGlobalJson:
+# scalars arrive as native scalars, structured types as native tables/dicts.
+SUPPORTED_TYPES = [
+    "int", "float", "double", "bool", "string", "resource",
+    "vec2", "vec3", "vec4", "color", "quat", "rect",
+    "array", "dictionary", "string_array", "int_array", "float_array",
+]
+
+# Structured object types encoded as JSON objects with a fixed field set, matching
+# the engine's conventions (vec2 {x,y}, color {r,g,b,a}, quat {w,x,y,z}, rect {x,y,w,h}).
+_OBJECT_FIELDS = {
+    "vec2": ["x", "y"],
+    "vec3": ["x", "y", "z"],
+    "vec4": ["x", "y", "z", "w"],
+    "color": ["r", "g", "b", "a"],
+    "quat": ["w", "x", "y", "z"],
+    "rect": ["x", "y", "w", "h"],
+}
+
+_TYPE_PLACEHOLDERS = {
+    "int": "e.g., 100",
+    "float": "e.g., 3.14",
+    "double": "e.g., 3.141592653589793",
+    "bool": "true or false",
+    "string": "e.g., Hello World",
+    "resource": "e.g., res://data/config.ares",
+    "vec2": '{"x": 0, "y": 0}',
+    "vec3": '{"x": 0, "y": 0, "z": 0}',
+    "vec4": '{"x": 0, "y": 0, "z": 0, "w": 0}',
+    "color": '{"r": 1, "g": 1, "b": 1, "a": 1}',
+    "quat": '{"w": 1, "x": 0, "y": 0, "z": 0}',
+    "rect": '{"x": 0, "y": 0, "w": 0, "h": 0}',
+    "array": '[1, "two", true]',
+    "dictionary": '{"key": "value"}',
+    "string_array": '["a", "b", "c"]',
+    "int_array": "[1, 2, 3]",
+    "float_array": "[1.0, 2.5, 3.0]",
+}
+
+
+def default_global_value(var_type):
+    """Return a sensible default value for a freshly created variable of var_type."""
+    if var_type in ("int",):
+        return 0
+    if var_type in ("float", "double"):
+        return 0.0
+    if var_type == "bool":
+        return False
+    if var_type in ("string", "resource"):
+        return ""
+    if var_type in _OBJECT_FIELDS:
+        return {field: (1.0 if var_type == "color" else 0.0) for field in _OBJECT_FIELDS[var_type]}
+    if var_type == "quat":
+        return {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0}
+    if var_type == "dictionary":
+        return {}
+    # array / string_array / int_array / float_array
+    return []
+
+
+def parse_global_value(var_type, value_str):
+    """Parse the editor text for var_type into a JSON-serializable Python value.
+
+    Returns (value, None) on success or (None, error_message) on failure.
+    """
+    value_str = value_str.strip()
+    try:
+        if var_type == "int":
+            return int(value_str), None
+        if var_type in ("float", "double"):
+            return float(value_str), None
+        if var_type == "bool":
+            low = value_str.lower()
+            if low not in ("true", "false"):
+                return None, "Bool must be 'true' or 'false'"
+            return low == "true", None
+        if var_type in ("string", "resource"):
+            return value_str, None
+
+        # Structured types are entered as JSON.
+        parsed = json.loads(value_str)
+
+        if var_type in _OBJECT_FIELDS:
+            if not isinstance(parsed, dict):
+                return None, f"{var_type} must be a JSON object, e.g. {_TYPE_PLACEHOLDERS[var_type]}"
+            result = {}
+            for field in _OBJECT_FIELDS[var_type]:
+                if field not in parsed:
+                    return None, f"{var_type} is missing field '{field}'"
+                component = parsed[field]
+                if not isinstance(component, (int, float)) or isinstance(component, bool):
+                    return None, f"{var_type} field '{field}' must be a number"
+                result[field] = float(component)
+            return result, None
+
+        if var_type == "dictionary":
+            if not isinstance(parsed, dict):
+                return None, "dictionary must be a JSON object"
+            return parsed, None
+
+        if var_type == "array":
+            if not isinstance(parsed, list):
+                return None, "array must be a JSON array"
+            return parsed, None
+
+        if var_type in ("string_array", "int_array", "float_array"):
+            if not isinstance(parsed, list):
+                return None, f"{var_type} must be a JSON array"
+            result = []
+            for item in parsed:
+                if var_type == "string_array":
+                    if not isinstance(item, str):
+                        return None, "string_array items must be strings"
+                    result.append(item)
+                elif var_type == "int_array":
+                    if not isinstance(item, int) or isinstance(item, bool):
+                        return None, "int_array items must be integers"
+                    result.append(int(item))
+                else:  # float_array
+                    if not isinstance(item, (int, float)) or isinstance(item, bool):
+                        return None, "float_array items must be numbers"
+                    result.append(float(item))
+            return result, None
+
+        return None, f"Unsupported type '{var_type}'"
+    except (ValueError, json.JSONDecodeError) as e:
+        return None, str(e)
+
+
+def format_global_value(var_type, value):
+    """Return a single-line, editable string representation of a stored value."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (dict, list)):
+        return json.dumps(value)
+    return str(value)
+
+
 class AddSingletonDialog(QDialog):
     """Dialog for adding a new singleton/autoload script"""
 
@@ -146,7 +285,7 @@ class AddSingletonDialog(QDialog):
 class AddVariableDialog(QDialog):
     """Dialog for adding/editing a global variable"""
 
-    SUPPORTED_TYPES = ["int", "float", "bool", "string"]
+    SUPPORTED_TYPES = SUPPORTED_TYPES
 
     def __init__(self, parent=None, edit_data=None):
         super().__init__(parent)
@@ -208,17 +347,11 @@ class AddVariableDialog(QDialog):
         if type_index >= 0:
             self.type_combo.setCurrentIndex(type_index)
 
-        self.value_edit.setText(str(self.edit_data["value"]))
+        self.value_edit.setText(format_global_value(self.edit_data["type"], self.edit_data["value"]))
 
     def _on_type_changed(self, type_name):
         """Update placeholder when type changes"""
-        placeholders = {
-            "int": "e.g., 100",
-            "float": "e.g., 3.14",
-            "bool": "true or false",
-            "string": "e.g., Hello World"
-        }
-        self.value_edit.setPlaceholderText(placeholders.get(type_name, ""))
+        self.value_edit.setPlaceholderText(_TYPE_PLACEHOLDERS.get(type_name, ""))
 
     def _accept(self):
         """Validate and accept"""
@@ -243,20 +376,12 @@ class AddVariableDialog(QDialog):
             return
 
         # Validate value based on type
-        try:
-            if var_type == "int":
-                int(value_str)
-            elif var_type == "float":
-                float(value_str)
-            elif var_type == "bool":
-                if value_str.lower() not in ["true", "false"]:
-                    raise ValueError("Bool must be 'true' or 'false'")
-            # string needs no validation
-        except ValueError as e:
+        _value, error = parse_global_value(var_type, value_str)
+        if error is not None:
             QMessageBox.warning(
                 self,
                 "Validation Error",
-                f"Invalid value for type {var_type}: {e}"
+                f"Invalid value for type {var_type}: {error}"
             )
             return
 
@@ -267,15 +392,7 @@ class AddVariableDialog(QDialog):
         value_str = self.value_edit.text().strip()
         var_type = self.type_combo.currentText()
 
-        # Convert value to appropriate type
-        if var_type == "int":
-            value = int(value_str)
-        elif var_type == "float":
-            value = float(value_str)
-        elif var_type == "bool":
-            value = value_str.lower() == "true"
-        else:  # string
-            value = value_str
+        value, _error = parse_global_value(var_type, value_str)
 
         return {
             "name": self.name_edit.text().strip(),
@@ -466,7 +583,11 @@ class GlobalsManagerTool(EditorPanel):
             "player_health int 100\n"
             "gravity float 9.81\n"
             "debug_mode bool false\n"
-            "player_name string Player1"
+            "player_name string Player1\n"
+            "spawn_point vec2 {\"x\": 0, \"y\": 0}\n"
+            "tint color {\"r\": 1, \"g\": 1, \"b\": 1, \"a\": 1}\n"
+            "high_scores int_array [100, 80, 50]\n"
+            "config dictionary {\"difficulty\": \"hard\"}"
         )
         font = QFont("Consolas", 10)
         self.variables_text.setFont(font)
@@ -510,7 +631,7 @@ class GlobalsManagerTool(EditorPanel):
         """Convert variables list to text format"""
         lines = []
         for var in self.variables:
-            value_str = str(var["value"]).lower() if isinstance(var["value"], bool) else str(var["value"])
+            value_str = format_global_value(var["type"], var["value"])
             lines.append(f"{var['name']} {var['type']} {value_str}")
 
         self.variables_text.setPlainText("\n".join(lines))
@@ -538,30 +659,21 @@ class GlobalsManagerTool(EditorPanel):
                 continue
 
             # Validate type
-            if var_type not in AddVariableDialog.SUPPORTED_TYPES:
+            if var_type not in SUPPORTED_TYPES:
                 errors.append(f"Line {i}: Unsupported type '{var_type}'")
                 continue
 
             # Parse value
-            try:
-                if var_type == "int":
-                    value = int(value_str)
-                elif var_type == "float":
-                    value = float(value_str)
-                elif var_type == "bool":
-                    if value_str.lower() not in ["true", "false"]:
-                        raise ValueError("Bool must be 'true' or 'false'")
-                    value = value_str.lower() == "true"
-                else:  # string
-                    value = value_str
+            value, error = parse_global_value(var_type, value_str)
+            if error is not None:
+                errors.append(f"Line {i}: Invalid value '{value_str}' for type {var_type}: {error}")
+                continue
 
-                new_variables.append({
-                    "name": name,
-                    "type": var_type,
-                    "value": value
-                })
-            except ValueError as e:
-                errors.append(f"Line {i}: Invalid value '{value_str}' for type {var_type}")
+            new_variables.append({
+                "name": name,
+                "type": var_type,
+                "value": value
+            })
 
         if errors:
             QMessageBox.warning(
@@ -696,7 +808,7 @@ class GlobalsManagerTool(EditorPanel):
         # Find matching variable
         var_index = -1
         for i, var in enumerate(self.variables):
-            value_str = str(var["value"]).lower() if isinstance(var["value"], bool) else str(var["value"])
+            value_str = format_global_value(var["type"], var["value"])
             if var["name"] == selected_name and var["type"] == selected_type and value_str == selected_value_str:
                 var_index = i
                 break
@@ -747,7 +859,7 @@ class GlobalsManagerTool(EditorPanel):
         # Find matching variable
         var_index = -1
         for i, var in enumerate(self.variables):
-            value_str = str(var["value"]).lower() if isinstance(var["value"], bool) else str(var["value"])
+            value_str = format_global_value(var["type"], var["value"])
             if var["name"] == selected_name and var["type"] == selected_type and value_str == selected_value_str:
                 var_index = i
                 break
@@ -791,7 +903,7 @@ class GlobalsManagerTool(EditorPanel):
             row = self.variables_table.rowCount()
             self.variables_table.insertRow(row)
 
-            value_str = str(var["value"]).lower() if isinstance(var["value"], bool) else str(var["value"])
+            value_str = format_global_value(var["type"], var["value"])
 
             self.variables_table.setItem(row, 0, QTableWidgetItem(var["name"]))
             self.variables_table.setItem(row, 1, QTableWidgetItem(var["type"]))

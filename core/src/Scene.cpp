@@ -1,6 +1,7 @@
 #include "lupine/core/Scene.hpp"
 #include "lupine/core/Component.hpp"
 #include "lupine/platform/Platform.hpp"
+#include "lupine/platform/PackFile.hpp"
 #include "lupine/logger/Logger.hpp"
 #include "lupine/audio/AudioManager.hpp"
 #include <nlohmann/json.hpp>
@@ -64,14 +65,28 @@ void Scene::Deserialize(const nlohmann::json& json) {
 bool Scene::Load(const std::string& filepath) {
     m_FilePath = filepath;
 
-    auto result = platform::FileSystem::ReadFile(filepath);
-    if (!result.success) {
+    std::string fileContents;
 
-        return false;
+    // First try pack-based VFS (for exported games)
+    auto& packFS = platform::PackFileSystem::Instance();
+    if (packFS.isPackMode() && packFS.exists(filepath)) {
+        fileContents = packFS.readFileAsString(filepath);
+        if (fileContents.empty()) {
+            
+            return false;
+        }
+    } else {
+        // Fall back to regular filesystem
+        auto result = platform::FileSystem::ReadFile(filepath);
+        if (!result.success) {
+            
+            return false;
+        }
+        fileContents = result.data;
     }
 
     try {
-        nlohmann::json json = nlohmann::json::parse(result.data);
+        nlohmann::json json = nlohmann::json::parse(fileContents);
 
         RegisterProperties();
 
@@ -79,7 +94,7 @@ bool Scene::Load(const std::string& filepath) {
 
         return true;
     } catch (const std::exception& e) {
-
+        LOG_ERROR(LogCategory::Core, "Scene: failed to load '{}': {}", filepath, e.what());
         return false;
     }
 }
@@ -163,9 +178,10 @@ void Scene::RemoveNode(std::shared_ptr<Node> node) {
     if (m_Root == node) {
         m_Root->SetScene(nullptr);
         m_Root = nullptr;
-    } else if (m_Root) {
-
-        node->GetParent()->RemoveChild(node);
+    } else if (Node* parent = node->GetParent()) {
+        // The node may already be detached, or belong to another scene entirely; either way
+        // it has no parent to remove it from.
+        parent->RemoveChild(node);
     }
 }
 
@@ -284,6 +300,58 @@ void Scene::ProcessInput(float deltaTime) {
 
     }
 
+}
+
+void Scene::DispatchInputEvent(const nlohmann::json& event) {
+    if (!m_Active || !m_Initialized) return;
+
+    if (m_Root) {
+        m_Root->OnInputEvent(event);
+    }
+}
+
+void Scene::CollectNodesInGroupRecursive(const std::shared_ptr<Node>& node,
+                                          const std::string& group,
+                                          std::vector<Node*>& result) const {
+    if (!node) return;
+
+    if (node->IsInGroup(group)) {
+        result.push_back(node.get());
+    }
+
+    for (const auto& child : node->GetChildren()) {
+        CollectNodesInGroupRecursive(child, group, result);
+    }
+}
+
+std::vector<Node*> Scene::GetNodesInGroup(const std::string& group) const {
+    std::vector<Node*> result;
+    if (m_Root && !group.empty()) {
+        CollectNodesInGroupRecursive(m_Root, group, result);
+    }
+    return result;
+}
+
+void Scene::CollectNodesImplementingInterfaceRecursive(const std::shared_ptr<Node>& node,
+                                                       const std::string& interfaceName,
+                                                       std::vector<Node*>& result) const {
+    if (!node) return;
+
+    if (node->ImplementsInterface(interfaceName)) {
+        result.push_back(node.get());
+    }
+
+    for (const auto& child : node->GetChildren()) {
+        CollectNodesImplementingInterfaceRecursive(child, interfaceName, result);
+    }
+}
+
+std::vector<Node*> Scene::GetNodesImplementingInterface(const std::string& interfaceName) const {
+    std::vector<Node*> result;
+    if (m_Root && !interfaceName.empty()) {
+        CollectNodesImplementingInterfaceRecursive(m_Root, interfaceName, result);
+    }
+    return result;
 }
 
 }

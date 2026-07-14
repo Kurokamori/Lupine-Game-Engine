@@ -16,19 +16,28 @@ RigidBody2D::RigidBody2D(Physics2DWorld* world, const core::UUID& id, BodyType t
     bodyDef.type = ConvertBodyType(type);
     bodyDef.position = {0.0f, 0.0f};
     bodyDef.rotation = b2Rot_identity;
+    bodyDef.userData = this;
 
     m_BodyId = b2CreateBody(world->GetBox2DWorld(), &bodyDef);
 }
 
 RigidBody2D::~RigidBody2D() {
 
-    for (Collider2D* collider : m_Colliders) {
-        delete collider;
+    // Colliders are owned by whoever constructed them - the components hold them in
+    // unique_ptrs - so the body must not delete them here; that would double-free against
+    // the owner. Tell each collider its body is gone instead. b2DestroyBody below destroys
+    // the body's shapes, so each collider drops its now-dead shape id first.
+    std::vector<Collider2D*> colliders;
+    colliders.swap(m_Colliders);
+    for (Collider2D* collider : colliders) {
+        if (collider) {
+            collider->OnOwningBodyDestroyed();
+        }
     }
-    m_Colliders.clear();
 
     if (B2_IS_NON_NULL(m_BodyId)) {
         b2DestroyBody(m_BodyId);
+        m_BodyId = b2_nullBodyId;
     }
 }
 

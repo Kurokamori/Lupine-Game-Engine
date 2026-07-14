@@ -13,9 +13,6 @@
 #include "math/lc_math.h"
 #include "components/lc_light.h"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 /* ============================================================================
  * Sprite2D Functions
@@ -527,8 +524,5 @@ LC_API LCResult lc_static_mesh3d_get_double_sided(LCComponentHandle component, b
  */
 LC_API LCResult lc_static_mesh3d_set_double_sided(LCComponentHandle component, bool double_sided);
 
-#ifdef __cplusplus
-}
-#endif
 
 #endif /* LUPINE_CAPI_RENDERING_H */

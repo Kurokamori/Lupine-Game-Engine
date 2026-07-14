@@ -3,21 +3,22 @@
 #include "core/lc_scene.h"
 #include "core/lc_core.h"
 #include "core/lc_node.h"
+#include "../core/lc_internal.h"
 
-#include <lupine\core\Scene.hpp>
-#include <lupine\core\Node.hpp>
+#include <lupine/core/Scene.hpp>
+#include <lupine/core/Node.hpp>
+#include <lupine/core/SceneManager.hpp>
 
 #include <unordered_map>
 #include <mutex>
 #include <memory>
+#include <string>
+#include <cstring>
 
 namespace {
 
 std::unordered_map<LCSceneHandle, std::shared_ptr<lupine::core::Scene>> g_sceneHandles;
 std::mutex g_sceneHandlesMutex;
-
-extern std::shared_ptr<lupine::core::Node> GetNode(LCNodeHandle handle);
-extern LCNodeHandle CreateHandle(std::shared_ptr<lupine::core::Node> node);
 
 LCSceneHandle CreateSceneHandle(std::shared_ptr<lupine::core::Scene> scene) {
     if (!scene) return nullptr;
@@ -51,13 +52,22 @@ bool IsValidSceneHandle(LCSceneHandle handle) {
 }
 
 void SetSceneError(LCResult code, const char* message) {
-    extern void SetError(LCResult code, const char* message);
-    SetError(code, message);
+    ::SetError(code, message);
 }
 
 }
 
-extern "C" {
+LCSceneHandle CreateSceneHandleNonOwning(lupine::core::Scene* scene) {
+    if (!scene) return nullptr;
+
+    std::lock_guard<std::mutex> lock(g_sceneHandlesMutex);
+    LCSceneHandle handle = reinterpret_cast<LCSceneHandle>(scene);
+    if (g_sceneHandles.find(handle) == g_sceneHandles.end()) {
+        g_sceneHandles[handle] = std::shared_ptr<lupine::core::Scene>(scene, [](lupine::core::Scene*) {});
+    }
+    return handle;
+}
+
 
 LC_API LCResult lc_scene_create(const char* name, LCSceneHandle* out_scene) {
     if (!out_scene) {
@@ -532,4 +542,154 @@ LC_API LCResult lc_scene_process_input(LCSceneHandle scene, float delta_time) {
     }
 }
 
+LC_API LCResult lc_scene_add_autoload(const char* scene_path) {
+    if (!scene_path) {
+        SetError(LC_ERROR_NULL_POINTER, "scene_path must not be NULL");
+        return LC_ERROR_NULL_POINTER;
+    }
+
+    try {
+        lupine::core::SceneManager* sceneManager = lupine::core::SceneManager::GetInstance();
+        if (!sceneManager) {
+            SetError(LC_ERROR_OPERATION_FAILED, "No active scene manager to add an autoload scene to");
+            return LC_ERROR_OPERATION_FAILED;
+        }
+        if (!sceneManager->AddAutoloadScene(scene_path)) {
+            SetError(LC_ERROR_OPERATION_FAILED, "Failed to load additive scene");
+            return LC_ERROR_OPERATION_FAILED;
+        }
+        return LC_SUCCESS;
+
+    } catch (...) {
+        return LC_ERROR_INTERNAL_ERROR;
+    }
+}
+
+LC_API LCResult lc_scene_remove_autoload(const char* scene_path) {
+    if (!scene_path) {
+        SetError(LC_ERROR_NULL_POINTER, "scene_path must not be NULL");
+        return LC_ERROR_NULL_POINTER;
+    }
+
+    try {
+        lupine::core::SceneManager* sceneManager = lupine::core::SceneManager::GetInstance();
+        if (!sceneManager) {
+            SetError(LC_ERROR_OPERATION_FAILED, "No active scene manager to remove an autoload scene from");
+            return LC_ERROR_OPERATION_FAILED;
+        }
+        sceneManager->RemoveAutoloadScene(scene_path);
+        return LC_SUCCESS;
+
+    } catch (...) {
+        return LC_ERROR_INTERNAL_ERROR;
+    }
+}
+
+/* ============================================================================
+ * Active Scene Control (runtime SceneManager)
+ * ============================================================================ */
+
+LC_API LCResult lc_scene_change(const char* scene_path) {
+    if (!scene_path) {
+        SetError(LC_ERROR_NULL_POINTER, "scene_path must not be NULL");
+        return LC_ERROR_NULL_POINTER;
+    }
+
+    try {
+        lupine::core::SceneManager* sceneManager = lupine::core::SceneManager::GetInstance();
+        if (!sceneManager) {
+            SetError(LC_ERROR_OPERATION_FAILED, "No active scene manager to change scene on");
+            return LC_ERROR_OPERATION_FAILED;
+        }
+        sceneManager->RequestSceneChange(scene_path);
+        return LC_SUCCESS;
+
+    } catch (...) {
+        return LC_ERROR_INTERNAL_ERROR;
+    }
+}
+
+LC_API LCResult lc_scene_reload(void) {
+    try {
+        lupine::core::SceneManager* sceneManager = lupine::core::SceneManager::GetInstance();
+        if (!sceneManager) {
+            SetError(LC_ERROR_OPERATION_FAILED, "No active scene manager to reload scene on");
+            return LC_ERROR_OPERATION_FAILED;
+        }
+
+        lupine::core::Scene* currentScene = sceneManager->GetCurrentScene();
+        if (!currentScene) {
+            return LC_SUCCESS;
+        }
+
+        std::string currentPath = currentScene->GetFilePath();
+        if (currentPath.empty()) {
+            return LC_SUCCESS;
+        }
+
+        sceneManager->SwitchScene(currentPath);
+        return LC_SUCCESS;
+
+    } catch (...) {
+        return LC_ERROR_INTERNAL_ERROR;
+    }
+}
+
+LC_API LCResult lc_scene_get_current(LCSceneHandle* out_scene) {
+    if (!out_scene) {
+        SetError(LC_ERROR_NULL_POINTER, "out_scene must not be NULL");
+        return LC_ERROR_NULL_POINTER;
+    }
+
+    try {
+        lupine::core::SceneManager* sceneManager = lupine::core::SceneManager::GetInstance();
+        if (!sceneManager) {
+            SetError(LC_ERROR_OPERATION_FAILED, "No active scene manager to query the current scene from");
+            return LC_ERROR_OPERATION_FAILED;
+        }
+
+        lupine::core::Scene* currentScene = sceneManager->GetCurrentScene();
+        if (!currentScene) {
+            *out_scene = nullptr;
+            return LC_SUCCESS;
+        }
+
+        std::shared_ptr<lupine::core::Scene> borrowed(std::shared_ptr<lupine::core::Scene>(), currentScene);
+        *out_scene = CreateSceneHandle(borrowed);
+        return LC_SUCCESS;
+
+    } catch (...) {
+        return LC_ERROR_INTERNAL_ERROR;
+    }
+}
+
+LC_API LCResult lc_scene_get_current_path(char* buffer, size_t buffer_size) {
+    if (!buffer) {
+        SetError(LC_ERROR_NULL_POINTER, "buffer must not be NULL");
+        return LC_ERROR_NULL_POINTER;
+    }
+    if (buffer_size == 0) {
+        SetError(LC_ERROR_INVALID_PARAMETER, "buffer_size must not be 0");
+        return LC_ERROR_INVALID_PARAMETER;
+    }
+
+    try {
+        lupine::core::SceneManager* sceneManager = lupine::core::SceneManager::GetInstance();
+        if (!sceneManager) {
+            SetError(LC_ERROR_OPERATION_FAILED, "No active scene manager to query the current scene path from");
+            return LC_ERROR_OPERATION_FAILED;
+        }
+
+        std::string path;
+        lupine::core::Scene* currentScene = sceneManager->GetCurrentScene();
+        if (currentScene) {
+            path = currentScene->GetFilePath();
+        }
+
+        CopyStringToBuffer(buffer, buffer_size, path.c_str());
+        return LC_SUCCESS;
+
+    } catch (...) {
+        return LC_ERROR_INTERNAL_ERROR;
+    }
 }

@@ -45,7 +45,7 @@ bool StyleBox::SaveToFile(const std::string& filepath) const {
 
         return true;
     } catch (const std::exception& e) {
-
+        LOG_ERROR(LogCategory::UI, "StyleBox: failed to save '{}': {}", filepath, e.what());
         return false;
     }
 }
@@ -67,24 +67,41 @@ std::shared_ptr<StyleBox> StyleBox::LoadFromFile(const std::string& filepath) {
             return nullptr;
         }
 
-        std::string typeName = json["type"].get<std::string>();
-        std::shared_ptr<StyleBox> styleBox;
-
-        if (typeName == "StyleBoxFlat") {
-            styleBox = std::make_shared<StyleBoxFlat>();
-        } else {
-
+        std::shared_ptr<StyleBox> styleBox = CreateFromJson(json);
+        if (!styleBox) {
             return nullptr;
         }
-
-        styleBox->Deserialize(json);
-
         return styleBox;
 
     } catch (const std::exception& e) {
-
+        LOG_ERROR(LogCategory::UI, "StyleBox: failed to load '{}': {}", filepath, e.what());
         return nullptr;
     }
+}
+
+std::shared_ptr<StyleBox> StyleBox::CreateByTypeName(const std::string& typeName) {
+    if (typeName == "StyleBoxFlat") {
+        return std::make_shared<StyleBoxFlat>();
+    } else if (typeName == "StyleBoxTexture") {
+        return std::make_shared<StyleBoxTexture>();
+    } else if (typeName == "StyleBoxLine") {
+        return std::make_shared<StyleBoxLine>();
+    } else if (typeName == "StyleBoxEmpty") {
+        return std::make_shared<StyleBoxEmpty>();
+    }
+    return nullptr;
+}
+
+std::shared_ptr<StyleBox> StyleBox::CreateFromJson(const nlohmann::json& json) {
+    if (!json.is_object() || !json.contains("type") || !json["type"].is_string()) {
+        return nullptr;
+    }
+    std::shared_ptr<StyleBox> styleBox = CreateByTypeName(json["type"].get<std::string>());
+    if (!styleBox) {
+        return nullptr;
+    }
+    styleBox->Deserialize(json);
+    return styleBox;
 }
 
 StyleBoxFlat::StyleBoxFlat()
@@ -353,6 +370,221 @@ void StyleBoxFlat::Deserialize(const nlohmann::json& json) {
     if (json.contains("customShaderPath")) {
         m_CustomShaderPath = json["customShaderPath"].get<std::string>();
     }
+}
+
+// ============================================================ StyleBoxTexture
+
+StyleBoxTexture::StyleBoxTexture()
+    : StyleBox()
+{
+}
+
+const char* StyleBoxTexture::AxisStretchModeToString(AxisStretchMode mode) {
+    switch (mode) {
+        case AxisStretchMode::Stretch: return "stretch";
+        case AxisStretchMode::Tile:    return "tile";
+        case AxisStretchMode::TileFit: return "tile_fit";
+    }
+    return "stretch";
+}
+
+StyleBoxTexture::AxisStretchMode StyleBoxTexture::AxisStretchModeFromString(const std::string& s) {
+    if (s == "tile") return AxisStretchMode::Tile;
+    if (s == "tile_fit") return AxisStretchMode::TileFit;
+    return AxisStretchMode::Stretch;
+}
+
+std::shared_ptr<StyleBox> StyleBoxTexture::Clone() const {
+    auto clone = std::make_shared<StyleBoxTexture>();
+
+    clone->m_ContentMarginLeft = m_ContentMarginLeft;
+    clone->m_ContentMarginRight = m_ContentMarginRight;
+    clone->m_ContentMarginTop = m_ContentMarginTop;
+    clone->m_ContentMarginBottom = m_ContentMarginBottom;
+
+    clone->m_TexturePath = m_TexturePath;
+    clone->m_RegionRect = m_RegionRect;
+    clone->m_ModulateColor = m_ModulateColor;
+    clone->m_DrawCenter = m_DrawCenter;
+
+    clone->m_TextureMarginLeft = m_TextureMarginLeft;
+    clone->m_TextureMarginRight = m_TextureMarginRight;
+    clone->m_TextureMarginTop = m_TextureMarginTop;
+    clone->m_TextureMarginBottom = m_TextureMarginBottom;
+
+    clone->m_ExpandMarginLeft = m_ExpandMarginLeft;
+    clone->m_ExpandMarginRight = m_ExpandMarginRight;
+    clone->m_ExpandMarginTop = m_ExpandMarginTop;
+    clone->m_ExpandMarginBottom = m_ExpandMarginBottom;
+
+    clone->m_AxisStretchHorizontal = m_AxisStretchHorizontal;
+    clone->m_AxisStretchVertical = m_AxisStretchVertical;
+
+    return clone;
+}
+
+nlohmann::json StyleBoxTexture::Serialize() const {
+    nlohmann::json json = StyleBox::Serialize();
+
+    json["texturePath"] = m_TexturePath;
+    json["regionRect"] = {
+        {"x", m_RegionRect.position.x},
+        {"y", m_RegionRect.position.y},
+        {"w", m_RegionRect.size.x},
+        {"h", m_RegionRect.size.y}
+    };
+    json["modulateColor"] = {
+        {"r", m_ModulateColor.r},
+        {"g", m_ModulateColor.g},
+        {"b", m_ModulateColor.b},
+        {"a", m_ModulateColor.a}
+    };
+    json["drawCenter"] = m_DrawCenter;
+
+    json["textureMarginLeft"] = m_TextureMarginLeft;
+    json["textureMarginRight"] = m_TextureMarginRight;
+    json["textureMarginTop"] = m_TextureMarginTop;
+    json["textureMarginBottom"] = m_TextureMarginBottom;
+
+    json["expandMarginLeft"] = m_ExpandMarginLeft;
+    json["expandMarginRight"] = m_ExpandMarginRight;
+    json["expandMarginTop"] = m_ExpandMarginTop;
+    json["expandMarginBottom"] = m_ExpandMarginBottom;
+
+    json["axisStretchHorizontal"] = AxisStretchModeToString(m_AxisStretchHorizontal);
+    json["axisStretchVertical"] = AxisStretchModeToString(m_AxisStretchVertical);
+
+    return json;
+}
+
+void StyleBoxTexture::Deserialize(const nlohmann::json& json) {
+    StyleBox::Deserialize(json);
+
+    if (json.contains("texturePath")) {
+        m_TexturePath = json["texturePath"].get<std::string>();
+    }
+    if (json.contains("regionRect")) {
+        auto r = json["regionRect"];
+        m_RegionRect = Rect(
+            r["x"].get<float>(),
+            r["y"].get<float>(),
+            r["w"].get<float>(),
+            r["h"].get<float>()
+        );
+    }
+    if (json.contains("modulateColor")) {
+        auto mc = json["modulateColor"];
+        m_ModulateColor = Color(mc["r"].get<float>(), mc["g"].get<float>(), mc["b"].get<float>(), mc["a"].get<float>());
+    }
+    if (json.contains("drawCenter")) {
+        m_DrawCenter = json["drawCenter"].get<bool>();
+    }
+
+    if (json.contains("textureMarginLeft")) {
+        m_TextureMarginLeft = json["textureMarginLeft"].get<float>();
+    }
+    if (json.contains("textureMarginRight")) {
+        m_TextureMarginRight = json["textureMarginRight"].get<float>();
+    }
+    if (json.contains("textureMarginTop")) {
+        m_TextureMarginTop = json["textureMarginTop"].get<float>();
+    }
+    if (json.contains("textureMarginBottom")) {
+        m_TextureMarginBottom = json["textureMarginBottom"].get<float>();
+    }
+
+    if (json.contains("expandMarginLeft")) {
+        m_ExpandMarginLeft = json["expandMarginLeft"].get<float>();
+    }
+    if (json.contains("expandMarginRight")) {
+        m_ExpandMarginRight = json["expandMarginRight"].get<float>();
+    }
+    if (json.contains("expandMarginTop")) {
+        m_ExpandMarginTop = json["expandMarginTop"].get<float>();
+    }
+    if (json.contains("expandMarginBottom")) {
+        m_ExpandMarginBottom = json["expandMarginBottom"].get<float>();
+    }
+
+    if (json.contains("axisStretchHorizontal")) {
+        m_AxisStretchHorizontal = AxisStretchModeFromString(json["axisStretchHorizontal"].get<std::string>());
+    }
+    if (json.contains("axisStretchVertical")) {
+        m_AxisStretchVertical = AxisStretchModeFromString(json["axisStretchVertical"].get<std::string>());
+    }
+}
+
+// =============================================================== StyleBoxLine
+
+StyleBoxLine::StyleBoxLine()
+    : StyleBox()
+{
+}
+
+std::shared_ptr<StyleBox> StyleBoxLine::Clone() const {
+    auto clone = std::make_shared<StyleBoxLine>();
+
+    clone->m_ContentMarginLeft = m_ContentMarginLeft;
+    clone->m_ContentMarginRight = m_ContentMarginRight;
+    clone->m_ContentMarginTop = m_ContentMarginTop;
+    clone->m_ContentMarginBottom = m_ContentMarginBottom;
+
+    clone->m_Color = m_Color;
+    clone->m_GrowBegin = m_GrowBegin;
+    clone->m_GrowEnd = m_GrowEnd;
+    clone->m_Thickness = m_Thickness;
+    clone->m_Vertical = m_Vertical;
+
+    return clone;
+}
+
+nlohmann::json StyleBoxLine::Serialize() const {
+    nlohmann::json json = StyleBox::Serialize();
+
+    json["color"] = {
+        {"r", m_Color.r},
+        {"g", m_Color.g},
+        {"b", m_Color.b},
+        {"a", m_Color.a}
+    };
+    json["growBegin"] = m_GrowBegin;
+    json["growEnd"] = m_GrowEnd;
+    json["thickness"] = m_Thickness;
+    json["vertical"] = m_Vertical;
+
+    return json;
+}
+
+void StyleBoxLine::Deserialize(const nlohmann::json& json) {
+    StyleBox::Deserialize(json);
+
+    if (json.contains("color")) {
+        auto c = json["color"];
+        m_Color = Color(c["r"].get<float>(), c["g"].get<float>(), c["b"].get<float>(), c["a"].get<float>());
+    }
+    if (json.contains("growBegin")) {
+        m_GrowBegin = json["growBegin"].get<float>();
+    }
+    if (json.contains("growEnd")) {
+        m_GrowEnd = json["growEnd"].get<float>();
+    }
+    if (json.contains("thickness")) {
+        m_Thickness = json["thickness"].get<float>();
+    }
+    if (json.contains("vertical")) {
+        m_Vertical = json["vertical"].get<bool>();
+    }
+}
+
+// ============================================================== StyleBoxEmpty
+
+std::shared_ptr<StyleBox> StyleBoxEmpty::Clone() const {
+    auto clone = std::make_shared<StyleBoxEmpty>();
+    clone->m_ContentMarginLeft = m_ContentMarginLeft;
+    clone->m_ContentMarginRight = m_ContentMarginRight;
+    clone->m_ContentMarginTop = m_ContentMarginTop;
+    clone->m_ContentMarginBottom = m_ContentMarginBottom;
+    return clone;
 }
 
 }

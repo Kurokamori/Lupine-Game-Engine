@@ -56,7 +56,13 @@ class ThemeColors:
     # Spacing and padding
     inspector_vertical_spacing: int = 8
     inspector_horizontal_padding: int = 6
-    
+
+    # Inspector layout tokens (property-row metrics and component-card chrome)
+    inspector_label_width: int = 128
+    inspector_control_height: int = 26
+    inspector_card_radius: int = 6
+    inspector_spine_width: int = 3
+
     # Icon pack
     icon_pack: str = "dark"
 
@@ -100,6 +106,10 @@ class Theme:
                 "shadow": self.colors.shadow,
                 "inspector_vertical_spacing": self.colors.inspector_vertical_spacing,
                 "inspector_horizontal_padding": self.colors.inspector_horizontal_padding,
+                "inspector_label_width": self.colors.inspector_label_width,
+                "inspector_control_height": self.colors.inspector_control_height,
+                "inspector_card_radius": self.colors.inspector_card_radius,
+                "inspector_spine_width": self.colors.inspector_spine_width,
                 "icon_pack": self.colors.icon_pack,
             }
         }
@@ -115,6 +125,15 @@ class Theme:
             color_data["inspector_horizontal_padding"] = 6
         if "icon_pack" not in color_data:
             color_data["icon_pack"] = "dark"
+        # Inspector layout tokens (added later; default for older saved themes)
+        if "inspector_label_width" not in color_data:
+            color_data["inspector_label_width"] = 128
+        if "inspector_control_height" not in color_data:
+            color_data["inspector_control_height"] = 26
+        if "inspector_card_radius" not in color_data:
+            color_data["inspector_card_radius"] = 6
+        if "inspector_spine_width" not in color_data:
+            color_data["inspector_spine_width"] = 3
         # Handle secondary accent colors for backwards compatibility
         if "secondary_accent_color" not in color_data:
             color_data["secondary_accent_color"] = color_data.get("accent_color", "#7b5fb8")
@@ -128,7 +147,15 @@ class Theme:
     def get_stylesheet(self) -> str:
         """Generate Qt stylesheet from theme colors"""
         c = self.colors
-        
+
+        # Tinted vector glyphs for spin-box / combo arrows (the QSS border-triangle trick
+        # renders as a blank box for these sub-controls on many Qt builds).
+        from widgets.inspector_icons import qss_url
+        arrow_up = qss_url("chevron-up", c.text_secondary)
+        arrow_down = qss_url("chevron-down", c.text_secondary)
+        arrow_up_active = qss_url("chevron-up", c.text_primary)
+        arrow_down_active = qss_url("chevron-down", c.text_primary)
+
         return f"""
             /* Main Window */
             QMainWindow, QDialog {{
@@ -317,12 +344,19 @@ class Theme:
                 border: none;
             }}
             
+            QComboBox::drop-down {{
+                width: 20px;
+            }}
+
             QComboBox::down-arrow {{
-                image: none;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 6px solid {c.text_primary};
+                image: url("{arrow_down}");
+                width: 10px;
+                height: 10px;
                 margin-right: 8px;
+            }}
+
+            QComboBox::down-arrow:on {{
+                image: url("{arrow_down_active}");
             }}
             
             QComboBox QAbstractItemView {{
@@ -331,7 +365,79 @@ class Theme:
                 border: 1px solid {c.border};
                 selection-background-color: {c.selection};
             }}
-            
+
+            /* Spin Boxes (numeric property fields) */
+            QSpinBox, QDoubleSpinBox {{
+                background-color: {c.surface};
+                color: {c.text_primary};
+                border: 1px solid {c.border};
+                border-radius: 3px;
+                padding: 3px 6px;
+                selection-background-color: {c.selection};
+                selection-color: {c.text_primary};
+            }}
+
+            QSpinBox:hover, QDoubleSpinBox:hover {{
+                border-color: {c.secondary_accent_color};
+            }}
+
+            QSpinBox:focus, QDoubleSpinBox:focus {{
+                border-color: {c.border_focus};
+            }}
+
+            QSpinBox:disabled, QDoubleSpinBox:disabled {{
+                color: {c.text_disabled};
+                background-color: {c.secondary_color};
+            }}
+
+            QSpinBox::up-button, QDoubleSpinBox::up-button {{
+                subcontrol-origin: border;
+                subcontrol-position: top right;
+                width: 16px;
+                border-left: 1px solid {c.border};
+                border-top-right-radius: 3px;
+                background-color: {c.surface};
+            }}
+
+            QSpinBox::down-button, QDoubleSpinBox::down-button {{
+                subcontrol-origin: border;
+                subcontrol-position: bottom right;
+                width: 16px;
+                border-left: 1px solid {c.border};
+                border-bottom-right-radius: 3px;
+                background-color: {c.surface};
+            }}
+
+            QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+            QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{
+                background-color: {c.surface_hover};
+            }}
+
+            QSpinBox::up-button:pressed, QDoubleSpinBox::up-button:pressed,
+            QSpinBox::down-button:pressed, QDoubleSpinBox::down-button:pressed {{
+                background-color: {c.secondary_accent_color};
+            }}
+
+            QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
+                image: url("{arrow_up}");
+                width: 9px;
+                height: 9px;
+            }}
+
+            QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
+                image: url("{arrow_down}");
+                width: 9px;
+                height: 9px;
+            }}
+
+            QSpinBox::up-arrow:hover, QDoubleSpinBox::up-arrow:hover {{
+                image: url("{arrow_up_active}");
+            }}
+
+            QSpinBox::down-arrow:hover, QDoubleSpinBox::down-arrow:hover {{
+                image: url("{arrow_down_active}");
+            }}
+
             /* Dock Widgets */
             QDockWidget {{
                 titlebar-close-icon: url(close.png);
@@ -458,36 +564,77 @@ class Theme:
                 color: {c.text_primary};
                 spacing: 8px;
             }}
-            
+
             QCheckBox::indicator {{
-                width: 18px;
-                height: 18px;
+                width: 16px;
+                height: 16px;
                 border: 2px solid {c.border};
                 border-radius: 3px;
                 background-color: {c.surface};
             }}
-            
+
             QCheckBox::indicator:hover {{
-                border-color: {c.border_focus};
+                border-color: {c.accent_color};
                 background-color: {c.surface_hover};
             }}
-            
+
             QCheckBox::indicator:checked {{
                 background-color: {c.accent_color};
                 border-color: {c.accent_color};
+                border-width: 2px;
+                border-style: solid;
             }}
-            
+
             QCheckBox::indicator:checked:hover {{
                 background-color: {c.accent_hover};
                 border-color: {c.accent_hover};
             }}
-            
+
             QCheckBox::indicator:disabled {{
                 border-color: {c.border};
                 background-color: {c.secondary_color};
             }}
-            
+
             QCheckBox:disabled {{
+                color: {c.text_disabled};
+            }}
+
+            /* Radio Buttons */
+            QRadioButton {{
+                background-color: transparent;
+                color: {c.text_primary};
+                spacing: 8px;
+            }}
+
+            QRadioButton::indicator {{
+                width: 16px;
+                height: 16px;
+                border: 2px solid {c.border};
+                border-radius: 10px;
+                background-color: {c.surface};
+            }}
+
+            QRadioButton::indicator:hover {{
+                border-color: {c.accent_color};
+                background-color: {c.surface_hover};
+            }}
+
+            QRadioButton::indicator:checked {{
+                background-color: {c.text_on_accent};
+                border: 5px solid {c.accent_color};
+            }}
+
+            QRadioButton::indicator:checked:hover {{
+                background-color: {c.text_on_accent};
+                border: 5px solid {c.accent_hover};
+            }}
+
+            QRadioButton::indicator:disabled {{
+                border-color: {c.border};
+                background-color: {c.secondary_color};
+            }}
+
+            QRadioButton:disabled {{
                 color: {c.text_disabled};
             }}
         """
@@ -508,19 +655,19 @@ class ThemeManager:
             name="Dark Purple",
             colors=ThemeColors(
                 # Primary colors - Purplish dark grays
-                main_color="#1a1625",
-                secondary_color="#221d2e",
-                tertiary_color="#2a2537",
+                main_color="#19171E",
+                secondary_color="#1e1b24",
+                tertiary_color="#232029",
 
                 # Accent colors - Bright purple
-                accent_color="#7b5fb8",
-                accent_hover="#8f6fcc",
-                accent_pressed="#6750a0",
+                accent_color="#76669b",
+                accent_hover="#72648c",
+                accent_pressed="#49405e",
 
                 # Secondary accent colors - Muted purple/gray
-                secondary_accent_color="#4a3f68",
-                secondary_accent_hover="#5a4d78",
-                secondary_accent_pressed="#3a2f58",
+                secondary_accent_color="#373246",
+                secondary_accent_hover="#332e3d",
+                secondary_accent_pressed="#201c2a",
 
                 # Status colors
                 error_color="#d32f2f",
@@ -529,11 +676,11 @@ class ThemeManager:
                 success_color="#4caf50",
                 
                 # UI elements
-                background="#16131d",
-                surface="#1e1a28",
-                surface_hover="#28233a",
-                border="#3d3650",
-                border_focus="#7b5fb8",
+                background="#181719",
+                surface="#141317",
+                surface_hover="#0c0c0f",
+                border="#27242f",
+                border_focus="#514864",
                 
                 # Text colors
                 text_primary="#e8e6f0",
@@ -542,7 +689,7 @@ class ThemeManager:
                 text_on_accent="#ffffff",
                 
                 # Special
-                selection="#4a3f68",
+                selection="#3e384f",
                 selection_inactive="#332d45",
                 shadow="#0a0810",
                 

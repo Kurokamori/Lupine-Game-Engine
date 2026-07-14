@@ -10,7 +10,10 @@ RigidBody3D::RigidBody3D(Physics3DWorld* world, const core::UUID& id, BodyType t
     : m_World(world)
     , m_Id(id)
     , m_Type(type)
+    , m_RigidBody(nullptr)
+    , m_CompoundShape(nullptr)
     , m_GravityScale(1.0f)
+    , m_Destroying(false)
 {
 
     btDefaultMotionState* motionState = new btDefaultMotionState(btTransform::getIdentity());
@@ -18,12 +21,12 @@ RigidBody3D::RigidBody3D(Physics3DWorld* world, const core::UUID& id, BodyType t
     btScalar mass = (type == BodyType::Dynamic) ? 1.0f : 0.0f;
     btVector3 localInertia(0, 0, 0);
 
-    btCollisionShape* shape = new btSphereShape(0.5f);
-    if (mass != 0.0f) {
-        shape->calculateLocalInertia(mass, localInertia);
-    }
+    // The body starts with an empty compound. Colliders attach their shapes as children,
+    // so a body with no collider has no collision volume at all (rather than an implicit
+    // sphere) and a body with several colliders keeps all of them.
+    m_CompoundShape = new btCompoundShape();
 
-    btRigidBody::btRigidBodyConstructionInfo rbInfo(mass, motionState, shape, localInertia);
+    btRigidBody::btRigidBodyConstructionInfo rbInfo(mass, motionState, m_CompoundShape, localInertia);
     m_RigidBody = new btRigidBody(rbInfo);
 
     if (type == BodyType::Static) {
@@ -36,21 +39,34 @@ RigidBody3D::RigidBody3D(Physics3DWorld* world, const core::UUID& id, BodyType t
 }
 
 RigidBody3D::~RigidBody3D() {
+    m_Destroying = true;
 
-    if (m_World && m_World->GetBulletWorld()) {
+    if (m_World && m_World->GetBulletWorld() && m_RigidBody) {
         m_World->GetBulletWorld()->removeRigidBody(m_RigidBody);
     }
 
-    for (auto* collider : m_Colliders) {
-        delete collider;
+    // Colliders are owned by whoever constructed them - the components hold them in
+    // unique_ptrs - so the body must not delete them here; that would double-free against
+    // the owner. Tell each collider its body is gone instead, so its own destructor knows
+    // not to reach back into freed memory.
+    std::vector<Collider3D*> colliders;
+    colliders.swap(m_Colliders);
+    for (Collider3D* collider : colliders) {
+        if (collider) {
+            collider->OnOwningBodyDestroyed();
+        }
     }
-    m_Colliders.clear();
 
     if (m_RigidBody) {
         delete m_RigidBody->getMotionState();
-        delete m_RigidBody->getCollisionShape();
+        m_RigidBody->setMotionState(nullptr);
+        m_RigidBody->setCollisionShape(nullptr);
         delete m_RigidBody;
+        m_RigidBody = nullptr;
     }
+
+    delete m_CompoundShape;
+    m_CompoundShape = nullptr;
 }
 
 void RigidBody3D::SetBodyType(BodyType type) {
@@ -180,7 +196,12 @@ void RigidBody3D::SetMass(float mass) {
 }
 
 float RigidBody3D::GetMass() const {
-    return 1.0f / m_RigidBody->getInvMass();
+    // Static and kinematic bodies have an inverse mass of zero, which would divide to inf.
+    if (m_Type != BodyType::Dynamic) {
+        return 0.0f;
+    }
+    const btScalar invMass = m_RigidBody->getInvMass();
+    return invMass > btScalar(0) ? static_cast<float>(1.0f / invMass) : 0.0f;
 }
 
 void RigidBody3D::SetInertia(const math::Vec3& inertia) {
@@ -192,7 +213,13 @@ void RigidBody3D::SetInertia(const math::Vec3& inertia) {
 }
 
 math::Vec3 RigidBody3D::GetInertia() const {
-    btVector3 inertia = m_RigidBody->getLocalInertia();
+    // Bullet doesn't have getLocalInertia(), so we calculate from inverse inertia diagonal
+    const btVector3& invInertia = m_RigidBody->getInvInertiaDiagLocal();
+    btVector3 inertia(
+        invInertia.x() > 0.0f ? 1.0f / invInertia.x() : 0.0f,
+        invInertia.y() > 0.0f ? 1.0f / invInertia.y() : 0.0f,
+        invInertia.z() > 0.0f ? 1.0f / invInertia.z() : 0.0f
+    );
     return math::Vec3(inertia.x(), inertia.y(), inertia.z());
 }
 
@@ -305,32 +332,97 @@ float RigidBody3D::GetCcdSweptSphereRadius() const {
 }
 
 void RigidBody3D::AddCollider(Collider3D* collider) {
+    if (!collider) {
+        return;
+    }
     m_Colliders.push_back(collider);
-    UpdateMassProperties();
+    RebuildCompoundShape();
 }
 
 void RigidBody3D::RemoveCollider(Collider3D* collider) {
+    if (m_Destroying) {
+        return;
+    }
+
     auto it = std::find(m_Colliders.begin(), m_Colliders.end(), collider);
     if (it != m_Colliders.end()) {
         m_Colliders.erase(it);
+        RebuildCompoundShape();
+    }
+}
 
-        if (m_Colliders.empty() && m_RigidBody) {
-            m_RigidBody->setCollisionShape(nullptr);
+void RigidBody3D::DetachColliderShape(btCollisionShape* shape) {
+    if (m_Destroying || !m_CompoundShape || !shape) {
+        return;
+    }
+
+    for (int i = m_CompoundShape->getNumChildShapes() - 1; i >= 0; --i) {
+        if (m_CompoundShape->getChildShape(i) == shape) {
+            m_CompoundShape->removeChildShapeByIndex(i);
+        }
+    }
+    m_CompoundShape->recalculateLocalAabb();
+    RefreshBroadphaseAabb();
+}
+
+void RigidBody3D::RebuildCompoundShape() {
+    if (m_Destroying || !m_CompoundShape || !m_RigidBody) {
+        return;
+    }
+
+    for (int i = m_CompoundShape->getNumChildShapes() - 1; i >= 0; --i) {
+        m_CompoundShape->removeChildShapeByIndex(i);
+    }
+
+    for (Collider3D* collider : m_Colliders) {
+        if (!collider || !collider->IsEnabled()) {
+            continue;
+        }
+        btCollisionShape* shape = collider->GetBulletShape();
+        if (!shape) {
+            continue;
         }
 
-        UpdateMassProperties();
+        const math::Vec3 offset = collider->GetOffset();
+        const math::Quat rotation = collider->GetRotationOffset();
+
+        btTransform childTransform;
+        childTransform.setIdentity();
+        childTransform.setOrigin(btVector3(offset.x, offset.y, offset.z));
+        childTransform.setRotation(btQuaternion(rotation.x(), rotation.y(), rotation.z(), rotation.w()));
+
+        m_CompoundShape->addChildShape(childTransform, shape);
+    }
+
+    m_CompoundShape->recalculateLocalAabb();
+
+    if (m_RigidBody->getCollisionShape() != m_CompoundShape) {
+        m_RigidBody->setCollisionShape(m_CompoundShape);
+    }
+
+    UpdateMassProperties();
+    RefreshBroadphaseAabb();
+}
+
+void RigidBody3D::RefreshBroadphaseAabb() {
+    if (!m_RigidBody || !m_World || !m_World->GetBulletWorld()) {
+        return;
+    }
+    if (m_RigidBody->getBroadphaseProxy()) {
+        m_World->GetBulletWorld()->updateSingleAabb(m_RigidBody);
     }
 }
 
 void RigidBody3D::UpdateMassProperties() {
-    if (m_Type != BodyType::Dynamic || m_Colliders.empty()) {
+    if (!m_RigidBody || m_Type != BodyType::Dynamic || m_Colliders.empty()) {
         return;
     }
 
     float totalMass = 0.0f;
     for (auto* collider : m_Colliders) {
-
-        totalMass += collider->GetDensity();
+        if (collider && collider->IsEnabled()) {
+            totalMass += collider->GetDensity();
+        }
     }
 
     if (totalMass > 0.0f) {
@@ -341,6 +433,40 @@ void RigidBody3D::UpdateMassProperties() {
         m_RigidBody->setMassProps(totalMass, inertia);
         m_RigidBody->updateInertiaTensor();
     }
+}
+
+void RigidBody3D::UpdateCollisionFiltering(uint32_t group, uint32_t mask) {
+    if (!m_RigidBody || !m_World || !m_World->GetBulletWorld()) {
+        return;
+    }
+
+    // Get the broadphase proxy and update filter values
+    btBroadphaseProxy* proxy = m_RigidBody->getBroadphaseProxy();
+    if (proxy) {
+        // Bullet's filter fields are full 32-bit ints; truncating to 16 bits would drop
+        // collision layers 17-32.
+        proxy->m_collisionFilterGroup = static_cast<int>(group);
+        proxy->m_collisionFilterMask = static_cast<int>(mask);
+
+        // Only refresh overlapping pairs if the body is actually in the world
+        // Check if the proxy has a valid client object (indicates body is registered)
+        if (proxy->m_clientObject == nullptr) {
+            return;
+        }
+
+        // Notify the broadphase that the proxy's filter has changed
+        // This refreshes overlapping pairs based on new filter settings
+        btBroadphaseInterface* broadphase = m_World->GetBulletWorld()->getBroadphase();
+        btCollisionDispatcher* dispatcher = static_cast<btCollisionDispatcher*>(m_World->GetBulletWorld()->getDispatcher());
+
+        // Safely clean proxy from pairs with full null checks
+        if (broadphase && dispatcher) {
+            btOverlappingPairCache* pairCache = broadphase->getOverlappingPairCache();
+            if (pairCache) {
+                pairCache->cleanProxyFromPairs(proxy, dispatcher);
+            }
+        }
+    } 
 }
 
 }

@@ -10,11 +10,9 @@
 #define LUPINE_CAPI_BUTTON_H
 
 #include "core/lc_core.h"
+#include "core/lc_node.h"
 #include "math/lc_math.h"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 /* ============================================================================
  * Button Enums
@@ -654,8 +652,5 @@ LC_API LCResult lc_button_set_state_callback(LCComponentHandle component, LCButt
  */
 LC_API LCResult lc_button_clear_state_callback(LCComponentHandle component, LCButtonState state);
 
-#ifdef __cplusplus
-}
-#endif
 
 #endif /* LUPINE_CAPI_BUTTON_H */

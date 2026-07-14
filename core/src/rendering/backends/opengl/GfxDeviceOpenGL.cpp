@@ -2,14 +2,19 @@
 #include "lupine/rendering/backends/opengl/OpenGLState.hpp"
 #include "lupine/rendering/backends/opengl/GfxCommandListOpenGL.hpp"
 #include "lupine/logger/Logger.hpp"
+#include "lupine/platform/FileSystem.hpp"
+#include "lupine/platform/PackFile.hpp"
+#include "lupine/asset/Asset.hpp"
+#include "lupine/rendering/FontBaker.hpp"
 #include <GL/glew.h>
-#include <GL/wglew.h>
-#include <unordered_map>
-#include <cstring>
-
 #ifdef _WIN32
 #include <Windows.h>
+#include <GL/wglew.h>
+#elif defined(__APPLE__)
+#include "lupine/rendering/backends/opengl/OpenGLPlatform.hpp"
 #endif
+#include <unordered_map>
+#include <cstring>
 
 namespace lupine {
 
@@ -25,6 +30,7 @@ struct GfxDeviceOpenGL::Impl {
     uint32_t nextMeshID = 1;
 
     std::unordered_map<uint32_t, FontAtlas> fonts;
+    std::unordered_map<uint32_t, FontDesc> fontDescs;
     uint32_t nextFontID = 1;
 };
 
@@ -235,7 +241,7 @@ SwapchainHandle GfxDeviceOpenGL::createSwapchain(const SwapchainDesc& desc) {
 
             if (!wglShareLists(shareContext, hglrc)) {
                 DWORD error = GetLastError();
-
+                LOG_ERROR(LogCategory::Render, "[GL] wglShareLists failed (GetLastError={})", error);
                 wglDeleteContext(hglrc);
                 ReleaseDC(hwnd, hdc);
                 return SwapchainHandle();
@@ -314,8 +320,65 @@ SwapchainHandle GfxDeviceOpenGL::createSwapchain(const SwapchainDesc& desc) {
     m_impl->state.swapchains[id] = swapchain;
 
     return SwapchainHandle(id);
-#else
+#elif defined(__APPLE__)
+    // macOS: Use NSOpenGLContext via platform abstraction
+    void* contextHandle = platformCreateGLContext(desc.window.platformHandle, desc.vsync, desc.isolated);
+    if (!contextHandle) {
+        LOG_ERROR(LogCategory::Render, "OpenGL: Failed to create macOS GL context");
+        return SwapchainHandle();
+    }
 
+    // Context is already made current by platformCreateGLContext
+    m_impl->state.currentContext = contextHandle;
+    m_impl->state.allContexts.insert(contextHandle);
+    m_impl->state.boundProgram = 0;
+    m_impl->state.boundVAO = 0;
+    m_impl->state.boundArrayBuffer = 0;
+    m_impl->state.boundElementBuffer = 0;
+    m_impl->state.boundFramebuffer = 0;
+
+    if (desc.isolated) {
+        m_impl->state.isolatedContexts.insert(contextHandle);
+    }
+
+    // Initialize GLEW (on macOS, need experimental flag for core profile)
+    glewExperimental = GL_TRUE;
+    if (!ensureGLEWInitialized()) {
+        LOG_ERROR(LogCategory::Render, "OpenGL: Failed to initialize GLEW on macOS");
+        platformDestroyGLContext(desc.window.platformHandle, contextHandle);
+        m_impl->state.currentContext = nullptr;
+        return SwapchainHandle();
+    }
+    // Clear any GLEW init errors (known issue with core profile)
+    glGetError();
+
+    GLSwapchain swapchain;
+    swapchain.window = desc.window;
+    swapchain.width = desc.width;
+    swapchain.height = desc.height;
+    swapchain.colorFormat = desc.colorFormat;
+    swapchain.vsync = desc.vsync;
+    swapchain.defaultFramebuffer = 0;
+    swapchain.contextHandle = contextHandle;
+    swapchain.deviceContext = desc.window.platformHandle; // Store view handle for later
+
+    GLRenderTarget backbuffer;
+    backbuffer.fbo = 0;
+    backbuffer.width = desc.width;
+    backbuffer.height = desc.height;
+    backbuffer.colorFormat = desc.colorFormat;
+    backbuffer.isSwapchainBackbuffer = true;
+
+    uint32_t rtID = m_impl->state.nextRenderTargetID++;
+    m_impl->state.renderTargets[rtID] = backbuffer;
+    swapchain.backbuffer = RenderTargetHandle(rtID);
+
+    uint32_t id = m_impl->state.nextSwapchainID++;
+    m_impl->state.swapchains[id] = swapchain;
+
+    return SwapchainHandle(id);
+#else
+    LOG_ERROR(LogCategory::Render, "OpenGL: Platform not supported");
     return SwapchainHandle();
 #endif
 }
@@ -408,6 +471,79 @@ void GfxDeviceOpenGL::destroySwapchain(SwapchainHandle swapchain) {
             ReleaseDC(hwnd, hdc);
         }
     }
+#elif defined(__APPLE__)
+    if (it->second.contextHandle) {
+        void* contextHandle = it->second.contextHandle;
+        void* viewHandle = it->second.deviceContext; // We stored the view handle here
+
+        bool isIsolated = m_impl->state.isolatedContexts.count(contextHandle) > 0;
+
+        // Make context current for cleanup
+        platformMakeContextCurrent(viewHandle, contextHandle);
+        m_impl->state.currentContext = contextHandle;
+
+        // Clean up backbuffer render target
+        RenderTargetHandle backbuffer = it->second.backbuffer;
+        if (backbuffer.isValid()) {
+            auto rtIt = m_impl->state.renderTargets.find(backbuffer.id);
+            if (rtIt != m_impl->state.renderTargets.end()) {
+                const GLRenderTarget& rt = rtIt->second;
+
+                if (rt.colorTexture != 0) {
+                    glDeleteTextures(1, &rt.colorTexture);
+                    if (rt.colorTextureHandle.isValid()) {
+                        m_impl->state.textures.erase(rt.colorTextureHandle.id);
+                    }
+                }
+                if (rt.depthStencilTexture != 0) {
+                    glDeleteTextures(1, &rt.depthStencilTexture);
+                    if (rt.depthTextureHandle.isValid()) {
+                        m_impl->state.textures.erase(rt.depthTextureHandle.id);
+                    }
+                }
+
+                m_impl->state.renderTargets.erase(backbuffer.id);
+            }
+        }
+
+        m_impl->state.allContexts.erase(contextHandle);
+        m_impl->state.isolatedContexts.erase(contextHandle);
+
+        // Clean up isolated context resources
+        if (isIsolated) {
+            for (auto bufIt = m_impl->state.buffers.begin(); bufIt != m_impl->state.buffers.end(); ) {
+                if (bufIt->second.ownerContext == contextHandle) {
+                    glDeleteBuffers(1, &bufIt->second.id);
+                    bufIt = m_impl->state.buffers.erase(bufIt);
+                } else {
+                    ++bufIt;
+                }
+            }
+
+            for (auto texIt = m_impl->state.textures.begin(); texIt != m_impl->state.textures.end(); ) {
+                if (texIt->second.ownerContext == contextHandle) {
+                    glDeleteTextures(1, &texIt->second.id);
+                    texIt = m_impl->state.textures.erase(texIt);
+                } else {
+                    ++texIt;
+                }
+            }
+
+            for (auto& [pipelineId, pipeline] : m_impl->state.pipelines) {
+                auto vaoIt = pipeline.vaos.find(contextHandle);
+                if (vaoIt != pipeline.vaos.end()) {
+                    glDeleteVertexArrays(1, &vaoIt->second);
+                    pipeline.vaos.erase(vaoIt);
+                    pipeline.vaoInitialized.erase(contextHandle);
+                }
+            }
+        }
+
+        // Clear and destroy context
+        platformMakeContextCurrent(viewHandle, nullptr);
+        m_impl->state.currentContext = nullptr;
+        platformDestroyGLContext(viewHandle, contextHandle);
+    }
 #endif
 
     m_impl->state.swapchains.erase(it);
@@ -470,6 +606,39 @@ void GfxDeviceOpenGL::present(SwapchainHandle swapchain) {
 
         SwapBuffers(hdc);
     }
+#elif defined(__APPLE__)
+    if (it->second.contextHandle) {
+        void* contextHandle = it->second.contextHandle;
+        void* viewHandle = it->second.deviceContext;
+
+        if (m_impl->state.currentContext != contextHandle) {
+            if (!platformMakeContextCurrent(viewHandle, contextHandle)) {
+                return;
+            }
+
+            m_impl->state.currentContext = contextHandle;
+            m_impl->state.boundProgram = UINT32_MAX;
+            m_impl->state.boundVAO = UINT32_MAX;
+            m_impl->state.boundArrayBuffer = UINT32_MAX;
+            m_impl->state.boundElementBuffer = UINT32_MAX;
+            m_impl->state.boundFramebuffer = UINT32_MAX;
+
+            for (auto& binding : m_impl->state.boundTextures) {
+                binding.id = UINT32_MAX;
+                binding.target = 0;
+            }
+            for (auto& sampler : m_impl->state.boundSamplers) {
+                sampler = 0;
+            }
+
+            glDisable(GL_SCISSOR_TEST);
+            m_impl->state.scissor = {0, 0, 0, 0, false};
+        }
+
+        glFlush();
+
+        platformSwapBuffers(viewHandle, contextHandle);
+    }
 #endif
 }
 
@@ -479,6 +648,58 @@ RenderTargetHandle GfxDeviceOpenGL::getSwapchainBackbuffer(SwapchainHandle swapc
         return it->second.backbuffer;
     }
     return RenderTargetHandle();
+}
+
+void GfxDeviceOpenGL::makeContextCurrent(SwapchainHandle swapchain) {
+    auto it = m_impl->state.swapchains.find(swapchain.id);
+    if (it == m_impl->state.swapchains.end()) {
+        return;
+    }
+
+    const auto& sc = it->second;
+
+#ifdef _WIN32
+    if (sc.contextHandle && sc.deviceContext) {
+        HDC hdc = static_cast<HDC>(sc.deviceContext);
+        HGLRC hglrc = static_cast<HGLRC>(sc.contextHandle);
+
+        bool contextChanged = (m_impl->state.currentContext != hglrc);
+
+        if (wglMakeCurrent(hdc, hglrc)) {
+            if (contextChanged) {
+                m_impl->state.currentContext = hglrc;
+                // Reset cached state when context changes
+                m_impl->state.boundProgram = UINT32_MAX;
+                m_impl->state.boundVAO = UINT32_MAX;
+                m_impl->state.boundArrayBuffer = UINT32_MAX;
+                m_impl->state.boundElementBuffer = UINT32_MAX;
+                m_impl->state.boundFramebuffer = UINT32_MAX;
+
+                for (auto& binding : m_impl->state.boundTextures) {
+                    binding.id = UINT32_MAX;
+                    binding.target = 0;
+                }
+                for (auto& sampler : m_impl->state.boundSamplers) {
+                    sampler = 0;
+                }
+
+                m_impl->state.viewport = {0, 0, 0, 0, 0, 1};
+                m_impl->state.scissor = {0, 0, 0, 0, false};
+            }
+        }
+    }
+#elif defined(__APPLE__)
+    // macOS: Context is managed by the view, no explicit make current needed
+    (void)sc;
+#elif defined(__linux__)
+    // Linux/X11: Would use glXMakeCurrent if using GLX
+    (void)sc;
+#endif
+}
+
+void GfxDeviceOpenGL::setSwapchainHintForOffscreen(SwapchainHandle /*swapchain*/) {
+    // No-op for OpenGL - it doesn't have the same synchronization requirements as Vulkan
+    // OpenGL handles off-screen rendering synchronization implicitly
 }
 
 TextureHandle GfxDeviceOpenGL::createTexture(const TextureDesc& desc) {
@@ -493,52 +714,52 @@ TextureHandle GfxDeviceOpenGL::createTexture(const TextureDesc& desc) {
     glGenTextures(1, &texture.id);
     GLenum err = glGetError();
     if (err != GL_NO_ERROR) {
-        LOG_ERROR(LogCategory::Render, "OpenGL error after glGenTextures: 0x{:X}", err);
+        
+    }
+
+    // Clear any stale binding state for this GL texture ID
+    // OpenGL may recycle texture IDs, so we need to ensure the state tracker
+    // doesn't skip binding this texture because it thinks an old texture with
+    // the same ID is still bound
+    for (auto& binding : m_impl->state.boundTextures) {
+        if (binding.id == texture.id) {
+            binding.id = 0;
+            binding.target = 0;
+        }
     }
 
     glBindTexture(texture.target, texture.id);
     err = glGetError();
     if (err != GL_NO_ERROR) {
-        LOG_ERROR(LogCategory::Render, "OpenGL error after glBindTexture: 0x{:X}", err);
+        
     }
 
     GLenum internalFormat = GLUtils::toGLInternalFormat(desc.format);
     GLenum format = GLUtils::toGLTextureFormat(desc.format);
     GLenum dataType = GLUtils::toGLDataType(desc.format);
 
-    LOG_INFO(LogCategory::Render, "Creating texture: {}x{}, internalFormat=0x{:X}, format=0x{:X}, dataType=0x{:X}, data={}",
-        desc.width, desc.height, internalFormat, format, dataType, (void*)desc.initialData);
-
     if (texture.target == GL_TEXTURE_2D) {
         // Validate texture dimensions
         if (desc.width == 0 || desc.height == 0) {
-            LOG_ERROR(LogCategory::Render, "Invalid texture dimensions: {}x{}", desc.width, desc.height);
+            
             glDeleteTextures(1, &texture.id);
             return TextureHandle();
-        }
-
-        // Validate data pointer if we're uploading initial data
-        if (desc.initialData != nullptr) {
-            LOG_INFO(LogCategory::Render, "Uploading texture data to GPU...");
-        } else {
-            LOG_INFO(LogCategory::Render, "Creating empty texture (no initial data)");
         }
 
         glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, desc.width, desc.height,
                      0, format, dataType, desc.initialData);
         err = glGetError();
         if (err != GL_NO_ERROR) {
-            LOG_ERROR(LogCategory::Render, "OpenGL error after glTexImage2D: 0x{:X}", err);
+            
             glDeleteTextures(1, &texture.id);
             return TextureHandle();
         }
-        LOG_INFO(LogCategory::Render, "Texture uploaded successfully");
     } else if (texture.target == GL_TEXTURE_3D) {
         glTexImage3D(GL_TEXTURE_3D, 0, internalFormat, desc.width, desc.height, desc.depth,
                      0, format, dataType, desc.initialData);
         err = glGetError();
         if (err != GL_NO_ERROR) {
-            LOG_ERROR(LogCategory::Render, "OpenGL error after glTexImage3D: 0x{:X}", err);
+            
         }
     } else if (texture.target == GL_TEXTURE_CUBE_MAP) {
 
@@ -548,14 +769,14 @@ TextureHandle GfxDeviceOpenGL::createTexture(const TextureDesc& desc) {
         }
         err = glGetError();
         if (err != GL_NO_ERROR) {
-            LOG_ERROR(LogCategory::Render, "OpenGL error after glTexImage2D (cubemap): 0x{:X}", err);
+            
         }
     } else if (texture.target == GL_TEXTURE_2D_ARRAY) {
         glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, internalFormat, desc.width, desc.height, desc.arrayLayers,
                      0, format, dataType, desc.initialData);
         err = glGetError();
         if (err != GL_NO_ERROR) {
-            LOG_ERROR(LogCategory::Render, "OpenGL error after glTexImage3D (2D array): 0x{:X}", err);
+            
         }
     } else if (texture.target == GL_TEXTURE_CUBE_MAP_ARRAY) {
 
@@ -563,7 +784,7 @@ TextureHandle GfxDeviceOpenGL::createTexture(const TextureDesc& desc) {
                      0, format, dataType, desc.initialData);
         err = glGetError();
         if (err != GL_NO_ERROR) {
-            LOG_ERROR(LogCategory::Render, "OpenGL error after glTexImage3D (cubemap array): 0x{:X}", err);
+            
         }
     }
 
@@ -614,7 +835,7 @@ void GfxDeviceOpenGL::destroyTexture(TextureHandle texture) {
 }
 
 void GfxDeviceOpenGL::updateTexture(TextureHandle texture, const void* data,
-                                     uint32_t mipLevel, uint32_t arrayLayer) {
+                                     uint32_t mipLevel, uint32_t) {
     auto it = m_impl->state.textures.find(texture.id);
     if (it == m_impl->state.textures.end() || !data) {
         return;
@@ -655,20 +876,7 @@ BufferHandle GfxDeviceOpenGL::createBuffer(const BufferDesc& desc) {
     glBufferData(buffer.target, desc.size, desc.initialData, GL_STATIC_DRAW);
     glBindBuffer(buffer.target, 0);
 
-    if (m_impl->state.allContexts.size() == 1) {
-        buffer.ownerContext = m_impl->state.currentContext;
-    } else {
-
-        bool isIsolated = true;
-        void* currentCtx = m_impl->state.currentContext;
-        for (const auto& [id, swapchain] : m_impl->state.swapchains) {
-            if (swapchain.contextHandle == currentCtx) {
-
-                break;
-            }
-        }
-        buffer.ownerContext = m_impl->state.currentContext;
-    }
+    buffer.ownerContext = m_impl->state.currentContext;
 
     uint32_t id = m_impl->state.nextBufferID++;
     m_impl->state.buffers[id] = buffer;
@@ -779,7 +987,7 @@ ShaderHandle GfxDeviceOpenGL::createShader(const ShaderDesc& desc) {
     if (!success) {
         char infoLog[512];
         glGetShaderInfoLog(shader.id, 512, nullptr, infoLog);
-
+        LOG_ERROR(LogCategory::Render, "OpenGL shader compile error: {}", infoLog);
         glDeleteShader(shader.id);
         return ShaderHandle();
     }
@@ -802,6 +1010,7 @@ PipelineHandle GfxDeviceOpenGL::createPipeline(const PipelineDesc& desc) {
     GLPipeline pipeline;
     pipeline.shaders = desc.shaders;
     pipeline.vertexLayout = desc.vertexLayout;
+    pipeline.extraVertexBuffers = desc.extraVertexBuffers;
     pipeline.topology = desc.topology;
     pipeline.blendState = desc.blendState;
     pipeline.depthStencilState = desc.depthStencilState;
@@ -839,8 +1048,9 @@ PipelineHandle GfxDeviceOpenGL::createPipeline(const PipelineDesc& desc) {
 
     GLuint lightDataBlockIndex = glGetUniformBlockIndex(pipeline.program, "LightData");
     if (lightDataBlockIndex != GL_INVALID_INDEX) {
-        glUniformBlockBinding(pipeline.program, lightDataBlockIndex, 0);
-
+        // Binding 3 matches the Vulkan shader layout for light data
+        // This ensures consistent bindings across all graphics backends
+        glUniformBlockBinding(pipeline.program, lightDataBlockIndex, 3);
     }
 
     pipeline.uniformLocations["u_ViewProjection"] = glGetUniformLocation(pipeline.program, "u_ViewProjection");
@@ -1297,6 +1507,93 @@ std::unique_ptr<IGfxCommandList> GfxDeviceOpenGL::beginFrame(RenderTargetHandle 
             }
         }
     }
+#elif defined(__APPLE__)
+    // macOS: Use platform abstraction for context management
+    bool foundSwapchain = false;
+    for (const auto& [id, swapchain] : m_impl->state.swapchains) {
+        if (swapchain.backbuffer.id == target.id && swapchain.contextHandle && swapchain.deviceContext) {
+            foundSwapchain = true;
+            void* contextHandle = swapchain.contextHandle;
+            void* viewHandle = swapchain.deviceContext;
+
+            bool contextChanged = (m_impl->state.currentContext != contextHandle);
+
+            if (platformMakeContextCurrent(viewHandle, contextHandle)) {
+                if (contextChanged) {
+                    m_impl->state.currentContext = contextHandle;
+                    m_impl->state.boundProgram = UINT32_MAX;
+                    m_impl->state.boundVAO = UINT32_MAX;
+                    m_impl->state.boundArrayBuffer = UINT32_MAX;
+                    m_impl->state.boundElementBuffer = UINT32_MAX;
+                    m_impl->state.boundFramebuffer = UINT32_MAX;
+
+                    for (auto& binding : m_impl->state.boundTextures) {
+                        binding.id = UINT32_MAX;
+                        binding.target = 0;
+                    }
+                    for (auto& sampler : m_impl->state.boundSamplers) {
+                        sampler = 0;
+                    }
+
+                    m_impl->state.viewport = {0, 0, 0, 0, 0, 1};
+                    m_impl->state.scissor = {0, 0, 0, 0, false};
+
+                    glEnable(GL_DEPTH_TEST);
+                    glDepthFunc(GL_LESS);
+                    glDepthMask(GL_TRUE);
+                }
+
+                glDisable(GL_SCISSOR_TEST);
+                glScissor(0, 0, swapchain.width, swapchain.height);
+                m_impl->state.scissor = {0, 0, swapchain.width, swapchain.height, false};
+            }
+            break;
+        }
+    }
+
+    if (!foundSwapchain && !m_impl->state.swapchains.empty()) {
+        const auto& firstSwapchain = m_impl->state.swapchains.begin()->second;
+        if (firstSwapchain.contextHandle && firstSwapchain.deviceContext) {
+            void* contextHandle = firstSwapchain.contextHandle;
+            void* viewHandle = firstSwapchain.deviceContext;
+
+            bool contextChanged = (m_impl->state.currentContext != contextHandle);
+
+            if (platformMakeContextCurrent(viewHandle, contextHandle)) {
+                if (contextChanged) {
+                    m_impl->state.currentContext = contextHandle;
+                    m_impl->state.boundProgram = UINT32_MAX;
+                    m_impl->state.boundVAO = UINT32_MAX;
+                    m_impl->state.boundArrayBuffer = UINT32_MAX;
+                    m_impl->state.boundElementBuffer = UINT32_MAX;
+                    m_impl->state.boundFramebuffer = UINT32_MAX;
+
+                    for (auto& binding : m_impl->state.boundTextures) {
+                        binding.id = UINT32_MAX;
+                        binding.target = 0;
+                    }
+                    for (auto& sampler : m_impl->state.boundSamplers) {
+                        sampler = 0;
+                    }
+
+                    m_impl->state.viewport = {0, 0, 0, 0, 0, 1};
+                    m_impl->state.scissor = {0, 0, 0, 0, false};
+                }
+
+                glDisable(GL_SCISSOR_TEST);
+
+                auto rtIt = m_impl->state.renderTargets.find(target.id);
+                if (rtIt != m_impl->state.renderTargets.end()) {
+                    const GLRenderTarget& rt = rtIt->second;
+                    glScissor(0, 0, rt.width, rt.height);
+                    m_impl->state.scissor = {0, 0, rt.width, rt.height, false};
+                } else {
+                    glScissor(0, 0, 0, 0);
+                    m_impl->state.scissor = {0, 0, 0, 0, false};
+                }
+            }
+        }
+    }
 #endif
 
     auto cmd = std::make_unique<GfxCommandListOpenGL>(&m_impl->state);
@@ -1364,93 +1661,66 @@ void GfxDeviceOpenGL::destroyMesh(MeshHandle handle) {
 
 #include <stb_truetype.h>
 
-FontHandle GfxDeviceOpenGL::createFontAtlas(const FontDesc& desc) {
-
-    FILE* fontFile = fopen(desc.fontPath.c_str(), "rb");
-    if (!fontFile) {
-
-        return FontHandle();
-    }
-
-    fseek(fontFile, 0, SEEK_END);
-    long fileSize = ftell(fontFile);
-    fseek(fontFile, 0, SEEK_SET);
-
-    std::vector<unsigned char> fontBuffer(fileSize);
-    fread(fontBuffer.data(), 1, fileSize, fontFile);
-    fclose(fontFile);
-
-    stbtt_fontinfo fontInfo;
-    if (!stbtt_InitFont(&fontInfo, fontBuffer.data(), 0)) {
-
-        return FontHandle();
-    }
-
-    std::vector<unsigned char> atlasBitmap(desc.atlasWidth * desc.atlasHeight, 0);
-
-    stbtt_bakedchar bakedChars[256];
-    float pixelHeight = desc.fontSize;
-
-    if (desc.charRanges.empty()) {
-
-        return FontHandle();
-    }
-
-    const auto& charRange = desc.charRanges[0];
-    uint32_t numChars = charRange.last - charRange.first + 1;
-
-    int result = stbtt_BakeFontBitmap(
-        fontBuffer.data(), 0,
-        pixelHeight,
-        atlasBitmap.data(), desc.atlasWidth, desc.atlasHeight,
-        charRange.first, numChars,
-        bakedChars
-    );
-
-    if (result <= 0) {
-
-        return FontHandle();
+FontAtlas GfxDeviceOpenGL::buildBakedAtlas(const BakedFontAtlas& baked) {
+    FontAtlas fontAtlas;
+    if (!baked.success) {
+        return fontAtlas;
     }
 
     TextureDesc texDesc;
-    texDesc.width = desc.atlasWidth;
-    texDesc.height = desc.atlasHeight;
+    texDesc.width = baked.atlasWidth;
+    texDesc.height = baked.atlasHeight;
     texDesc.format = TextureFormat::R8_UNORM;
     texDesc.mipLevels = 1;
     texDesc.usage = TextureUsage::Sampled;
-    texDesc.initialData = atlasBitmap.data();
+    texDesc.initialData = baked.bitmap.data();
 
     TextureHandle atlasTexture = createTexture(texDesc);
+    if (!atlasTexture.isValid()) {
+        return fontAtlas;
+    }
 
-    FontAtlas fontAtlas;
     fontAtlas.texture = atlasTexture;
-    fontAtlas.atlasWidth = desc.atlasWidth;
-    fontAtlas.atlasHeight = desc.atlasHeight;
-    fontAtlas.fontSize = desc.fontSize;
+    fontAtlas.atlasWidth = baked.atlasWidth;
+    fontAtlas.atlasHeight = baked.atlasHeight;
+    fontAtlas.fontSize = baked.fontSize;
+    fontAtlas.lineHeight = baked.lineHeight;
+    fontAtlas.ascent = baked.ascent;
+    fontAtlas.descent = baked.descent;
+    fontAtlas.glyphs = baked.glyphs;
+    fontAtlas.kerning = baked.kerning;
+    return fontAtlas;
+}
 
-    int ascent, descent, lineGap;
-    float scale = stbtt_ScaleForPixelHeight(&fontInfo, pixelHeight);
-    stbtt_GetFontVMetrics(&fontInfo, &ascent, &descent, &lineGap);
-    fontAtlas.lineHeight = (ascent - descent + lineGap) * scale;
-
-    for (uint32_t i = 0; i < numChars; ++i) {
-        const stbtt_bakedchar& bc = bakedChars[i];
-
-        Glyph glyph;
-        glyph.codepoint = charRange.first + i;
-        glyph.uvMin = Vec2(bc.x0 / (float)desc.atlasWidth, bc.y0 / (float)desc.atlasHeight);
-        glyph.uvMax = Vec2(bc.x1 / (float)desc.atlasWidth, bc.y1 / (float)desc.atlasHeight);
-        glyph.size = Vec2(bc.x1 - bc.x0, bc.y1 - bc.y0);
-        glyph.bearing = Vec2(bc.xoff, bc.yoff);
-        glyph.advance = bc.xadvance;
-
-        fontAtlas.glyphs[glyph.codepoint] = glyph;
+FontHandle GfxDeviceOpenGL::createFontAtlas(const FontDesc& desc) {
+    BakedFontAtlas baked = BakeFontAtlas(desc, GetFontOversample());
+    FontAtlas fontAtlas = buildBakedAtlas(baked);
+    if (!fontAtlas.texture.isValid()) {
+        return FontHandle();
     }
 
     uint32_t fontID = m_impl->nextFontID++;
-    m_impl->fonts[fontID] = fontAtlas;
+    m_impl->fonts[fontID] = std::move(fontAtlas);
+    m_impl->fontDescs[fontID] = desc;
 
     return FontHandle(fontID);
+}
+
+void GfxDeviceOpenGL::refreshFontAtlases() {
+    const float oversample = GetFontOversample();
+    for (const auto& [fontID, desc] : m_impl->fontDescs) {
+        BakedFontAtlas baked = BakeFontAtlas(desc, oversample);
+        FontAtlas fontAtlas = buildBakedAtlas(baked);
+        if (!fontAtlas.texture.isValid()) {
+            continue;
+        }
+
+        auto it = m_impl->fonts.find(fontID);
+        if (it != m_impl->fonts.end() && it->second.texture.isValid()) {
+            destroyTexture(it->second.texture);
+        }
+        m_impl->fonts[fontID] = std::move(fontAtlas);
+    }
 }
 
 const FontAtlas* GfxDeviceOpenGL::getFontAtlas(FontHandle handle) const {
@@ -1476,6 +1746,7 @@ void GfxDeviceOpenGL::destroyFontAtlas(FontHandle handle) {
         m_impl->fonts.erase(it);
 
     }
+    m_impl->fontDescs.erase(handle.id);
 }
 
 }

@@ -8,6 +8,7 @@
 #include "lupine/rendering/debug/DebugDraw.hpp"
 #include "lupine/logger/Logger.hpp"
 #include "lupine/math/MathCommon.hpp"
+#include <algorithm>
 #include <cmath>
 
 namespace lupine {
@@ -48,6 +49,8 @@ void CollisionBody2DComponent::DefineProperties() {
     DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(friction, 0.3f, 0.0f, 1.0f, 0.01f, "Physics Material"));
     DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(restitution, 0.0f, 0.0f, 1.0f, 0.01f, "Physics Material"));
     DefineProperty(PROPERTY_DEFAULT_GROUP(isSensor, Bool, false, "Physics Material"));
+    DefineProperty(PROPERTY_GROUP(collisionLayers, Int, 1, Layers2D, "", "Physics Material"));
+    DefineProperty(PROPERTY_GROUP(collisionMask, Int, static_cast<int>(0xFFFFFFFF), Layers2D, "", "Physics Material"));
 
     DefineProperty(PROPERTY_DEFAULT_GROUP(debugColor, Color, math::Color(0.0f, 1.0f, 0.0f, 0.5f), "Debug"));
 }
@@ -98,6 +101,19 @@ void CollisionBody2DComponent::Deserialize(const nlohmann::json& json) {
     m_Friction = GetPropertyValue<float>("friction");
     m_Restitution = GetPropertyValue<float>("restitution");
     m_IsSensor = GetPropertyValue<bool>("isSensor");
+    m_CollisionLayers = static_cast<uint32_t>(GetPropertyValue<int>("collisionLayers"));
+
+    // Backward compatibility: scenes authored before layer/mask were split only
+    // stored "collisionLayers" and relied on category == mask. Preserve that
+    // behaviour by deriving the mask from the layer when it is absent.
+    bool hasMask = json.contains("properties") && json["properties"].contains("collisionMask");
+    if (hasMask) {
+        m_CollisionMask = static_cast<uint32_t>(GetPropertyValue<int>("collisionMask"));
+    } else {
+        m_CollisionMask = m_CollisionLayers;
+        SetPropertyValue("collisionMask", static_cast<int>(m_CollisionMask));
+    }
+
     m_DebugColor = GetPropertyValue<math::Color>("debugColor");
 }
 
@@ -138,6 +154,45 @@ void CollisionBody2DComponent::OnReady() {
 
 void CollisionBody2DComponent::OnDestroy() {
     DestroyCollider();
+}
+
+void CollisionBody2DComponent::OnPhysicsWorldRebuild(PhysicsWorldRebuildPhase phase) {
+    // See Component::PhysicsWorldRebuildPhase. This component owns no body - it attaches a
+    // collider to a body found on its own node or its parent - so it does all of its work in
+    // the AttachColliders phase, once those bodies have been recreated.
+    switch (phase) {
+        case PhysicsWorldRebuildPhase::SaveState:
+            break;
+
+        case PhysicsWorldRebuildPhase::RecreateBodies:
+            // The body this collider was attached to has been destroyed, which already told
+            // the collider its body is gone (RigidBody2D's destructor), so the reset is safe.
+            // Clearing m_PhysicsBody matters: it is a dangling pointer into the old world and
+            // CreateCollider would otherwise build a shape against it.
+            DestroyCollider();
+            m_PhysicsBody = nullptr;
+            break;
+
+        case PhysicsWorldRebuildPhase::AttachColliders:
+            // Mirrors OnReady: the bodies exist again, so re-find ours and re-attach.
+            m_PhysicsBody = FindPhysicsBody();
+            if (m_PhysicsBody) {
+                CreateCollider();
+            }
+            break;
+    }
+}
+
+void CollisionBody2DComponent::OnPhysicsProcess(float) {
+    if (!m_Collider) {
+        return;
+    }
+
+    const math::Vec2 globalScale = GetNodeGlobalScale();
+    if (globalScale.x != m_LastScale.x || globalScale.y != m_LastScale.y) {
+        m_Collider->SetScale(globalScale);
+        m_LastScale = globalScale;
+    }
 }
 
 void CollisionBody2DComponent::OnRender() {
@@ -192,6 +247,18 @@ void CollisionBody2DComponent::OnPropertyChanged(const std::string& propertyName
         m_IsSensor = newValue.get<bool>();
         if (m_Collider) {
             m_Collider->SetSensor(m_IsSensor);
+        }
+    }
+    else if (propertyName == "collisionLayers") {
+        m_CollisionLayers = static_cast<uint32_t>(newValue.get<int>());
+        if (m_Collider) {
+            m_Collider->SetCollisionLayer(m_CollisionLayers);
+        }
+    }
+    else if (propertyName == "collisionMask") {
+        m_CollisionMask = static_cast<uint32_t>(newValue.get<int>());
+        if (m_Collider) {
+            m_Collider->SetCollisionMask(m_CollisionMask);
         }
     }
     else if (propertyName == "debugColor") {
@@ -341,6 +408,30 @@ void CollisionBody2DComponent::SetOffset(const math::Vec2& offset) {
     }
 }
 
+uint32_t CollisionBody2DComponent::GetCollisionLayers() const {
+    return static_cast<uint32_t>(GetPropertyValue<int>("collisionLayers"));
+}
+
+void CollisionBody2DComponent::SetCollisionLayers(uint32_t layers) {
+    SetPropertyValue("collisionLayers", static_cast<int>(layers));
+    m_CollisionLayers = layers;
+    if (m_Collider) {
+        m_Collider->SetCollisionLayer(layers);
+    }
+}
+
+uint32_t CollisionBody2DComponent::GetCollisionMask() const {
+    return static_cast<uint32_t>(GetPropertyValue<int>("collisionMask"));
+}
+
+void CollisionBody2DComponent::SetCollisionMask(uint32_t mask) {
+    SetPropertyValue("collisionMask", static_cast<int>(mask));
+    m_CollisionMask = mask;
+    if (m_Collider) {
+        m_Collider->SetCollisionMask(mask);
+    }
+}
+
 math::Color CollisionBody2DComponent::GetDebugColor() const {
     return GetPropertyValue<math::Color>("debugColor");
 }
@@ -358,6 +449,7 @@ void CollisionBody2DComponent::CreateCollider() {
     DestroyCollider();
 
     physics2d::PhysicsMaterial2D material(m_Density, m_Friction, m_Restitution);
+    const math::Vec2 globalScale = GetNodeGlobalScale();
 
     switch (m_ShapeType) {
         case CollisionShape2DType::Rectangle: {
@@ -367,6 +459,9 @@ void CollisionBody2DComponent::CreateCollider() {
             boxCollider->SetMaterial(material);
             boxCollider->SetSensor(m_IsSensor);
             boxCollider->SetOffset(m_Offset);
+            boxCollider->SetScale(globalScale);
+            boxCollider->SetCollisionLayer(m_CollisionLayers);
+            boxCollider->SetCollisionMask(m_CollisionMask);
             m_Collider = std::move(boxCollider);
             break;
         }
@@ -378,6 +473,9 @@ void CollisionBody2DComponent::CreateCollider() {
             circleCollider->SetMaterial(material);
             circleCollider->SetSensor(m_IsSensor);
             circleCollider->SetOffset(m_Offset);
+            circleCollider->SetScale(globalScale);
+            circleCollider->SetCollisionLayer(m_CollisionLayers);
+            circleCollider->SetCollisionMask(m_CollisionMask);
             m_Collider = std::move(circleCollider);
             break;
         }
@@ -394,6 +492,9 @@ void CollisionBody2DComponent::CreateCollider() {
                 polygonCollider->SetMaterial(material);
                 polygonCollider->SetSensor(m_IsSensor);
                 polygonCollider->SetOffset(m_Offset);
+                polygonCollider->SetScale(globalScale);
+                polygonCollider->SetCollisionLayer(m_CollisionLayers);
+                polygonCollider->SetCollisionMask(m_CollisionMask);
                 m_Collider = std::move(polygonCollider);
 
             } else if (!m_Vertices.empty()) {
@@ -402,6 +503,16 @@ void CollisionBody2DComponent::CreateCollider() {
             break;
         }
     }
+
+    m_LastScale = globalScale;
+}
+
+math::Vec2 CollisionBody2DComponent::GetNodeGlobalScale() const {
+    core::Node2D* node2D = dynamic_cast<core::Node2D*>(m_Owner);
+    if (!node2D) {
+        return math::Vec2(1.0f, 1.0f);
+    }
+    return node2D->GetGlobalScale();
 }
 
 void CollisionBody2DComponent::DestroyCollider() {
@@ -415,56 +526,55 @@ void CollisionBody2DComponent::UpdateCollider() {
 }
 
 void CollisionBody2DComponent::GenerateShapeVertices() {
-    m_Vertices.clear();
+    GenerateShapeVertices(m_ShapeType, m_Size, m_Radius, m_Vertices);
+}
 
-    switch (m_ShapeType) {
+void CollisionBody2DComponent::GenerateShapeVertices(CollisionShape2DType shapeType, const math::Vec2& size,
+                                                     float radius, std::vector<math::Vec2>& outVertices) {
+    outVertices.clear();
+
+    switch (shapeType) {
         case CollisionShape2DType::Rectangle: {
-
-            float halfW = m_Size.x / 2.0f;
-            float halfH = m_Size.y / 2.0f;
-            m_Vertices.push_back(math::Vec2(-halfW, -halfH));
-            m_Vertices.push_back(math::Vec2(halfW, -halfH));
-            m_Vertices.push_back(math::Vec2(halfW, halfH));
-            m_Vertices.push_back(math::Vec2(-halfW, halfH));
+            float halfW = size.x / 2.0f;
+            float halfH = size.y / 2.0f;
+            outVertices.push_back(math::Vec2(-halfW, -halfH));
+            outVertices.push_back(math::Vec2(halfW, -halfH));
+            outVertices.push_back(math::Vec2(halfW, halfH));
+            outVertices.push_back(math::Vec2(-halfW, halfH));
             break;
         }
 
         case CollisionShape2DType::Circle: {
-
             break;
         }
 
         case CollisionShape2DType::Triangle: {
-
-            float r = m_Radius;
-            m_Vertices.push_back(math::Vec2(0.0f, r));
-            m_Vertices.push_back(math::Vec2(r * 0.866f, -r * 0.5f));
-            m_Vertices.push_back(math::Vec2(-r * 0.866f, -r * 0.5f));
+            float r = radius;
+            outVertices.push_back(math::Vec2(0.0f, r));
+            outVertices.push_back(math::Vec2(r * 0.866f, -r * 0.5f));
+            outVertices.push_back(math::Vec2(-r * 0.866f, -r * 0.5f));
             break;
         }
 
         case CollisionShape2DType::Pentagon: {
-
-            float r = m_Radius;
+            float r = radius;
             for (int i = 0; i < 5; ++i) {
                 float angle = (float)i * (2.0f * math::PI / 5.0f) - math::PI / 2.0f;
-                m_Vertices.push_back(math::Vec2(r * std::cos(angle), r * std::sin(angle)));
+                outVertices.push_back(math::Vec2(r * std::cos(angle), r * std::sin(angle)));
             }
             break;
         }
 
         case CollisionShape2DType::Hexagon: {
-
-            float r = m_Radius;
+            float r = radius;
             for (int i = 0; i < 6; ++i) {
                 float angle = (float)i * (2.0f * math::PI / 6.0f);
-                m_Vertices.push_back(math::Vec2(r * std::cos(angle), r * std::sin(angle)));
+                outVertices.push_back(math::Vec2(r * std::cos(angle), r * std::sin(angle)));
             }
             break;
         }
 
         case CollisionShape2DType::Polygon: {
-
             break;
         }
     }
@@ -546,7 +656,11 @@ void CollisionBody2DComponent::DrawDebugShape() {
 
     math::Vec2 position = node2D->GetGlobalPosition();
     float rotation = node2D->GetGlobalRotation();
-    math::Vec2 worldOffset = m_Offset;
+    const math::Vec2 scale = node2D->GetGlobalScale();
+
+    // Drawn from the same scaled geometry the Box2D shape is built from, so the debug outline
+    // shows the collider that actually exists rather than its unscaled authoring size.
+    math::Vec2 worldOffset = math::Vec2(m_Offset.x * scale.x, m_Offset.y * scale.y);
 
     if (rotation != 0.0f) {
         float cosR = std::cos(rotation);
@@ -562,7 +676,8 @@ void CollisionBody2DComponent::DrawDebugShape() {
 
     switch (m_ShapeType) {
         case CollisionShape2DType::Circle: {
-            DebugDraw::Circle(center3D, math::Vec3(0, 0, 1), m_Radius, color, 32, 0.0f, false);
+            const float radius = m_Radius * std::max(std::abs(scale.x), std::abs(scale.y));
+            DebugDraw::Circle(center3D, math::Vec3(0, 0, 1), radius, color, 32, 0.0f, false);
             break;
         }
 
@@ -583,13 +698,14 @@ void CollisionBody2DComponent::DrawDebugShape() {
 
                 for (const auto& vertex : m_Vertices) {
 
-                    math::Vec2 rotated = vertex;
+                    const math::Vec2 scaled(vertex.x * scale.x, vertex.y * scale.y);
+                    math::Vec2 rotated = scaled;
                     if (rotation != 0.0f) {
                         float cosR = std::cos(rotation);
                         float sinR = std::sin(rotation);
                         rotated = math::Vec2(
-                            vertex.x * cosR - vertex.y * sinR,
-                            vertex.x * sinR + vertex.y * cosR
+                            scaled.x * cosR - scaled.y * sinR,
+                            scaled.x * sinR + scaled.y * cosR
                         );
                     }
                     points.push_back(math::Vec3(

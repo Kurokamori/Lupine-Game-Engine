@@ -1,4 +1,5 @@
 #include "lupine/components/Button3D.hpp"
+#include "lupine/localization/LocalizationManager.hpp"
 #include "lupine/core/Node.hpp"
 #include "lupine/rendering/RenderContext.hpp"
 #include "lupine/rendering/RenderWorld.hpp"
@@ -8,6 +9,7 @@
 #include "lupine/rendering/gfx/IGfxDevice.hpp"
 #include "lupine/rendering/gfx/GfxDescriptors.hpp"
 #include "lupine/input/InputManager.hpp"
+#include "lupine/asset/AssetDatabase.hpp"
 #include "lupine/logger/Logger.hpp"
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_inverse.hpp>
@@ -88,6 +90,10 @@ void Button3D::DefineProperties() {
     DefineProperty(PROPERTY_DEFAULT_GROUP(cornerRadius, Vec4, Vec4(0.2f, 0.2f, 0.2f, 0.2f), "CornerRadius"));
 
     DefineProperty(PROPERTY_DEFAULT_GROUP(text, String, std::string("Button"), "Text"));
+
+    // localizationKey overrides "text" and resolves through the LocalizationManager.
+    DefineProperty(PROPERTY_DEFAULT_GROUP(localizationKey, String, std::string(""), "Localization"));
+    DefineProperty(PROPERTY_DEFAULT_GROUP(localizationTable, String, std::string(""), "Localization"));
     DefineProperty(PROPERTY_FILE_GROUP(fontPath, std::string(""), "*.ttf,*.otf", "Text"));
     DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(fontSize, 16.0f, 1.0f, 256.0f, 1.0f, "Text"));
     DefineProperty(PROPERTY_DEFAULT_GROUP(fontColor, Color, Color::White(), "Text"));
@@ -137,7 +143,7 @@ void Button3D::OnReady() {
     }
 }
 
-void Button3D::OnInput(float deltaTime) {
+void Button3D::OnInput(float) {
     if (!m_ButtonEnabled) {
         if (m_CurrentState != Button3DState::Disabled) {
             TransitionToState(Button3DState::Disabled);
@@ -293,15 +299,14 @@ void Button3D::SetBaseStyleBox(std::shared_ptr<StyleBox> styleBox) {
     m_MeshNeedsRegeneration = true;
 }
 
-const Color& Button3D::GetBackgroundColor() const {
+Color Button3D::GetBackgroundColor() const {
     if (m_BaseStyleBox) {
-        auto flatStyle = std::dynamic_pointer_cast<StyleBoxFlat>(m_BaseStyleBox);
+        std::shared_ptr<StyleBoxFlat> flatStyle = std::dynamic_pointer_cast<StyleBoxFlat>(m_BaseStyleBox);
         if (flatStyle) {
             return flatStyle->GetBackgroundColor();
         }
     }
-    static Color defaultColor = Color(0.3f, 0.3f, 0.3f, 1.0f);
-    return defaultColor;
+    return Color(0.3f, 0.3f, 0.3f, 1.0f);
 }
 
 void Button3D::SetBackgroundColor(const Color& color) {
@@ -404,15 +409,14 @@ void Button3D::SetBorderEnabled(bool enabled) {
     m_MeshNeedsRegeneration = true;
 }
 
-const Color& Button3D::GetBorderColor() const {
+Color Button3D::GetBorderColor() const {
     if (m_BaseStyleBox) {
-        auto flatStyle = std::dynamic_pointer_cast<StyleBoxFlat>(m_BaseStyleBox);
+        std::shared_ptr<StyleBoxFlat> flatStyle = std::dynamic_pointer_cast<StyleBoxFlat>(m_BaseStyleBox);
         if (flatStyle) {
             return flatStyle->GetBorderColorLeft();
         }
     }
-    static Color defaultColor = Color(0.5f, 0.5f, 0.5f, 1.0f);
-    return defaultColor;
+    return Color(0.5f, 0.5f, 0.5f, 1.0f);
 }
 
 void Button3D::SetBorderColor(const Color& color) {
@@ -497,6 +501,11 @@ void Button3D::SetCornerRadiusBottomRight(float radius) {
 }
 
 std::string Button3D::GetText() const {
+    std::string locKey = GetPropertyValue<std::string>("localizationKey");
+    if (!locKey.empty()) {
+        return localization::LocalizationManager::GetInstance().Translate(
+            locKey, GetPropertyValue<std::string>("localizationTable"));
+    }
     return GetPropertyValue<std::string>("text");
 }
 
@@ -525,10 +534,8 @@ void Button3D::SetFontSize(float size) {
     m_TextMeshNeedsRegeneration = true;
 }
 
-const Color& Button3D::GetFontColor() const {
-    static Color cachedColor;
-    cachedColor = GetPropertyValue<Color>("fontColor");
-    return cachedColor;
+Color Button3D::GetFontColor() const {
+    return GetPropertyValue<Color>("fontColor");
 }
 
 void Button3D::SetFontColor(const Color& color) {
@@ -685,7 +692,7 @@ void Button3D::SyncFromProperties() {
     }
 }
 
-void Button3D::UpdateMouseInteraction(float deltaTime, RenderContext& ctx) {
+void Button3D::UpdateMouseInteraction(float, RenderContext& ctx) {
     if (!m_ButtonEnabled) {
         return;
     }
@@ -733,8 +740,6 @@ void Button3D::UpdateMouseInteraction(float deltaTime, RenderContext& ctx) {
     bool isIntersecting = IsRayIntersecting(ray, distance);
 
     bool leftPressed = inputMgr.IsMouseButtonPressed(input::MouseButton::Left);
-    bool leftJustPressed = inputMgr.IsMouseButtonJustPressed(input::MouseButton::Left);
-    bool leftJustReleased = inputMgr.IsMouseButtonJustReleased(input::MouseButton::Left);
 
     Button3DState newState = m_CurrentState;
 
@@ -781,6 +786,25 @@ void Button3D::TransitionToState(Button3DState newState) {
     }
 
     InvokeStateCallback(newState);
+
+    Emit("state_changed", { static_cast<int>(newState) });
+    if (newState == Button3DState::Pressed) {
+        Emit("pressed");
+    } else if (m_PreviousState == Button3DState::Pressed) {
+        Emit("released");
+    }
+    if (newState == Button3DState::Hover) {
+        Emit("hovered");
+    }
+}
+
+void Button3D::DefineSignals() {
+    RegisterSignal({"pressed", {}, "Emitted when the 3D button is pressed down."});
+    RegisterSignal({"released", {}, "Emitted when a press is released."});
+    RegisterSignal({"hovered", {}, "Emitted when the pointer enters the button."});
+    RegisterSignal({"state_changed",
+                    {{"state", core::PropertyValueType::Int}},
+                    "Emitted on any 3D button state change."});
 }
 
 void Button3D::PlayStateSound(Button3DState state) {
@@ -791,15 +815,17 @@ void Button3D::PlayStateSound(Button3DState state) {
     }
 
     if (!sound.audioAsset.IsValid()) {
-
         return;
     }
 
     audio::AudioManager& audioMgr = audio::AudioManager::GetInstance();
 
+    if (sound.audioAsset->IsLoaded()) {
+        audioMgr.Play(sound.audioAsset, sound.busName, audio::PlaybackMode::OneShot, sound.volume);
+    }
 }
 
-void Button3D::ApplyStateTween(Button3DState state, bool entering) {
+void Button3D::ApplyStateTween(Button3DState state, bool) {
     const Button3DStateTween& tween = m_StateTweens[static_cast<int>(state)];
 
     if (!tween.enabled) {
@@ -1149,10 +1175,16 @@ void Button3D::RenderBorder(RenderContext& ctx, const Mat4& transform, const Vec
     ctx.drawMesh(quadMesh, material, finalTransform, overrides, 0, GetCastShadow(), GetReceiveShadow());
 }
 
-void Button3D::RenderText(RenderContext& ctx, const Mat4& transform, const Vec2& size) {
+void Button3D::RenderText(RenderContext& ctx, const Mat4& transform, const Vec2&) {
     std::string text = GetText();
     if (text.empty()) {
         return;
+    }
+
+    // A resolution change re-bakes the font atlas at a new oversampling density,
+    // which repacks glyph UVs; regenerate the cached text mesh so it matches.
+    if (ConsumeFontOversampleChanged()) {
+        m_MeshNeedsRegeneration = true;
     }
 
     std::string fontPath = GetFontPath();
@@ -1183,7 +1215,8 @@ void Button3D::RenderText(RenderContext& ctx, const Mat4& transform, const Vec2&
 
     if (m_FontAsset.IsValid() && m_FontAsset->IsLoaded() && !m_FontHandle.isValid()) {
         FontDesc fontDesc;
-        fontDesc.fontPath = m_FontAsset->GetPath();
+        // Use GetPhysicalPath() to resolve res:// path to filesystem path for file loading
+        fontDesc.fontPath = m_FontAsset->GetPhysicalPath();
         fontDesc.fontSize = GetFontSize();
         fontDesc.atlasWidth = m_FontAsset->GetAtlasWidth();
         fontDesc.atlasHeight = m_FontAsset->GetAtlasHeight();
@@ -1417,6 +1450,32 @@ RenderLayer Button3D::getRenderLayer() const {
         return RenderLayer::Transparent;
     }
     return RenderLayer::Opaque;
+}
+
+bool Button3D::OnAssetFileChanged(const std::string& changedPath, const std::string& resolvedChangedPath) {
+    std::string fontPath = GetFontPath();
+    if (fontPath.empty()) return false;
+
+    auto& assetDb = asset::AssetDatabase::GetInstance();
+    std::string resolvedFontPath;
+    if (assetDb.IsInitialized()) {
+        resolvedFontPath = assetDb.ResolveAsset(fontPath);
+    }
+
+    bool matches = (fontPath == changedPath) ||
+                   (!resolvedFontPath.empty() && !resolvedChangedPath.empty() &&
+                    resolvedFontPath == resolvedChangedPath);
+
+    if (matches) {
+        
+        m_FontHandle = FontHandle();
+        m_FontAsset.Reset();
+        m_CurrentFontPath.clear();
+        m_TextMeshNeedsRegeneration = true;
+        return true;
+    }
+
+    return false;
 }
 
 }

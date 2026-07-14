@@ -3,6 +3,9 @@
 #include "lupine/physics3d/Collider3D.hpp"
 #include "lupine/logger/Logger.hpp"
 #include <btBulletDynamicsCommon.h>
+#include <algorithm>
+#include <iterator>
+#include <unordered_set>
 
 namespace lupine {
 namespace physics3d {
@@ -27,19 +30,7 @@ Physics3DWorld::Physics3DWorld()
 
 Physics3DWorld::~Physics3DWorld() {
 
-    if (m_DynamicsWorld) {
-        int numObjects = m_DynamicsWorld->getNumCollisionObjects();
-        for (int i = numObjects - 1; i >= 0; i--) {
-            btCollisionObject* obj = m_DynamicsWorld->getCollisionObjectArray()[i];
-            btRigidBody* body = btRigidBody::upcast(obj);
-            if (body && body->getMotionState()) {
-                delete body->getMotionState();
-            }
-            m_DynamicsWorld->removeCollisionObject(obj);
-        }
-    }
-
-    m_Bodies.clear();
+    Clear();
 
     if (m_DynamicsWorld) {
         delete m_DynamicsWorld;
@@ -94,6 +85,10 @@ RigidBody3D* Physics3DWorld::CreateBody(core::UUID& outId, BodyType type) {
     RigidBody3D* bodyPtr = body.get();
     m_Bodies[outId] = std::move(body);
 
+    if (bodyPtr->GetBulletBody()) {
+        m_ObjectToBody[bodyPtr->GetBulletBody()] = outId;
+    }
+
     return bodyPtr;
 }
 
@@ -108,9 +103,130 @@ RigidBody3D* Physics3DWorld::GetBody(const core::UUID& id) {
 void Physics3DWorld::DestroyBody(const core::UUID& id) {
     auto it = m_Bodies.find(id);
     if (it != m_Bodies.end()) {
+        if (it->second->GetBulletBody()) {
+            m_ObjectToBody.erase(it->second->GetBulletBody());
+        }
         m_Bodies.erase(it);
-
     }
+
+    m_BodyNodes.erase(id);
+
+    // Drop every reference to the destroyed body. The callbacks capture the registering
+    // component, so leaving them behind is both an unbounded leak across spawn/despawn
+    // cycles and a stale pointer waiting for a recycled body id.
+    m_CollisionEnterCallbacks.erase(id);
+    m_CollisionStayCallbacks.erase(id);
+    m_CollisionExitCallbacks.erase(id);
+    m_TriggerEnterCallbacks.erase(id);
+    m_TriggerStayCallbacks.erase(id);
+    m_TriggerExitCallbacks.erase(id);
+
+    PurgeBodyFromContacts(id);
+}
+
+void Physics3DWorld::Clear() {
+    m_ActiveCollisions.clear();
+    m_ActiveTriggers.clear();
+    m_BodyNodes.clear();
+
+    m_CollisionEnterCallbacks.clear();
+    m_CollisionStayCallbacks.clear();
+    m_CollisionExitCallbacks.clear();
+    m_TriggerEnterCallbacks.clear();
+    m_TriggerStayCallbacks.clear();
+    m_TriggerExitCallbacks.clear();
+
+    DestroyAllBodies();
+}
+
+void Physics3DWorld::DestroyAllBodies() {
+    if (m_DynamicsWorld) {
+        // Constraints reference the bodies they join, so they must leave the world before the
+        // bodies do. Nothing in the engine creates them today, but GetBulletWorld() is public,
+        // so an extension can. They are not ours to delete - only to detach.
+        for (int i = m_DynamicsWorld->getNumConstraints() - 1; i >= 0; i--) {
+            m_DynamicsWorld->removeConstraint(m_DynamicsWorld->getConstraint(i));
+        }
+    }
+
+    // ~RigidBody3D removes its own btRigidBody from the world and owns that body's motion
+    // state, compound shape and collider back-references. Destroying the bodies through their
+    // unique_ptrs is therefore the whole teardown - freeing any of it here as well would be a
+    // double delete.
+    m_Bodies.clear();
+    m_ObjectToBody.clear();
+
+    if (m_DynamicsWorld) {
+        // Anything still registered was not created through CreateBody, so it is not ours
+        // to free - just detach it.
+        for (int i = m_DynamicsWorld->getNumCollisionObjects() - 1; i >= 0; i--) {
+            m_DynamicsWorld->removeCollisionObject(m_DynamicsWorld->getCollisionObjectArray()[i]);
+        }
+    }
+}
+
+void Physics3DWorld::PurgeBodyFromContacts(const core::UUID& bodyId) {
+    const uint64_t raw = static_cast<uint64_t>(bodyId);
+
+    for (auto it = m_ActiveCollisions.begin(); it != m_ActiveCollisions.end();) {
+        it = (it->first.first == raw || it->first.second == raw) ? m_ActiveCollisions.erase(it) : std::next(it);
+    }
+    for (auto it = m_ActiveTriggers.begin(); it != m_ActiveTriggers.end();) {
+        it = (it->first.first == raw || it->first.second == raw) ? m_ActiveTriggers.erase(it) : std::next(it);
+    }
+}
+
+Physics3DWorld::BodyPairKey Physics3DWorld::MakePairKey(const core::UUID& a, const core::UUID& b) {
+    const uint64_t rawA = static_cast<uint64_t>(a);
+    const uint64_t rawB = static_cast<uint64_t>(b);
+    return rawA <= rawB ? BodyPairKey(rawA, rawB) : BodyPairKey(rawB, rawA);
+}
+
+RigidBody3D* Physics3DWorld::GetBodyForObject(const btCollisionObject* object) const {
+    if (!object) {
+        return nullptr;
+    }
+    auto indexIt = m_ObjectToBody.find(object);
+    if (indexIt == m_ObjectToBody.end()) {
+        return nullptr;
+    }
+    auto bodyIt = m_Bodies.find(indexIt->second);
+    return bodyIt != m_Bodies.end() ? bodyIt->second.get() : nullptr;
+}
+
+const btCollisionObject* Physics3DWorld::GetBulletObject(const core::UUID* bodyId) const {
+    if (!bodyId) {
+        return nullptr;
+    }
+    auto it = m_Bodies.find(*bodyId);
+    return it != m_Bodies.end() ? it->second->GetBulletBody() : nullptr;
+}
+
+void Physics3DWorld::SetBodyNode(const core::UUID& bodyId, core::Node* node) {
+    if (node) {
+        m_BodyNodes[bodyId] = node;
+    } else {
+        m_BodyNodes.erase(bodyId);
+    }
+}
+
+core::Node* Physics3DWorld::GetBodyNode(const core::UUID& bodyId) const {
+    auto it = m_BodyNodes.find(bodyId);
+    return it != m_BodyNodes.end() ? it->second : nullptr;
+}
+
+void Physics3DWorld::ClearBodyNode(const core::UUID& bodyId) {
+    m_BodyNodes.erase(bodyId);
+}
+
+core::UUID Physics3DWorld::FindBodyForNode(const core::Node* node) const {
+    if (!node) return core::UUID(0);
+    for (const auto& pair : m_BodyNodes) {
+        if (pair.second == node) {
+            return pair.first;
+        }
+    }
+    return core::UUID(0);
 }
 
 void Physics3DWorld::RegisterCollisionEnter(const core::UUID& bodyId, CollisionCallback callback) {
@@ -139,156 +255,277 @@ void Physics3DWorld::RegisterTriggerExit(const core::UUID& bodyId, CollisionCall
 
 void Physics3DWorld::ProcessCollisionEvents() {
 
-    int numManifolds = m_Dispatcher->getNumManifolds();
+    std::map<BodyPairKey, CollisionInfo3D> currentCollisions;
+    std::map<BodyPairKey, CollisionInfo3D> currentTriggers;
+    std::vector<PendingEvent> events;
 
-    std::unordered_map<std::string, bool> currentCollisions;
+    const int numManifolds = m_Dispatcher->getNumManifolds();
 
     for (int i = 0; i < numManifolds; i++) {
         btPersistentManifold* contactManifold = m_Dispatcher->getManifoldByIndexInternal(i);
+        if (contactManifold->getNumContacts() <= 0) {
+            continue;
+        }
+
         const btCollisionObject* obA = contactManifold->getBody0();
         const btCollisionObject* obB = contactManifold->getBody1();
 
-        int numContacts = contactManifold->getNumContacts();
-        if (numContacts > 0) {
+        RigidBody3D* bodyA = GetBodyForObject(obA);
+        RigidBody3D* bodyB = GetBodyForObject(obB);
+        if (!bodyA || !bodyB) {
+            continue;
+        }
 
-            RigidBody3D* bodyA = nullptr;
-            RigidBody3D* bodyB = nullptr;
+        // Sensors keep generating manifolds even though the solver applies no response,
+        // so a pair where either side is a sensor is a trigger overlap rather than a collision.
+        const bool isTrigger =
+            ((obA->getCollisionFlags() & btCollisionObject::CF_NO_CONTACT_RESPONSE) != 0) ||
+            ((obB->getCollisionFlags() & btCollisionObject::CF_NO_CONTACT_RESPONSE) != 0);
 
-            for (auto& pair : m_Bodies) {
-                if (pair.second->GetBulletBody() == obA) {
-                    bodyA = pair.second.get();
-                }
-                if (pair.second->GetBulletBody() == obB) {
-                    bodyB = pair.second.get();
-                }
-            }
+        const btManifoldPoint& pt = contactManifold->getContactPoint(0);
+        const btVector3 ptA = pt.getPositionWorldOnA();
+        const btVector3 ptB = pt.getPositionWorldOnB();
+        const btVector3 normalOnB = pt.m_normalWorldOnB;
 
-            if (bodyA && bodyB) {
+        CollisionInfo3D info;
+        info.bodyA = bodyA->GetId();
+        info.bodyB = bodyB->GetId();
+        info.point = math::Vec3((ptA.x() + ptB.x()) * 0.5f, (ptA.y() + ptB.y()) * 0.5f, (ptA.z() + ptB.z()) * 0.5f);
+        info.normal = math::Vec3(normalOnB.x(), normalOnB.y(), normalOnB.z());
+        info.penetrationDepth = pt.getDistance();
 
-                std::string collisionKey = bodyA->GetId().ToString() + "_" + bodyB->GetId().ToString();
-                currentCollisions[collisionKey] = true;
+        const BodyPairKey key = MakePairKey(info.bodyA, info.bodyB);
+        auto& current = isTrigger ? currentTriggers : currentCollisions;
+        const auto& active = isTrigger ? m_ActiveTriggers : m_ActiveCollisions;
 
-                btManifoldPoint& pt = contactManifold->getContactPoint(0);
-                btVector3 ptA = pt.getPositionWorldOnA();
-                btVector3 ptB = pt.getPositionWorldOnB();
-                btVector3 normalOnB = pt.m_normalWorldOnB;
+        // A body pair can produce several manifolds (one per shape pair on a multi-collider
+        // body). The first one seen this step represents the pair.
+        if (!current.emplace(key, info).second) {
+            continue;
+        }
 
-                CollisionInfo3D info;
-                info.bodyA = bodyA->GetId();
-                info.bodyB = bodyB->GetId();
-                info.point = math::Vec3((ptA.x() + ptB.x()) * 0.5f, (ptA.y() + ptB.y()) * 0.5f, (ptA.z() + ptB.z()) * 0.5f);
-                info.normal = math::Vec3(normalOnB.x(), normalOnB.y(), normalOnB.z());
-                info.penetrationDepth = pt.getDistance();
+        const ContactPhase phase = (active.find(key) == active.end()) ? ContactPhase::Enter : ContactPhase::Stay;
+        events.push_back(PendingEvent{ info.bodyA, info, phase, isTrigger });
+        events.push_back(PendingEvent{ info.bodyB, info, phase, isTrigger });
+    }
 
-                bool isNewCollision = m_ActiveCollisions.find(collisionKey) == m_ActiveCollisions.end();
-
-                if (isNewCollision) {
-
-                    auto itA = m_CollisionEnterCallbacks.find(bodyA->GetId());
-                    if (itA != m_CollisionEnterCallbacks.end()) {
-                        itA->second(info);
-                    }
-                    auto itB = m_CollisionEnterCallbacks.find(bodyB->GetId());
-                    if (itB != m_CollisionEnterCallbacks.end()) {
-                        itB->second(info);
-                    }
-                } else {
-
-                    auto itA = m_CollisionStayCallbacks.find(bodyA->GetId());
-                    if (itA != m_CollisionStayCallbacks.end()) {
-                        itA->second(info);
-                    }
-                    auto itB = m_CollisionStayCallbacks.find(bodyB->GetId());
-                    if (itB != m_CollisionStayCallbacks.end()) {
-                        itB->second(info);
-                    }
-                }
-            }
+    // Pairs that were touching last step but produced no manifold this step have separated.
+    for (const auto& entry : m_ActiveCollisions) {
+        if (currentCollisions.find(entry.first) == currentCollisions.end()) {
+            events.push_back(PendingEvent{ entry.second.bodyA, entry.second, ContactPhase::Exit, false });
+            events.push_back(PendingEvent{ entry.second.bodyB, entry.second, ContactPhase::Exit, false });
+        }
+    }
+    for (const auto& entry : m_ActiveTriggers) {
+        if (currentTriggers.find(entry.first) == currentTriggers.end()) {
+            events.push_back(PendingEvent{ entry.second.bodyA, entry.second, ContactPhase::Exit, true });
+            events.push_back(PendingEvent{ entry.second.bodyB, entry.second, ContactPhase::Exit, true });
         }
     }
 
-    for (auto& pair : m_ActiveCollisions) {
-        if (currentCollisions.find(pair.first) == currentCollisions.end()) {
+    // Commit the new contact state before dispatching, so a callback that destroys a body
+    // (and purges its contacts) cannot mutate a container we are still iterating.
+    m_ActiveCollisions = std::move(currentCollisions);
+    m_ActiveTriggers = std::move(currentTriggers);
 
-        }
-    }
-
-    m_ActiveCollisions = currentCollisions;
+    DispatchEvents(events);
 }
 
-bool Physics3DWorld::Raycast(const math::Vec3& origin, const math::Vec3& direction, float maxDistance, RaycastHit3D& hit, const core::UUID* ignoreBody) {
-    math::Vec3 normalizedDir = direction.Normalized();
-    math::Vec3 endPoint = origin + normalizedDir * maxDistance;
+void Physics3DWorld::DispatchEvents(const std::vector<PendingEvent>& events) {
+    for (const PendingEvent& event : events) {
+        // An earlier callback in this batch may have destroyed the body this event targets.
+        if (m_Bodies.find(event.target) == m_Bodies.end()) {
+            continue;
+        }
 
-    btVector3 from(origin.x, origin.y, origin.z);
-    btVector3 to(endPoint.x, endPoint.y, endPoint.z);
+        const std::unordered_map<core::UUID, CollisionCallback>* callbacks = nullptr;
+        if (event.isTrigger) {
+            switch (event.phase) {
+                case ContactPhase::Enter: callbacks = &m_TriggerEnterCallbacks; break;
+                case ContactPhase::Stay:  callbacks = &m_TriggerStayCallbacks;  break;
+                case ContactPhase::Exit:  callbacks = &m_TriggerExitCallbacks;  break;
+            }
+        } else {
+            switch (event.phase) {
+                case ContactPhase::Enter: callbacks = &m_CollisionEnterCallbacks; break;
+                case ContactPhase::Stay:  callbacks = &m_CollisionStayCallbacks;  break;
+                case ContactPhase::Exit:  callbacks = &m_CollisionExitCallbacks;  break;
+            }
+        }
 
-    btCollisionWorld::ClosestRayResultCallback rayCallback(from, to);
+        auto it = callbacks->find(event.target);
+        if (it == callbacks->end() || !it->second) {
+            continue;
+        }
+
+        // Copy the callback: invoking it may unregister (and thereby erase) itself.
+        CollisionCallback callback = it->second;
+        callback(event.info);
+    }
+}
+
+namespace {
+
+// Bullet's default needsCollision() gates a query proxy against the callback's own
+// group/mask. The engine's bodies advertise the same bitmask as both their group and their
+// mask ("bodies interact if they share any layer"), so a query mirrors that: it sets both
+// fields to the requested layer mask.
+void ApplyQueryFilter(btCollisionWorld::RayResultCallback& callback, uint32_t layerMask) {
+    callback.m_collisionFilterGroup = static_cast<int>(layerMask);
+    callback.m_collisionFilterMask = static_cast<int>(layerMask);
+}
+
+void ApplyQueryFilter(btCollisionWorld::ContactResultCallback& callback, uint32_t layerMask) {
+    callback.m_collisionFilterGroup = static_cast<int>(layerMask);
+    callback.m_collisionFilterMask = static_cast<int>(layerMask);
+}
+
+void ApplyQueryFilter(btCollisionWorld::ConvexResultCallback& callback, uint32_t layerMask) {
+    callback.m_collisionFilterGroup = static_cast<int>(layerMask);
+    callback.m_collisionFilterMask = static_cast<int>(layerMask);
+}
+
+bool ProxyIsIgnored(const btBroadphaseProxy* proxy, const btCollisionObject* ignoreObject) {
+    return ignoreObject != nullptr && proxy != nullptr && proxy->m_clientObject == ignoreObject;
+}
+
+} // namespace
+
+bool Physics3DWorld::Raycast(const math::Vec3& origin, const math::Vec3& direction, float maxDistance, RaycastHit3D& hit, const core::UUID* ignoreBody, uint32_t layerMask) {
+    hit.hit = false;
+
+    const math::Vec3 normalizedDir = direction.Normalized();
+    const math::Vec3 endPoint = origin + normalizedDir * maxDistance;
+
+    const btVector3 from(origin.x, origin.y, origin.z);
+    const btVector3 to(endPoint.x, endPoint.y, endPoint.z);
+
+    struct FilteredRayCallback : public btCollisionWorld::ClosestRayResultCallback {
+        const btCollisionObject* ignoreObject;
+
+        FilteredRayCallback(const btVector3& rayFrom, const btVector3& rayTo, const btCollisionObject* ignore)
+            : btCollisionWorld::ClosestRayResultCallback(rayFrom, rayTo)
+            , ignoreObject(ignore) {}
+
+        // Rejecting the ignored body here (rather than after the fact) lets the traversal
+        // keep looking for whatever lies behind it, instead of reporting a miss.
+        bool needsCollision(btBroadphaseProxy* proxy0) const override {
+            if (ProxyIsIgnored(proxy0, ignoreObject)) {
+                return false;
+            }
+            return btCollisionWorld::ClosestRayResultCallback::needsCollision(proxy0);
+        }
+    };
+
+    FilteredRayCallback rayCallback(from, to, GetBulletObject(ignoreBody));
+    ApplyQueryFilter(rayCallback, layerMask);
     m_DynamicsWorld->rayTest(from, to, rayCallback);
 
-    if (rayCallback.hasHit()) {
-
-        const btCollisionObject* obj = rayCallback.m_collisionObject;
-        for (auto& pair : m_Bodies) {
-            if (pair.second->GetBulletBody() == obj) {
-
-                if (ignoreBody && pair.first == *ignoreBody) {
-                    hit.hit = false;
-                    return false;
-                }
-
-                hit.bodyId = pair.first;
-                hit.point = math::Vec3(rayCallback.m_hitPointWorld.x(), rayCallback.m_hitPointWorld.y(), rayCallback.m_hitPointWorld.z());
-                hit.normal = math::Vec3(rayCallback.m_hitNormalWorld.x(), rayCallback.m_hitNormalWorld.y(), rayCallback.m_hitNormalWorld.z());
-                hit.fraction = rayCallback.m_closestHitFraction;
-                hit.hit = true;
-                return true;
-            }
-        }
+    if (!rayCallback.hasHit()) {
+        return false;
     }
 
-    hit.hit = false;
-    return false;
+    RigidBody3D* body = GetBodyForObject(rayCallback.m_collisionObject);
+    if (!body) {
+        return false;
+    }
+
+    hit.bodyId = body->GetId();
+    hit.point = math::Vec3(rayCallback.m_hitPointWorld.x(), rayCallback.m_hitPointWorld.y(), rayCallback.m_hitPointWorld.z());
+    hit.normal = math::Vec3(rayCallback.m_hitNormalWorld.x(), rayCallback.m_hitNormalWorld.y(), rayCallback.m_hitNormalWorld.z());
+    hit.fraction = rayCallback.m_closestHitFraction;
+    hit.hit = true;
+    return true;
 }
 
-std::vector<RaycastHit3D> Physics3DWorld::RaycastAll(const math::Vec3& origin, const math::Vec3& direction, float maxDistance, const core::UUID* ignoreBody) {
+std::vector<RaycastHit3D> Physics3DWorld::RaycastAll(const math::Vec3& origin, const math::Vec3& direction, float maxDistance, const core::UUID* ignoreBody, uint32_t layerMask) {
     std::vector<RaycastHit3D> hits;
 
-    math::Vec3 normalizedDir = direction.Normalized();
-    math::Vec3 endPoint = origin + normalizedDir * maxDistance;
+    const math::Vec3 normalizedDir = direction.Normalized();
+    const math::Vec3 endPoint = origin + normalizedDir * maxDistance;
 
-    btVector3 from(origin.x, origin.y, origin.z);
-    btVector3 to(endPoint.x, endPoint.y, endPoint.z);
+    const btVector3 from(origin.x, origin.y, origin.z);
+    const btVector3 to(endPoint.x, endPoint.y, endPoint.z);
 
-    btCollisionWorld::AllHitsRayResultCallback rayCallback(from, to);
+    struct FilteredAllHitsCallback : public btCollisionWorld::AllHitsRayResultCallback {
+        const btCollisionObject* ignoreObject;
+
+        FilteredAllHitsCallback(const btVector3& rayFrom, const btVector3& rayTo, const btCollisionObject* ignore)
+            : btCollisionWorld::AllHitsRayResultCallback(rayFrom, rayTo)
+            , ignoreObject(ignore) {}
+
+        bool needsCollision(btBroadphaseProxy* proxy0) const override {
+            if (ProxyIsIgnored(proxy0, ignoreObject)) {
+                return false;
+            }
+            return btCollisionWorld::AllHitsRayResultCallback::needsCollision(proxy0);
+        }
+    };
+
+    FilteredAllHitsCallback rayCallback(from, to, GetBulletObject(ignoreBody));
+    ApplyQueryFilter(rayCallback, layerMask);
     m_DynamicsWorld->rayTest(from, to, rayCallback);
 
+    hits.reserve(static_cast<size_t>(rayCallback.m_collisionObjects.size()));
+
     for (int i = 0; i < rayCallback.m_collisionObjects.size(); i++) {
-        const btCollisionObject* obj = rayCallback.m_collisionObjects[i];
-        for (auto& pair : m_Bodies) {
-            if (pair.second->GetBulletBody() == obj) {
-
-                if (ignoreBody && pair.first == *ignoreBody) {
-                    continue;
-                }
-
-                RaycastHit3D hit;
-                hit.bodyId = pair.first;
-                hit.point = math::Vec3(rayCallback.m_hitPointWorld[i].x(), rayCallback.m_hitPointWorld[i].y(), rayCallback.m_hitPointWorld[i].z());
-                hit.normal = math::Vec3(rayCallback.m_hitNormalWorld[i].x(), rayCallback.m_hitNormalWorld[i].y(), rayCallback.m_hitNormalWorld[i].z());
-                hit.fraction = rayCallback.m_hitFractions[i];
-                hit.hit = true;
-                hits.push_back(hit);
-                break;
-            }
+        RigidBody3D* body = GetBodyForObject(rayCallback.m_collisionObjects[i]);
+        if (!body) {
+            continue;
         }
+
+        RaycastHit3D hit;
+        hit.bodyId = body->GetId();
+        hit.point = math::Vec3(rayCallback.m_hitPointWorld[i].x(), rayCallback.m_hitPointWorld[i].y(), rayCallback.m_hitPointWorld[i].z());
+        hit.normal = math::Vec3(rayCallback.m_hitNormalWorld[i].x(), rayCallback.m_hitNormalWorld[i].y(), rayCallback.m_hitNormalWorld[i].z());
+        hit.fraction = rayCallback.m_hitFractions[i];
+        hit.hit = true;
+        hits.push_back(hit);
     }
+
+    std::sort(hits.begin(), hits.end(), [](const RaycastHit3D& a, const RaycastHit3D& b) {
+        return a.fraction < b.fraction;
+    });
 
     return hits;
 }
 
-std::vector<OverlapResult3D> Physics3DWorld::OverlapSphere(const math::Vec3& center, float radius) {
+namespace {
+
+// Shared by the overlap queries: records each overlapping body once, no matter how many
+// contact points the pair generates, and skips the ignored body.
+struct OverlapCollector : public btCollisionWorld::ContactResultCallback {
+    Physics3DWorld* world;
+    std::vector<OverlapResult3D>* results;
+    std::unordered_set<uint64_t>* seen;
+    const btCollisionObject* ignoreObject;
+
+    bool needsCollision(btBroadphaseProxy* proxy0) const override {
+        if (ProxyIsIgnored(proxy0, ignoreObject)) {
+            return false;
+        }
+        return btCollisionWorld::ContactResultCallback::needsCollision(proxy0);
+    }
+
+    btScalar addSingleResult(btManifoldPoint&,
+        const btCollisionObjectWrapper*, int, int,
+        const btCollisionObjectWrapper* colObj1Wrap, int, int) override {
+
+        RigidBody3D* body = world->GetBodyForObject(colObj1Wrap->getCollisionObject());
+        if (body && seen->insert(static_cast<uint64_t>(body->GetId())).second) {
+            OverlapResult3D result;
+            result.bodyId = body->GetId();
+            results->push_back(result);
+        }
+        return 0;
+    }
+};
+
+} // namespace
+
+std::vector<OverlapResult3D> Physics3DWorld::OverlapSphere(const math::Vec3& center, float radius, const core::UUID* ignoreBody, uint32_t layerMask) {
     std::vector<OverlapResult3D> results;
+    std::unordered_set<uint64_t> seen;
 
     btSphereShape sphereShape(radius);
     btTransform transform;
@@ -299,38 +536,21 @@ std::vector<OverlapResult3D> Physics3DWorld::OverlapSphere(const math::Vec3& cen
     testObject.setCollisionShape(&sphereShape);
     testObject.setWorldTransform(transform);
 
-    struct OverlapCallback : public btCollisionWorld::ContactResultCallback {
-        std::vector<OverlapResult3D>* results;
-        std::unordered_map<core::UUID, std::unique_ptr<RigidBody3D>>* bodies;
-
-        btScalar addSingleResult(btManifoldPoint& cp,
-            const btCollisionObjectWrapper* colObj0Wrap, int partId0, int index0,
-            const btCollisionObjectWrapper* colObj1Wrap, int partId1, int index1) override {
-
-            const btCollisionObject* obj = colObj1Wrap->getCollisionObject();
-            for (auto& pair : *bodies) {
-                if (pair.second->GetBulletBody() == obj) {
-                    OverlapResult3D result;
-                    result.bodyId = pair.first;
-                    results->push_back(result);
-                    break;
-                }
-            }
-            return 0;
-        }
-    };
-
-    OverlapCallback callback;
+    OverlapCollector callback;
+    callback.world = this;
     callback.results = &results;
-    callback.bodies = &m_Bodies;
+    callback.seen = &seen;
+    callback.ignoreObject = GetBulletObject(ignoreBody);
+    ApplyQueryFilter(callback, layerMask);
 
     m_DynamicsWorld->contactTest(&testObject, callback);
 
     return results;
 }
 
-std::vector<OverlapResult3D> Physics3DWorld::OverlapBox(const math::Vec3& center, const math::Vec3& halfExtents, const math::Quat& rotation) {
+std::vector<OverlapResult3D> Physics3DWorld::OverlapBox(const math::Vec3& center, const math::Vec3& halfExtents, const math::Quat& rotation, const core::UUID* ignoreBody, uint32_t layerMask) {
     std::vector<OverlapResult3D> results;
+    std::unordered_set<uint64_t> seen;
 
     btBoxShape boxShape(btVector3(halfExtents.x, halfExtents.y, halfExtents.z));
     btTransform transform;
@@ -342,37 +562,21 @@ std::vector<OverlapResult3D> Physics3DWorld::OverlapBox(const math::Vec3& center
     testObject.setCollisionShape(&boxShape);
     testObject.setWorldTransform(transform);
 
-    struct OverlapCallback : public btCollisionWorld::ContactResultCallback {
-        std::vector<OverlapResult3D>* results;
-        std::unordered_map<core::UUID, std::unique_ptr<RigidBody3D>>* bodies;
-
-        btScalar addSingleResult(btManifoldPoint& cp,
-            const btCollisionObjectWrapper* colObj0Wrap, int partId0, int index0,
-            const btCollisionObjectWrapper* colObj1Wrap, int partId1, int index1) override {
-
-            const btCollisionObject* obj = colObj1Wrap->getCollisionObject();
-            for (auto& pair : *bodies) {
-                if (pair.second->GetBulletBody() == obj) {
-                    OverlapResult3D result;
-                    result.bodyId = pair.first;
-                    results->push_back(result);
-                    break;
-                }
-            }
-            return 0;
-        }
-    };
-
-    OverlapCallback callback;
+    OverlapCollector callback;
+    callback.world = this;
     callback.results = &results;
-    callback.bodies = &m_Bodies;
+    callback.seen = &seen;
+    callback.ignoreObject = GetBulletObject(ignoreBody);
+    ApplyQueryFilter(callback, layerMask);
 
     m_DynamicsWorld->contactTest(&testObject, callback);
 
     return results;
 }
 
-bool Physics3DWorld::SphereCast(const math::Vec3& start, const math::Vec3& end, float radius, ShapeCastHit3D& hit, const core::UUID* ignoreBody) {
+bool Physics3DWorld::SphereCast(const math::Vec3& start, const math::Vec3& end, float radius, ShapeCastHit3D& hit, const core::UUID* ignoreBody, uint32_t layerMask) {
+    hit.hit = false;
+
     btSphereShape sphereShape(radius);
 
     btTransform fromTransform;
@@ -384,52 +588,39 @@ bool Physics3DWorld::SphereCast(const math::Vec3& start, const math::Vec3& end, 
     toTransform.setOrigin(btVector3(end.x, end.y, end.z));
 
     struct FilteredConvexResultCallback : public btCollisionWorld::ClosestConvexResultCallback {
-        const core::UUID* ignoreBody;
-        std::unordered_map<core::UUID, std::unique_ptr<RigidBody3D>>* bodies;
+        const btCollisionObject* ignoreObject;
 
-        FilteredConvexResultCallback(const btVector3& from, const btVector3& to,
-                                     const core::UUID* ignore,
-                                     std::unordered_map<core::UUID, std::unique_ptr<RigidBody3D>>* bodiesMap)
+        FilteredConvexResultCallback(const btVector3& from, const btVector3& to, const btCollisionObject* ignore)
             : btCollisionWorld::ClosestConvexResultCallback(from, to)
-            , ignoreBody(ignore)
-            , bodies(bodiesMap) {}
+            , ignoreObject(ignore) {}
 
-        btScalar addSingleResult(btCollisionWorld::LocalConvexResult& convexResult, bool normalInWorldSpace) override {
-
-            if (ignoreBody) {
-                for (auto& pair : *bodies) {
-                    if (pair.second->GetBulletBody() == convexResult.m_hitCollisionObject) {
-                        if (pair.first == *ignoreBody) {
-                            return 1.0f;
-                        }
-                        break;
-                    }
-                }
+        bool needsCollision(btBroadphaseProxy* proxy0) const override {
+            if (ProxyIsIgnored(proxy0, ignoreObject)) {
+                return false;
             }
-
-            return btCollisionWorld::ClosestConvexResultCallback::addSingleResult(convexResult, normalInWorldSpace);
+            return btCollisionWorld::ClosestConvexResultCallback::needsCollision(proxy0);
         }
     };
 
-    FilteredConvexResultCallback callback(fromTransform.getOrigin(), toTransform.getOrigin(), ignoreBody, &m_Bodies);
+    FilteredConvexResultCallback callback(fromTransform.getOrigin(), toTransform.getOrigin(), GetBulletObject(ignoreBody));
+    ApplyQueryFilter(callback, layerMask);
     m_DynamicsWorld->convexSweepTest(&sphereShape, fromTransform, toTransform, callback);
 
-    if (callback.hasHit()) {
-        const btCollisionObject* obj = callback.m_hitCollisionObject;
-        for (auto& pair : m_Bodies) {
-            if (pair.second->GetBulletBody() == obj) {
-                hit.bodyId = pair.first;
-                hit.point = math::Vec3(callback.m_hitPointWorld.x(), callback.m_hitPointWorld.y(), callback.m_hitPointWorld.z());
-                hit.normal = math::Vec3(callback.m_hitNormalWorld.x(), callback.m_hitNormalWorld.y(), callback.m_hitNormalWorld.z());
-                hit.fraction = callback.m_closestHitFraction;
-                hit.hit = true;
-                return true;
-            }
-        }
+    if (!callback.hasHit()) {
+        return false;
     }
 
-    hit.hit = false;
-    return false;
+    RigidBody3D* body = GetBodyForObject(callback.m_hitCollisionObject);
+    if (!body) {
+        return false;
+    }
+
+    hit.bodyId = body->GetId();
+    hit.point = math::Vec3(callback.m_hitPointWorld.x(), callback.m_hitPointWorld.y(), callback.m_hitPointWorld.z());
+    hit.normal = math::Vec3(callback.m_hitNormalWorld.x(), callback.m_hitNormalWorld.y(), callback.m_hitNormalWorld.z());
+    hit.fraction = callback.m_closestHitFraction;
+    hit.hit = true;
+    return true;
 }
 
 }

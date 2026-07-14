@@ -1,0 +1,138 @@
+#shader "Gizmo"
+#description "Transform gizmo with thick lines via geometry shader (DX-only)"
+
+#begin properties
+    uniform mat4 u_ViewProjection;
+    uniform mat4 u_Model;
+    uniform vec4 u_TintColor = vec4(1.0);
+    uniform float u_LineWidth = 2.0;
+    uniform vec2 u_ScreenSize = vec2(1920.0, 1080.0);
+    uniform float u_GizmoScale = 1.0;
+    uniform vec4 u_AxisColorX = vec4(1.0, 0.0, 0.0, 1.0);
+    uniform vec4 u_AxisColorY = vec4(0.0, 1.0, 0.0, 1.0);
+    uniform vec4 u_AxisColorZ = vec4(0.0, 0.0, 1.0, 1.0);
+    uniform int u_SelectedAxis = -1;
+#end properties
+
+#begin vertex
+    #input vec3 a_Position : POSITION 0
+    #input vec4 a_Color : COLOR 1
+    #input float a_AxisID : TEXCOORD0 2
+
+    #output vec4 v_WorldPos
+    #output vec4 v_Color
+    #output float v_AxisID
+
+    void main() {
+        // Scale gizmo
+        vec3 scaledPos = a_Position * u_GizmoScale;
+
+        // Transform to world space
+        vec4 worldPos = MUL(u_Model, vec4(scaledPos, 1.0));
+        v_WorldPos = worldPos;
+
+        // Determine axis color (select from X/Y/Z based on axis ID)
+        int axisID = int(a_AxisID);
+        vec4 axisColor = u_AxisColorX;
+        if (axisID == 1) { axisColor = u_AxisColorY; }
+        if (axisID == 2) { axisColor = u_AxisColorZ; }
+
+        // Highlight selected axis in yellow
+        if (axisID == u_SelectedAxis) {
+            axisColor = vec4(1.0, 1.0, 0.0, 1.0);
+        }
+
+        v_Color = axisColor * a_Color * u_TintColor;
+        v_AxisID = a_AxisID;
+        VERTEX_OUTPUT = MUL(u_ViewProjection, worldPos);
+    }
+#end vertex
+
+#begin geometry
+    #topology line
+    #maxvertices 4
+
+    #input vec4 position : SV_POSITION
+    #input vec4 v_WorldPos : TEXCOORD0
+    #input vec4 v_Color : COLOR
+    #input float v_AxisID : TEXCOORD1
+
+    #output vec4 position : SV_POSITION
+    #output vec4 v_Color : COLOR
+    #output vec2 v_LineCoord : TEXCOORD0
+    #output float v_AxisID : TEXCOORD1
+
+    void main() {
+        // Get clip-space positions from the two line endpoints
+        vec4 p0 = GS_INPUT_POSITION(0);
+        vec4 p1 = GS_INPUT_POSITION(1);
+
+        // Convert to NDC
+        vec2 ndc0 = p0.xy / p0.w;
+        vec2 ndc1 = p1.xy / p1.w;
+
+        // Calculate line direction in screen space
+        vec2 lineDir = ndc1 - ndc0;
+        float lineLength = length(lineDir);
+
+        // Avoid division by zero for degenerate lines
+        if (lineLength < 0.0001) {
+            return;
+        }
+
+        lineDir = lineDir / lineLength;
+
+        // Calculate perpendicular direction
+        vec2 perpDir = vec2(-lineDir.y, lineDir.x);
+
+        // Calculate offset in NDC space (accounting for aspect ratio)
+        vec2 aspect = vec2(1.0, u_ScreenSize.x / u_ScreenSize.y);
+        vec2 offset = perpDir * (u_LineWidth / u_ScreenSize.y) * aspect;
+
+        // Extend line slightly to avoid gaps at joints
+        vec2 extension = lineDir * (u_LineWidth * 0.5 / u_ScreenSize.y) * aspect;
+
+        // Vertex 0: Start point, negative offset
+        GS_POSITION = vec4((ndc0 - extension - offset) * p0.w, p0.z, p0.w);
+        v_Color = GS_INPUT(0, v_Color);
+        v_LineCoord = vec2(0.0, -1.0);
+        v_AxisID = GS_INPUT(0, v_AxisID);
+        GS_EMIT;
+
+        // Vertex 1: Start point, positive offset
+        GS_POSITION = vec4((ndc0 - extension + offset) * p0.w, p0.z, p0.w);
+        v_Color = GS_INPUT(0, v_Color);
+        v_LineCoord = vec2(0.0, 1.0);
+        v_AxisID = GS_INPUT(0, v_AxisID);
+        GS_EMIT;
+
+        // Vertex 2: End point, negative offset
+        GS_POSITION = vec4((ndc1 + extension - offset) * p1.w, p1.z, p1.w);
+        v_Color = GS_INPUT(1, v_Color);
+        v_LineCoord = vec2(1.0, -1.0);
+        v_AxisID = GS_INPUT(1, v_AxisID);
+        GS_EMIT;
+
+        // Vertex 3: End point, positive offset
+        GS_POSITION = vec4((ndc1 + extension + offset) * p1.w, p1.z, p1.w);
+        v_Color = GS_INPUT(1, v_Color);
+        v_LineCoord = vec2(1.0, 1.0);
+        v_AxisID = GS_INPUT(1, v_AxisID);
+        GS_EMIT;
+
+        GS_RESTART;
+    }
+#end geometry
+
+#begin fragment
+    #output vec4 FragColor
+
+    void main() {
+        float dist = abs(v_LineCoord.y);
+        float aa = 1.0 - smoothstep(0.7, 1.0, dist);
+        vec4 color = v_Color;
+        color.a *= aa;
+        if (color.a < 0.01) { DISCARD; }
+        FragColor = color;
+    }
+#end fragment

@@ -12,7 +12,8 @@ from .animators.sprite_animator import SpriteAnimatorTool
 from .art_tools.scribbler import ScribblerTool
 from .tiles.tileset2d_builder import Tileset2DBuilder
 from .tiles.tilemap2d_editor import TileMap2DEditor
+from .tiles.tilemap25d_editor import TileMap25DEditor
 from .art_tools.pixel_painter import PixelPainterTool
 from .art_tools.voxel_builder_simple import VoxelBuilderTool
 
-__all__ = ['NotepadTool', 'TodoListTool', 'SpriteAnimatorTool', 'AssetManager', 'ScribblerTool', 'Tileset2DBuilder', 'TileMap2DEditor', 'PixelPainterTool', 'VoxelBuilderTool', 'FeatureBugTrackerTool', 'GlobalsManagerTool']
+__all__ = ['NotepadTool', 'TodoListTool', 'SpriteAnimatorTool', 'AssetManager', 'ScribblerTool', 'Tileset2DBuilder', 'TileMap2DEditor', 'TileMap25DEditor', 'PixelPainterTool', 'VoxelBuilderTool', 'FeatureBugTrackerTool', 'GlobalsManagerTool']

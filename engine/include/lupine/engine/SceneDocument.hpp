@@ -12,6 +12,18 @@ namespace engine {
 using core::Scene;
 
 /**
+ * The kind of document a SceneDocument represents.
+ * A Scene document round-trips to a .scene file; a Prefab document edits a
+ * single-root node tree that round-trips to a .prefab file. Both share the
+ * exact same in-editor representation (a Scene with a root node), so all the
+ * editing tooling is identical - only the load/save format differs.
+ */
+enum class DocumentKind {
+    Scene,
+    Prefab
+};
+
+/**
  * Represents a scene document in the editor
  * Tracks a scene along with its file path, dirty state, and unique ID
  */
@@ -21,6 +33,18 @@ public:
     explicit SceneDocument(std::shared_ptr<Scene> scene);
     explicit SceneDocument(const std::string& scenePath);
     ~SceneDocument();
+
+    /**
+     * Gets the kind of document (Scene or Prefab)
+     * @return The document kind
+     */
+    DocumentKind GetKind() const { return m_Kind; }
+
+    /**
+     * Sets the kind of document (controls the load/save file format)
+     * @param kind The document kind
+     */
+    void SetKind(DocumentKind kind) { m_Kind = kind; }
 
     /**
      * Gets the unique ID of this scene document
@@ -90,6 +114,16 @@ public:
     static std::shared_ptr<SceneDocument> Open(const std::string& scenePath);
 
     /**
+     * Opens a prefab from a .prefab file as an editable document.
+     * The prefab's node tree is instantiated (preserving its UUIDs) into a
+     * fresh Scene so it can be edited with the normal scene tooling. The
+     * resulting document has kind Prefab, so Save() writes the .prefab format.
+     * @param prefabPath Path to the .prefab file
+     * @return Shared pointer to the scene document, or nullptr if failed
+     */
+    static std::shared_ptr<SceneDocument> OpenPrefab(const std::string& prefabPath);
+
+    /**
      * Saves the scene to its current file path
      * @return True if saved successfully, false otherwise
      */
@@ -109,10 +143,18 @@ public:
     bool Close();
 
 private:
+    /**
+     * Writes the document's root node tree to a .prefab file.
+     * @param filePath Destination path
+     * @return True if saved successfully, false otherwise
+     */
+    bool SaveAsPrefab(const std::string& filePath);
+
     core::UUID m_ID;
     std::shared_ptr<Scene> m_Scene;
     std::string m_FilePath;
     bool m_IsDirty;
+    DocumentKind m_Kind = DocumentKind::Scene;
 };
 
 } // namespace engine

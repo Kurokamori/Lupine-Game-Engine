@@ -1,6 +1,7 @@
 #include "lupine/engine/EditorSession.hpp"
 #include "lupine/core/Core.hpp"
 #include "lupine/core/Project.hpp"
+#include "lupine/asset/AssetDatabase.hpp"
 #include "lupine/platform/Platform.hpp"
 #include "lupine/platform/VirtualFileSystem.hpp"
 #include "lupine/logger/Logger.hpp"
@@ -18,6 +19,9 @@
     #endif
     #ifdef MoveFile
         #undef MoveFile
+    #endif
+    #ifdef GetCurrentDirectory
+        #undef GetCurrentDirectory
     #endif
 #endif
 
@@ -106,6 +110,34 @@ bool EditorSession::CreateProject(const std::string& projectPath, const std::str
     platform::FileSystem::CreateDirectory(platform::Path::Join(baseDir, "component"), true);
     platform::FileSystem::CreateDirectory(platform::Path::Join(baseDir, "prefab"), true);
 
+    // Create splash screen assets directory
+    platform::FileSystem::CreateDirectory(platform::Path::Join(baseDir, "assets/splash"), true);
+
+    // Try to copy default splash image from engine resources
+    // Check multiple potential locations for the default splash
+    auto cwdResult = platform::FileSystem::GetCurrentDirectory();
+    std::string defaultSplashDst = platform::Path::Join(baseDir, "assets/splash/lupine_splash.png");
+    bool splashCopied = false;
+
+    if (cwdResult.success) {
+        // Try current working directory first
+        std::string defaultSplashSrc = platform::Path::Join(cwdResult.data, "resources/default_splash.png");
+        if (platform::FileSystem::Exists(defaultSplashSrc)) {
+            auto copyResult = platform::FileSystem::CopyFile(defaultSplashSrc, defaultSplashDst, false);
+            splashCopied = copyResult.success;
+        }
+    }
+
+    if (splashCopied) {
+        // Add default splash entry to project settings
+        core::SplashScreenEntry defaultEntry;
+        defaultEntry.imagePath = "res://assets/splash/lupine_splash.png";
+        defaultEntry.fadeInDuration = 0.3f;
+        defaultEntry.holdDuration = 2.0f;
+        defaultEntry.fadeOutDuration = 0.3f;
+        m_Project->GetSettings().splashScreenSettings.entries.push_back(defaultEntry);
+    }
+
     if (!m_Project->SaveAs(projectPath)) {
 
         m_Project.reset();
@@ -141,6 +173,22 @@ bool EditorSession::OpenProject(const std::string& projectPath) {
 
         m_Project.reset();
         return false;
+    }
+
+    // Initialize AssetDatabase with project root
+    std::string projectDir = m_Project->GetProjectDirectory();
+    auto& assetDb = asset::AssetDatabase::GetInstance();
+    if (!assetDb.IsInitialized()) {
+        assetDb.Initialize(projectDir);
+    }
+
+    // Set the default font from project settings
+    assetDb.SetDefaultFontPath(m_Project->GetSettings().defaultFont);
+
+    // Push the project's configured default UI theme to the bridge so its
+    // ScanProjectTypes/ReloadTheme load the right theme for the viewport.
+    if (m_EditorBridge) {
+        m_EditorBridge->SetDefaultThemePath(m_Project->GetSettings().defaultTheme);
     }
 
     m_RecentProjects.AddOrUpdateProject(projectPath, m_Project->GetSettings().projectName);
@@ -202,6 +250,34 @@ std::shared_ptr<SceneDocument> EditorSession::OpenScene(const std::string& scene
     }
 
     auto sceneDoc = SceneDocument::Open(scenePath);
+    if (!sceneDoc) {
+
+        return nullptr;
+    }
+
+    AddSceneDocument(sceneDoc);
+
+    if (!m_ActiveSceneID.IsValid()) {
+        SetActiveScene(sceneDoc->GetID());
+    }
+
+    return sceneDoc;
+}
+
+std::shared_ptr<SceneDocument> EditorSession::OpenPrefab(const std::string& prefabPath) {
+    if (!m_Initialized) {
+
+        return nullptr;
+    }
+
+    auto existingDoc = GetSceneDocumentByPath(prefabPath);
+    if (existingDoc) {
+
+        SetActiveScene(existingDoc->GetID());
+        return existingDoc;
+    }
+
+    auto sceneDoc = SceneDocument::OpenPrefab(prefabPath);
     if (!sceneDoc) {
 
         return nullptr;

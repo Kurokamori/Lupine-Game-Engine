@@ -8,13 +8,54 @@ in vec2 v_TexCoord;
 in vec4 v_Color;
 in vec3 v_ViewDir;
 
-// Material textures
+uniform mat4 u_ViewProjection;
+uniform mat4 u_View;
+uniform mat4 u_Model;
+uniform mat4 u_NormalMatrix;
+uniform vec3 u_CameraPosition;
+uniform vec4 u_TintColor;
+uniform vec4 u_AlbedoColor;
+uniform vec4 u_EmissiveColor;
+uniform vec4 u_MaterialParams1;
+uniform vec4 u_MaterialParams2;
+uniform vec4 u_TextureFlags;
+uniform int u_ReceiveShadow;
+uniform bool u_UseSkinning;
+uniform mat4 u_BoneTransforms[128];
 uniform sampler2D u_AlbedoTexture;
 uniform sampler2D u_MetallicRoughnessTexture;
 uniform sampler2D u_NormalTexture;
 uniform sampler2D u_EmissiveTexture;
 
-// Shadow map textures (up to 32 shadow maps for cascades)
+struct Light {
+    vec4 positionOrDirection;
+    vec4 direction;
+    vec4 color;
+    vec4 params;
+    vec4 flags;
+};
+struct ShadowMap {
+    mat4 lightSpaceMatrix;
+    vec4 shadowParams;
+    vec4 shadowParams2;
+};
+struct CascadedShadowMap {
+    mat4 cascadeMatrices[8];
+    vec4 cascadeSplits;
+    vec4 cascadeSplits2;
+    vec4 cascadeParams;
+    vec4 cascadeParams2;
+};
+layout(std140) uniform LightData {
+    Light lights[16];
+    ShadowMap shadowMaps[8];
+    CascadedShadowMap cascadedShadowMaps[8];
+    vec4 ambientLight;
+    vec4 lightCounts;
+    vec4 fogColor;
+    vec4 fogParams;
+} u_Lights;
+
 uniform sampler2D u_ShadowMap0;
 uniform sampler2D u_ShadowMap1;
 uniform sampler2D u_ShadowMap2;
@@ -23,32 +64,6 @@ uniform sampler2D u_ShadowMap4;
 uniform sampler2D u_ShadowMap5;
 uniform sampler2D u_ShadowMap6;
 uniform sampler2D u_ShadowMap7;
-uniform sampler2D u_ShadowMap8;
-uniform sampler2D u_ShadowMap9;
-uniform sampler2D u_ShadowMap10;
-uniform sampler2D u_ShadowMap11;
-uniform sampler2D u_ShadowMap12;
-uniform sampler2D u_ShadowMap13;
-uniform sampler2D u_ShadowMap14;
-uniform sampler2D u_ShadowMap15;
-uniform sampler2D u_ShadowMap16;
-uniform sampler2D u_ShadowMap17;
-uniform sampler2D u_ShadowMap18;
-uniform sampler2D u_ShadowMap19;
-uniform sampler2D u_ShadowMap20;
-uniform sampler2D u_ShadowMap21;
-uniform sampler2D u_ShadowMap22;
-uniform sampler2D u_ShadowMap23;
-uniform sampler2D u_ShadowMap24;
-uniform sampler2D u_ShadowMap25;
-uniform sampler2D u_ShadowMap26;
-uniform sampler2D u_ShadowMap27;
-uniform sampler2D u_ShadowMap28;
-uniform sampler2D u_ShadowMap29;
-uniform sampler2D u_ShadowMap30;
-uniform sampler2D u_ShadowMap31;
-
-// Cube map shadow textures for point lights (up to 8)
 uniform samplerCube u_ShadowCubeMap0;
 uniform samplerCube u_ShadowCubeMap1;
 uniform samplerCube u_ShadowCubeMap2;
@@ -58,390 +73,285 @@ uniform samplerCube u_ShadowCubeMap5;
 uniform samplerCube u_ShadowCubeMap6;
 uniform samplerCube u_ShadowCubeMap7;
 
-// Material properties
-uniform vec4 u_AlbedoColor;
-uniform vec4 u_EmissiveColor;
-uniform vec4 u_MaterialParams1; // metallic, roughness, normalScale, emissiveStrength
-uniform vec4 u_MaterialParams2; // alphaCutoff, aoStrength, heightScale, unused
-uniform vec4 u_TextureFlags;    // useAlbedo, useMetallicRoughness, useNormal, useEmissive
-uniform vec4 u_TintColor;
-uniform bool u_ReceiveShadow;
+float sampleShadowMap(int index, vec2 uv) {
+    if (index == 0) return texture(u_ShadowMap0, uv).r;
+    else if (index == 1) return texture(u_ShadowMap1, uv).r;
+    else if (index == 2) return texture(u_ShadowMap2, uv).r;
+    else if (index == 3) return texture(u_ShadowMap3, uv).r;
+    else if (index == 4) return texture(u_ShadowMap4, uv).r;
+    else if (index == 5) return texture(u_ShadowMap5, uv).r;
+    else if (index == 6) return texture(u_ShadowMap6, uv).r;
+    else if (index == 7) return texture(u_ShadowMap7, uv).r;
+    return 1.0;
+}
 
-// Light data structure (matches GPULightData in Light.hpp)
-struct Light {
-    vec4 positionOrDirection; // w=0 for directional, w=1 for point/spot
-    vec4 direction;           // xyz=direction for spot/directional lights, w=unused
-    vec4 color;               // RGB + intensity in w
-    vec4 params;              // x=range, y=innerConeAngle, z=outerConeAngle, w=attenuation
-    vec4 flags;               // x=type, y=castShadows, z=shadowMapIndex, w=unused
-};
-
-// Shadow map data structure
-struct ShadowMap {
-    mat4 lightSpaceMatrix;   // Light space transformation matrix
-    vec4 shadowParams;       // x=bias, y=normalBias, z=shadowBlur, w=shadowOpacity
-    vec4 shadowParams2;      // x=shadowResolution, y=isCubeMap, z=lightRange (for cube maps), w=unused
-};
-
-// Cascaded shadow map data structure
-struct CascadedShadowMap {
-    mat4 cascadeMatrices[8]; // Light space matrix for each cascade
-    vec4 cascadeSplits;      // Split distances for cascades 0-3 (x, y, z, w)
-    vec4 cascadeSplits2;     // Split distances for cascades 4-7 (x, y, z, w)
-    vec4 cascadeParams;      // x=cascadeCount, y=bias, z=normalBias, w=baseShadowMapIndex
-};
-
-// Light uniform buffer (std140 layout, binding point 0)
-layout(std140) uniform LightData {
-    Light lights[16];
-    ShadowMap shadowMaps[8];
-    CascadedShadowMap cascadedShadowMaps[8];
-    vec4 ambientLight;       // RGB + intensity
-    vec4 lightCounts;        // x=numLights, y=numShadowMaps, z=numCascadedShadowMaps, w=unused
-} u_Lights;
+float sampleShadowCubeMap(int index, vec3 dir) {
+    vec4 s;
+    if (index == 0) s = texture(u_ShadowCubeMap0, dir);
+    else if (index == 1) s = texture(u_ShadowCubeMap1, dir);
+    else if (index == 2) s = texture(u_ShadowCubeMap2, dir);
+    else if (index == 3) s = texture(u_ShadowCubeMap3, dir);
+    else if (index == 4) s = texture(u_ShadowCubeMap4, dir);
+    else if (index == 5) s = texture(u_ShadowCubeMap5, dir);
+    else if (index == 6) s = texture(u_ShadowCubeMap6, dir);
+    else if (index == 7) s = texture(u_ShadowCubeMap7, dir);
+    else return 1.0;
+    return s.r;
+}
 
 out vec4 FragColor;
 
-const float PI = 3.14159265359;
-
-// Normal mapping
-vec3 getNormalFromMap() {
-    if (u_TextureFlags.z < 0.5) {
-        return normalize(v_Normal);
+float calculateShadowPCF(mat4 lsMatrix, int smIndex, vec3 wPos, vec3 N, vec3 lDir,
+                         float bias, float nBias, float blur, float opacity, float res) {
+    vec4 lsPos = (lsMatrix * vec4(wPos, 1.0));
+    vec3 proj = lsPos.xyz / lsPos.w;
+    proj = proj * 0.5 + 0.5;
+    if (proj.z > 1.0 || proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0)
+        return 1.0;
+    float curDepth = proj.z;
+    float NdL = max(dot(N, lDir), 0.0);
+    float fBias = mix(bias * 2.0, bias, NdL);
+    float shadow = 0.0;
+    vec2 texelSz = 1.0 / vec2(res, res);
+    int kr = clamp(int(blur), 1, 3);
+    int sc = 0;
+    for (int x = -kr; x <= kr; ++x) {
+        for (int y = -kr; y <= kr; ++y) {
+            vec2 off = vec2(float(x), float(y)) * texelSz * blur;
+            float d = sampleShadowMap(smIndex, proj.xy + off);
+            shadow += curDepth - fBias > d ? 1.0 : 0.0;
+            sc++;
+        }
     }
+    shadow /= float(sc);
+    shadow *= opacity;
+    return 1.0 - shadow;
+}
 
-    vec3 tangentNormal = texture(u_NormalTexture, v_TexCoord).xyz * 2.0 - 1.0;
-    tangentNormal.xy *= u_MaterialParams1.z; // normalScale
+float calculateShadowCube(int cmIndex, vec3 lPos, vec3 wPos, vec3 N,
+                          float bias, float blur, float opacity, float lRange) {
+    vec3 frag2light = wPos - lPos;
+    float curDepth = length(frag2light);
+    float normDepth = curDepth / lRange;
+    vec3 sDir = normalize(frag2light);
+    float closest = sampleShadowCubeMap(cmIndex, sDir);
+    vec3 lDir2 = -sDir;
+    float NdL = max(dot(N, lDir2), 0.0);
+    float nBias = bias / lRange;
+    float fBias = mix(nBias * 3.0, nBias * 0.5, NdL);
+    float shadow = (normDepth - fBias) > closest ? 1.0 : 0.0;
+    shadow *= opacity;
+    return 1.0 - shadow;
+}
 
-    // Construct TBN matrix
+float calculateShadow(int smIndex, vec3 wPos, vec3 N, vec3 lDir, vec3 lPos) {
+    if (smIndex < 0 || smIndex >= 8) return 1.0;
+    ShadowMap sm = u_Lights.shadowMaps[smIndex];
+    bool isCube = sm.shadowParams2.y > 0.5;
+    if (isCube) {
+        float lRange = sm.shadowParams2.z;
+        return calculateShadowCube(smIndex, lPos, wPos, N,
+            sm.shadowParams.x, sm.shadowParams.z, sm.shadowParams.w, lRange);
+    } else {
+        return calculateShadowPCF(sm.lightSpaceMatrix, smIndex, wPos, N, lDir,
+            sm.shadowParams.x, sm.shadowParams.y, sm.shadowParams.z,
+            sm.shadowParams.w, sm.shadowParams2.x);
+    }
+}
+
+vec3 applyFog(vec3 color, vec3 wPos, vec3 camPos) {
+    if (u_Lights.fogColor.w < 0.5) {
+        return color;
+    }
+    float dist = length(wPos - camPos);
+    float density = u_Lights.fogParams.x;
+    float fogStart = u_Lights.fogParams.y;
+    float fogEnd = u_Lights.fogParams.z;
+    int mode = int(u_Lights.fogParams.w);
+    float factor = 1.0;
+    if (mode == 0) {
+        factor = clamp((fogEnd - dist) / max(fogEnd - fogStart, 0.0001), 0.0, 1.0);
+    } else if (mode == 1) {
+        factor = exp(-density * max(dist - fogStart, 0.0));
+    } else {
+        float dd = density * max(dist - fogStart, 0.0);
+        factor = exp(-dd * dd);
+    }
+    return mix(u_Lights.fogColor.rgb, color, clamp(factor, 0.0, 1.0));
+}
+
+vec3 getNormalFromMap() {
+    if (u_TextureFlags.z < 0.5)
+        return normalize(v_Normal);
+    vec3 tNorm = texture(u_NormalTexture, v_TexCoord).xyz * 2.0 - 1.0;
+    tNorm.xy *= u_MaterialParams1.z;
     vec3 Q1 = dFdx(v_WorldPos);
     vec3 Q2 = dFdy(v_WorldPos);
     vec2 st1 = dFdx(v_TexCoord);
     vec2 st2 = dFdy(v_TexCoord);
-
-    vec3 N = normalize(v_Normal);
-    vec3 T = normalize(Q1 * st2.t - Q2 * st1.t);
-    vec3 B = -normalize(cross(N, T));
-    mat3 TBN = mat3(T, B, N);
-
-    return normalize(TBN * tangentNormal);
+    vec3 Nn = normalize(v_Normal);
+    vec3 T = normalize(Q1 * st2.y - Q2 * st1.y);
+    vec3 B = -normalize(cross(Nn, T));
+    mat3 TBN = mat3(T, B, Nn);
+    return normalize(TBN * tNorm);
 }
 
-// PBR functions (same as p_b_r.frag)
-float DistributionGGX(vec3 N, vec3 H, float roughness) {
-    float a = roughness * roughness;
-    float a2 = a * a;
-    float NdotH = max(dot(N, H), 0.0);
-    float NdotH2 = NdotH * NdotH;
-    float nom = a2;
-    float denom = (NdotH2 * (a2 - 1.0) + 1.0);
-    denom = PI * denom * denom;
-    return nom / denom;
-}
+    const float PI = 3.14159265359;
 
-float GeometrySchlickGGX(float NdotV, float roughness) {
-    float r = (roughness + 1.0);
-    float k = (r * r) / 8.0;
-    float nom = NdotV;
-    float denom = NdotV * (1.0 - k) + k;
-    return nom / denom;
-}
-
-float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
-    float NdotV = max(dot(N, V), 0.0);
-    float NdotL = max(dot(N, L), 0.0);
-    float ggx2 = GeometrySchlickGGX(NdotV, roughness);
-    float ggx1 = GeometrySchlickGGX(NdotL, roughness);
-    return ggx1 * ggx2;
-}
-
-vec3 fresnelSchlick(float cosTheta, vec3 F0) {
-    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
-}
-
-// Sample shadow cube map based on index
-float sampleShadowCubeMap(int cubeMapIndex, vec3 direction) {
-    if (cubeMapIndex == 0) return texture(u_ShadowCubeMap0, direction).r;
-    if (cubeMapIndex == 1) return texture(u_ShadowCubeMap1, direction).r;
-    if (cubeMapIndex == 2) return texture(u_ShadowCubeMap2, direction).r;
-    if (cubeMapIndex == 3) return texture(u_ShadowCubeMap3, direction).r;
-    if (cubeMapIndex == 4) return texture(u_ShadowCubeMap4, direction).r;
-    if (cubeMapIndex == 5) return texture(u_ShadowCubeMap5, direction).r;
-    if (cubeMapIndex == 6) return texture(u_ShadowCubeMap6, direction).r;
-    if (cubeMapIndex == 7) return texture(u_ShadowCubeMap7, direction).r;
-    return 1.0;
-}
-
-// Sample shadow map based on index
-float sampleShadowMap(int shadowMapIndex, vec2 uv) {
-    if (shadowMapIndex == 0) return texture(u_ShadowMap0, uv).r;
-    if (shadowMapIndex == 1) return texture(u_ShadowMap1, uv).r;
-    if (shadowMapIndex == 2) return texture(u_ShadowMap2, uv).r;
-    if (shadowMapIndex == 3) return texture(u_ShadowMap3, uv).r;
-    if (shadowMapIndex == 4) return texture(u_ShadowMap4, uv).r;
-    if (shadowMapIndex == 5) return texture(u_ShadowMap5, uv).r;
-    if (shadowMapIndex == 6) return texture(u_ShadowMap6, uv).r;
-    if (shadowMapIndex == 7) return texture(u_ShadowMap7, uv).r;
-    if (shadowMapIndex == 8) return texture(u_ShadowMap8, uv).r;
-    if (shadowMapIndex == 9) return texture(u_ShadowMap9, uv).r;
-    if (shadowMapIndex == 10) return texture(u_ShadowMap10, uv).r;
-    if (shadowMapIndex == 11) return texture(u_ShadowMap11, uv).r;
-    if (shadowMapIndex == 12) return texture(u_ShadowMap12, uv).r;
-    if (shadowMapIndex == 13) return texture(u_ShadowMap13, uv).r;
-    if (shadowMapIndex == 14) return texture(u_ShadowMap14, uv).r;
-    if (shadowMapIndex == 15) return texture(u_ShadowMap15, uv).r;
-    if (shadowMapIndex == 16) return texture(u_ShadowMap16, uv).r;
-    if (shadowMapIndex == 17) return texture(u_ShadowMap17, uv).r;
-    if (shadowMapIndex == 18) return texture(u_ShadowMap18, uv).r;
-    if (shadowMapIndex == 19) return texture(u_ShadowMap19, uv).r;
-    if (shadowMapIndex == 20) return texture(u_ShadowMap20, uv).r;
-    if (shadowMapIndex == 21) return texture(u_ShadowMap21, uv).r;
-    if (shadowMapIndex == 22) return texture(u_ShadowMap22, uv).r;
-    if (shadowMapIndex == 23) return texture(u_ShadowMap23, uv).r;
-    if (shadowMapIndex == 24) return texture(u_ShadowMap24, uv).r;
-    if (shadowMapIndex == 25) return texture(u_ShadowMap25, uv).r;
-    if (shadowMapIndex == 26) return texture(u_ShadowMap26, uv).r;
-    if (shadowMapIndex == 27) return texture(u_ShadowMap27, uv).r;
-    if (shadowMapIndex == 28) return texture(u_ShadowMap28, uv).r;
-    if (shadowMapIndex == 29) return texture(u_ShadowMap29, uv).r;
-    if (shadowMapIndex == 30) return texture(u_ShadowMap30, uv).r;
-    if (shadowMapIndex == 31) return texture(u_ShadowMap31, uv).r;
-    return 1.0;
-}
-
-// Calculate shadow factor for cube map (point lights)
-float calculateShadowCube(int cubeMapIndex, vec3 lightPos, vec3 worldPos, vec3 normal, float bias, float shadowBlur, float shadowOpacity, float lightRange) {
-    // Calculate direction from light to fragment
-    vec3 fragToLight = worldPos - lightPos;
-    float currentDepth = length(fragToLight);
-
-    // Normalize current depth to [0,1] range
-    float normalizedCurrentDepth = currentDepth / lightRange;
-
-    // Normalize direction for sampling
-    vec3 sampleDir = normalize(fragToLight);
-
-    // Sample the cube map (already stores normalized linear depth in [0,1])
-    float closestDepth = sampleShadowCubeMap(cubeMapIndex, sampleDir);
-
-    // Compare depths (both in [0,1] range)
-    float shadow = (normalizedCurrentDepth - bias > closestDepth) ? 0.0 : 1.0;
-
-    // Apply shadow opacity
-    shadow = mix(1.0, shadow, shadowOpacity);
-
-    return shadow;
-}
-
-// Calculate shadow with PCF
-float calculateShadowPCF(mat4 lightSpaceMatrix, int shadowMapIndex, vec3 worldPos, vec3 normal, vec3 lightDir,
-                        float bias, float normalBias, float shadowBlur, float shadowOpacity, float shadowResolution) {
-    // Transform world position to light space
-    vec4 fragPosLightSpace = lightSpaceMatrix * vec4(worldPos, 1.0);
-
-    // Perform perspective divide
-    vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
-
-    // Transform to [0,1] range
-    projCoords = projCoords * 0.5 + 0.5;
-
-    // Check if fragment is outside light frustum
-    if (projCoords.z > 1.0 || projCoords.x < 0.0 || projCoords.x > 1.0 ||
-        projCoords.y < 0.0 || projCoords.y > 1.0) {
-        return 1.0; // No shadow
+    vec3 fresnelSchlick(float cosTheta, vec3 F0) {
+        return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
     }
 
-    // Get current depth
-    float currentDepth = projCoords.z;
-
-    // Apply normal bias
-    float NdotL = max(dot(normal, lightDir), 0.0);
-    float biasAdjusted = bias + normalBias * sqrt(1.0 - NdotL * NdotL);
-
-    // PCF (Percentage Closer Filtering)
-    float shadow = 0.0;
-    vec2 texelSize = 1.0 / vec2(shadowResolution, shadowResolution);
-    int pcfRadius = int(shadowBlur);
-    int pcfSamples = 0;
-
-    for (int x = -pcfRadius; x <= pcfRadius; ++x) {
-        for (int y = -pcfRadius; y <= pcfRadius; ++y) {
-            vec2 offset = vec2(x, y) * texelSize;
-            float pcfDepth = sampleShadowMap(shadowMapIndex, projCoords.xy + offset);
-            shadow += (currentDepth - biasAdjusted > pcfDepth) ? 0.0 : 1.0;
-            pcfSamples++;
-        }
-    }
-    shadow /= float(pcfSamples);
-
-    // Apply shadow opacity
-    shadow = mix(1.0, shadow, shadowOpacity);
-
-    return shadow;
-}
-
-// Calculate shadow (dispatches to appropriate shadow calculation method)
-float calculateShadow(int shadowMapIndex, vec3 worldPos, vec3 normal, vec3 lightDir, vec3 lightPos) {
-    if (shadowMapIndex < 0 || shadowMapIndex >= 8) {
-        return 1.0; // No shadow
+    float distributionGGX(vec3 N, vec3 H, float roughness) {
+        float a = roughness * roughness;
+        float a2 = a * a;
+        float NdotH = max(dot(N, H), 0.0);
+        float NdotH2 = NdotH * NdotH;
+        float denom = (NdotH2 * (a2 - 1.0) + 1.0);
+        denom = PI * denom * denom;
+        return a2 / denom;
     }
 
-    ShadowMap shadowMap = u_Lights.shadowMaps[shadowMapIndex];
-
-    // Check if this is a cube map shadow (for point lights)
-    bool isCubeMap = shadowMap.shadowParams2.y > 0.5;
-
-    if (isCubeMap) {
-        // Use cube map shadow calculation for point lights
-        float lightRange = shadowMap.shadowParams2.z;
-        return calculateShadowCube(shadowMapIndex, lightPos, worldPos, normal,
-                                  shadowMap.shadowParams.x, shadowMap.shadowParams.z,
-                                  shadowMap.shadowParams.w, lightRange);
-    } else {
-        // Use standard 2D shadow map calculation
-        return calculateShadowPCF(shadowMap.lightSpaceMatrix, shadowMapIndex, worldPos, normal, lightDir,
-                                  shadowMap.shadowParams.x, shadowMap.shadowParams.y,
-                                  shadowMap.shadowParams.z, shadowMap.shadowParams.w,
-                                  shadowMap.shadowParams2.x);
-    }
-}
-
-void main() {
-    // Sample textures
-    vec4 albedo = u_AlbedoColor;
-    if (u_TextureFlags.x > 0.5) {
-        albedo *= texture(u_AlbedoTexture, v_TexCoord);
+    float geometrySchlickGGX(float NdotV, float roughness) {
+        float r = (roughness + 1.0);
+        float k = (r * r) / 8.0;
+        return NdotV / (NdotV * (1.0 - k) + k);
     }
 
-    // Alpha test
-    if (albedo.a < u_MaterialParams2.x) {
-        discard;
-    }
-
-    float metallic = u_MaterialParams1.x;
-    float roughness = u_MaterialParams1.y;
-    if (u_TextureFlags.y > 0.5) {
-        vec4 mr = texture(u_MetallicRoughnessTexture, v_TexCoord);
-        metallic *= mr.b;
-        roughness *= mr.g;
-    }
-
-    vec3 N = getNormalFromMap();
-    vec3 V = normalize(v_ViewDir);
-
-    vec3 F0 = vec3(0.04);
-    F0 = mix(F0, albedo.rgb, metallic);
-
-    vec3 Lo = vec3(0.0);
-    int numLights = int(u_Lights.lightCounts.x);
-
-    for (int i = 0; i < numLights && i < 16; ++i) {
-        Light light = u_Lights.lights[i];
-        int lightType = int(light.flags.x);
-        bool castsShadows = light.flags.y > 0.5;
-        int shadowMapIndex = int(light.flags.z);
-
-        vec3 L;
-        float attenuation = 1.0;
-
-        // Calculate light direction and attenuation based on type
-        if (lightType == 0) {
-            // Directional light
-            L = normalize(-light.direction.xyz);
-        } else if (lightType == 1) {
-            // Point light
-            vec3 lightPos = light.positionOrDirection.xyz;
-            vec3 lightDir = lightPos - v_WorldPos;
-            float distance = length(lightDir);
-            L = normalize(lightDir);
-
-            float range = light.params.x;
-            float attenuationExp = light.params.w;
-
-            // Distance-based attenuation with configurable exponent
-            // Using inverse square law as base, modified by attenuation exponent
-            float distanceFactor = distance / range;
-            attenuation = 1.0 / (1.0 + pow(distanceFactor, attenuationExp));
-
-            // Smooth cutoff at range boundary
-            attenuation *= smoothstep(1.0, 0.5, distanceFactor);
-        } else if (lightType == 2) {
-            // Spot light
-            vec3 lightPos = light.positionOrDirection.xyz;
-            vec3 lightDir = lightPos - v_WorldPos;
-            float distance = length(lightDir);
-            L = normalize(lightDir);
-
-            vec3 spotDir = normalize(light.direction.xyz);
-            float theta = dot(L, -spotDir);
-            float innerCutoff = light.params.y; // Already cosine
-            float outerCutoff = light.params.z; // Already cosine
-
-            // Calculate spot intensity with smooth falloff
-            // Use max to prevent division by zero when inner and outer cutoffs are too close
-            float epsilon = max(innerCutoff - outerCutoff, 0.0001);
-            float spotIntensity = clamp((theta - outerCutoff) / epsilon, 0.0, 1.0);
-            // Apply smooth curve for better visual falloff
-            spotIntensity = smoothstep(0.0, 1.0, spotIntensity);
-
-            float range = light.params.x;
-            float attenuationExp = light.params.w;
-
-            // Distance-based attenuation with configurable exponent
-            float distanceFactor = clamp(distance / range, 0.0, 1.0);
-            attenuation = 1.0 / (1.0 + pow(distanceFactor, attenuationExp));
-
-            // Smooth cutoff at range boundary
-            attenuation *= smoothstep(1.0, 0.5, distanceFactor);
-
-            // Apply spot intensity to attenuation
-            attenuation *= spotIntensity;
-        }
-
-        vec3 H = normalize(V + L);
-
-        float NDF = DistributionGGX(N, H, roughness);
-        float G = GeometrySmith(N, V, L, roughness);
-        vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
-
-        vec3 kS = F;
-        vec3 kD = vec3(1.0) - kS;
-        kD *= 1.0 - metallic;
-
-        vec3 numerator = NDF * G * F;
-        float denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001;
-        vec3 specular = numerator / denominator;
-
+    float geometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
+        float NdotV = max(dot(N, V), 0.0);
         float NdotL = max(dot(N, L), 0.0);
+        return geometrySchlickGGX(NdotV, roughness) * geometrySchlickGGX(NdotL, roughness);
+    }
 
-        // Calculate shadow
-        float shadow = 1.0;
-        if (u_ReceiveShadow && castsShadows && shadowMapIndex >= 0) {
-            // All lights with shadows use the standard shadow map path
-            // (spot, omni, and directional lights all use non-cascaded shadows for now)
-            vec3 lightPos = light.positionOrDirection.xyz;
-            shadow = calculateShadow(shadowMapIndex, v_WorldPos, N, L, lightPos);
+
+    void main() {
+        // Material parameters
+        float metallic = u_MaterialParams1.x;
+        float roughness = u_MaterialParams1.y;
+        float emissiveStrength = u_MaterialParams1.w;
+        float alphaCutoff = u_MaterialParams2.x;
+        float aoStrength = u_MaterialParams2.y;
+
+        // Base albedo (don't multiply by v_Color — imported models may lack vertex colors)
+        vec4 albedoSample = u_AlbedoColor;
+        if (u_TextureFlags.x > 0.5) {
+            albedoSample *= texture(u_AlbedoTexture, v_TexCoord);
         }
 
-        vec3 radiance = light.color.rgb * light.color.w * attenuation;
-        Lo += (kD * albedo.rgb / PI + specular) * radiance * NdotL * shadow;
+        // Alpha test
+        if (alphaCutoff > 0.0 && albedoSample.a < alphaCutoff) {
+            discard;
+        }
+
+        vec3 albedo = albedoSample.rgb;
+
+        // Metallic / roughness from texture
+        if (u_TextureFlags.y > 0.5) {
+            vec4 mrSample = texture(u_MetallicRoughnessTexture, v_TexCoord);
+            metallic = mrSample.b;
+            roughness = mrSample.g;
+        }
+        roughness = clamp(roughness, 0.04, 1.0);
+
+        // Normal mapping via #feature normal_mapping
+        vec3 N = getNormalFromMap();
+
+        vec3 V = normalize(v_ViewDir);
+
+        // Dielectric F0 = 0.04, metallic lerps toward albedo
+        vec3 F0 = mix(vec3(0.04), albedo, metallic);
+
+        // Accumulate lighting from all lights
+        vec3 Lo = vec3(0.0);
+        int numLights = int(u_Lights.lightCounts.x);
+
+        for (int i = 0; i < 16; ++i) {
+            if (i >= numLights) break;
+
+            int lightType = int(u_Lights.lights[i].flags.x);
+            vec3 lightPos = u_Lights.lights[i].positionOrDirection.xyz;
+            vec3 lightColor = u_Lights.lights[i].color.rgb * u_Lights.lights[i].color.w;
+
+            vec3 L;
+            float attenuation = 1.0;
+
+            if (lightType == 0) {
+                // Directional light
+                L = normalize(-u_Lights.lights[i].direction.xyz);
+            } else if (lightType == 1) {
+                // Point light
+                vec3 toLight = lightPos - v_WorldPos;
+                float dist = length(toLight);
+                L = normalize(toLight);
+                float range = u_Lights.lights[i].params.x;
+                float distFactor = dist / range;
+                attenuation = 1.0 / (1.0 + distFactor * distFactor);
+                attenuation *= smoothstep(1.0, 0.5, distFactor);
+            } else {
+                // Spot light
+                vec3 toLight = lightPos - v_WorldPos;
+                float dist = length(toLight);
+                L = normalize(toLight);
+                vec3 spotDir = normalize(u_Lights.lights[i].direction.xyz);
+                float theta = dot(L, -spotDir);
+                float innerCutoff = u_Lights.lights[i].params.y;
+                float outerCutoff = u_Lights.lights[i].params.z;
+                float epsilon = max(innerCutoff - outerCutoff, 0.0001);
+                float spotIntensity = clamp((theta - outerCutoff) / epsilon, 0.0, 1.0);
+                float range = u_Lights.lights[i].params.x;
+                float distFactor = clamp(dist / range, 0.0, 1.0);
+                attenuation = 1.0 / (1.0 + distFactor * distFactor);
+                attenuation *= smoothstep(1.0, 0.5, distFactor);
+                attenuation *= spotIntensity;
+            }
+
+            vec3 H = normalize(V + L);
+            float NdotL = max(dot(N, L), 0.0);
+
+            // Shadow
+            float shadow = 1.0;
+            if (u_ReceiveShadow != 0 && u_Lights.lights[i].flags.y > 0.5) {
+                shadow = calculateShadow(int(u_Lights.lights[i].flags.z), v_WorldPos, N, L, lightPos);
+            }
+
+            // Cook-Torrance BRDF
+            float D = distributionGGX(N, H, roughness);
+            float G = geometrySmith(N, V, L, roughness);
+            vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
+
+            vec3 numerator = D * G * F;
+            float denominator = 4.0 * max(dot(N, V), 0.0) * NdotL + 0.0001;
+            vec3 specular = numerator / denominator;
+
+            vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
+
+            vec3 radiance = lightColor * attenuation;
+            Lo += (kD * albedo / PI + specular) * radiance * NdotL * shadow;
+        }
+
+        // Ambient lighting from scene
+        vec3 ambient = u_Lights.ambientLight.rgb * u_Lights.ambientLight.a * albedo * aoStrength;
+
+        // Emissive
+        vec3 emissive = u_EmissiveColor.rgb * emissiveStrength;
+        if (u_TextureFlags.w > 0.5) {
+            emissive *= texture(u_EmissiveTexture, v_TexCoord).rgb;
+        }
+
+        vec3 color = ambient + Lo + emissive;
+
+        // Apply tint
+        color *= u_TintColor.rgb;
+
+        // Distance fog
+        color = applyFog(color, v_WorldPos, u_CameraPosition);
+
+        // HDR tonemap (Reinhard)
+        color = color / (color + vec3(1.0));
+
+        // Gamma correction
+        color = pow(color, vec3(1.0 / 2.2));
+
+        FragColor = vec4(color, albedoSample.a);
     }
-
-    vec3 emissive = u_EmissiveColor.rgb * u_MaterialParams1.w;
-    if (u_TextureFlags.w > 0.5) {
-        emissive *= texture(u_EmissiveTexture, v_TexCoord).rgb;
-    }
-
-    float ao = 1.0;
-    vec3 ambient = u_Lights.ambientLight.rgb * u_Lights.ambientLight.a * albedo.rgb * ao;
-    vec3 color = (ambient + Lo + emissive) * u_TintColor.rgb;
-
-    // HDR tonemapping (simple Reinhard)
-    color = color / (color + vec3(1.0));
-
-    // Gamma correction
-    color = pow(color, vec3(1.0/2.2));
-
-    FragColor = vec4(color, albedo.a);
-}
-

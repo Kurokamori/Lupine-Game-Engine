@@ -118,7 +118,20 @@ private:
     // Helper methods
     void FindKinematicBody();
     void FindCollisionShape();
-    float GetCollisionRadius() const;
+
+    // Build the body's real collider outline in world space for swept collision
+    // and depenetration queries. `bodyCenter` is the kinematic body origin. A
+    // circle collider yields a single point + radius; every other shape yields
+    // its polygon corners (radius 0).
+    void BuildColliderProxy(const math::Vec2& bodyCenter, std::vector<math::Vec2>& outPoints,
+                            float& outRadius, bool& outIsCircle) const;
+
+    // Axis-aligned half extents of the collider, used by the ground/wall ray probes.
+    void GetColliderHalfExtents(float& outHalfWidth, float& outHalfHeight) const;
+
+    // Resolve the collision mask of the body's collider (which layers it blocks on).
+    uint64_t GetCollisionMaskBits() const;
+
     void ClearKinematicBodyReference();
     void UpdateGroundDetection();
     void UpdateWallDetection();

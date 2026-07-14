@@ -3,6 +3,8 @@
     {
       "name": "ui_accept",
       "deadzone": 0.5,
+      "context": "",
+      "enabled": true,
       "bindings": [
         {
           "deviceType": 0,
@@ -25,6 +27,8 @@
     {
       "name": "ui_cancel",
       "deadzone": 0.5,
+      "context": "",
+      "enabled": true,
       "bindings": [
         {
           "deviceType": 0,
@@ -42,6 +46,8 @@
     {
       "name": "jump",
       "deadzone": 0.5,
+      "context": "",
+      "enabled": true,
       "bindings": [
         {
           "deviceType": 0,
@@ -59,6 +65,8 @@
     {
       "name": "attack",
       "deadzone": 0.5,
+      "context": "",
+      "enabled": true,
       "bindings": [
         {
           "deviceType": 1,
@@ -76,6 +84,8 @@
     {
       "name": "interact",
       "deadzone": 0.5,
+      "context": "",
+      "enabled": true,
       "bindings": [
         {
           "deviceType": 0,
@@ -95,6 +105,8 @@
     {
       "name": "move_horizontal",
       "deadzone": 0.2,
+      "context": "",
+      "enabled": true,
       "sensitivity": 3.0,
       "gravity": 3.0,
       "snap": true,
@@ -135,6 +147,8 @@
     {
       "name": "move_vertical",
       "deadzone": 0.2,
+      "context": "",
+      "enabled": true,
       "sensitivity": 3.0,
       "gravity": 3.0,
       "snap": true,
@@ -175,6 +189,8 @@
     {
       "name": "look_horizontal",
       "deadzone": 0.1,
+      "context": "",
+      "enabled": true,
       "sensitivity": 1.0,
       "gravity": 0.0,
       "snap": false,
@@ -191,6 +207,8 @@
     {
       "name": "look_vertical",
       "deadzone": 0.1,
+      "context": "",
+      "enabled": true,
       "sensitivity": 1.0,
       "gravity": 0.0,
       "snap": false,
@@ -207,6 +225,8 @@
     {
       "name": "accelerate",
       "deadzone": 0.1,
+      "context": "",
+      "enabled": true,
       "sensitivity": 1.0,
       "gravity": 2.0,
       "snap": false,

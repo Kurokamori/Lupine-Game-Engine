@@ -1,0 +1,81 @@
+#shader "Polygon"
+#description "N-sided polygon with SDF, rotation, and anti-aliasing"
+
+#begin properties
+    uniform mat4 u_ViewProjection;
+    uniform mat4 u_Model;
+    uniform vec4 u_TintColor = vec4(1.0);
+    uniform bool u_UseTexture = false;
+    uniform vec2 u_Size = vec2(1.0);
+    uniform vec4 u_PolygonParams = vec4(6.0, 0.0, 0.0, 0.0);
+    uniform sampler2D u_Texture;
+#end properties
+
+#begin vertex
+    #input vec3 a_Position : POSITION 0
+    #input vec3 a_Normal : NORMAL 1
+    #input vec2 a_TexCoord : TEXCOORD0 2
+    #input vec4 a_Color : COLOR 3
+
+    #output vec2 v_TexCoord
+    #output vec4 v_Color
+    #output vec2 v_LocalPos
+
+    void main() {
+        v_TexCoord = a_TexCoord;
+        v_Color = a_Color;
+        v_LocalPos = a_Position.xy;
+        VERTEX_OUTPUT = MUL(u_ViewProjection, MUL(u_Model, vec4(a_Position, 1.0)));
+    }
+#end vertex
+
+#begin fragment
+    #output vec4 FragColor
+
+    #define PI 3.14159265359
+
+    float sdNgon(vec2 p, float r, float n) {
+        float an = PI / n;
+        float he = r * cos(an);
+        float a = atan(p.y, p.x);
+        a = abs(mod(a + an, 2.0 * an) - an);
+        return length(p) * cos(a) - he;
+    }
+
+    void main() {
+        float sides = u_PolygonParams.x;
+        float rotation = u_PolygonParams.y;
+
+        sides = max(3.0, sides);
+
+        float cosR = cos(rotation);
+        float sinR = sin(rotation);
+        vec2 rotatedPos = vec2(
+            v_LocalPos.x * cosR - v_LocalPos.y * sinR,
+            v_LocalPos.x * sinR + v_LocalPos.y * cosR
+        );
+
+        vec2 scaledPos = rotatedPos * u_Size;
+
+        float radius = min(u_Size.x, u_Size.y) * 0.5;
+
+        float dist = sdNgon(scaledPos, radius, sides);
+
+        float edgeSoftness = 1.5;
+        float alpha = 1.0 - smoothstep(-edgeSoftness, edgeSoftness, dist);
+
+        vec4 color = v_Color * u_TintColor;
+
+        if (u_UseTexture) {
+            color *= SAMPLE(u_Texture, v_TexCoord);
+        }
+
+        color.a *= alpha;
+
+        if (color.a < 0.01) {
+            DISCARD;
+        }
+
+        FragColor = color;
+    }
+#end fragment

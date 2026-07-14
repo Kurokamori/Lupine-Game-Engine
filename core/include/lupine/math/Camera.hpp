@@ -18,34 +18,60 @@ namespace math {
     namespace Camera {
         
         // ========================================
-        // Projection Matrices
+        // Projection Matrices (OpenGL: Z range [-1, 1])
         // ========================================
-        
-        // Create perspective projection matrix
+
+        // Create perspective projection matrix (OpenGL convention: Z in [-1, 1])
         inline Mat4 Perspective(float fovY, float aspectRatio, float nearPlane, float farPlane) {
             return Mat4(glm::perspective(fovY, aspectRatio, nearPlane, farPlane));
         }
-        
+
         // Create perspective projection matrix with FOV in degrees
         inline Mat4 PerspectiveDeg(float fovYDegrees, float aspectRatio, float nearPlane, float farPlane) {
             return Perspective(Radians(fovYDegrees), aspectRatio, nearPlane, farPlane);
         }
-        
-        // Create orthographic projection matrix
+
+        // Create orthographic projection matrix (OpenGL convention: Z in [-1, 1])
         inline Mat4 Orthographic(float left, float right, float bottom, float top, float nearPlane, float farPlane) {
             return Mat4(glm::ortho(left, right, bottom, top, nearPlane, farPlane));
         }
-        
+
         // Create orthographic projection matrix from width/height
         inline Mat4 OrthographicCentered(float width, float height, float nearPlane, float farPlane) {
             float halfWidth = width * 0.5f;
             float halfHeight = height * 0.5f;
             return Orthographic(-halfWidth, halfWidth, -halfHeight, halfHeight, nearPlane, farPlane);
         }
-        
+
         // Create infinite perspective projection (far plane at infinity)
         inline Mat4 InfinitePerspective(float fovY, float aspectRatio, float nearPlane) {
             return Mat4(glm::infinitePerspective(fovY, aspectRatio, nearPlane));
+        }
+
+        // ========================================
+        // Projection Matrices (DirectX/Vulkan: Z range [0, 1])
+        // ========================================
+
+        // Create perspective projection matrix (DirectX/Vulkan convention: Z in [0, 1])
+        inline Mat4 PerspectiveZO(float fovY, float aspectRatio, float nearPlane, float farPlane) {
+            return Mat4(glm::perspectiveRH_ZO(fovY, aspectRatio, nearPlane, farPlane));
+        }
+
+        // Create perspective projection matrix with FOV in degrees (DirectX/Vulkan)
+        inline Mat4 PerspectiveDegZO(float fovYDegrees, float aspectRatio, float nearPlane, float farPlane) {
+            return PerspectiveZO(Radians(fovYDegrees), aspectRatio, nearPlane, farPlane);
+        }
+
+        // Create orthographic projection matrix (DirectX/Vulkan convention: Z in [0, 1])
+        inline Mat4 OrthographicZO(float left, float right, float bottom, float top, float nearPlane, float farPlane) {
+            return Mat4(glm::orthoRH_ZO(left, right, bottom, top, nearPlane, farPlane));
+        }
+
+        // Create orthographic projection matrix from width/height (DirectX/Vulkan)
+        inline Mat4 OrthographicCenteredZO(float width, float height, float nearPlane, float farPlane) {
+            float halfWidth = width * 0.5f;
+            float halfHeight = height * 0.5f;
+            return OrthographicZO(-halfWidth, halfWidth, -halfHeight, halfHeight, nearPlane, farPlane);
         }
         
         // ========================================

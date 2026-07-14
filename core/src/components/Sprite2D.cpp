@@ -2,15 +2,106 @@
 #include "lupine/core/Node.hpp"
 #include "lupine/rendering/RenderContext.hpp"
 #include "lupine/rendering/RenderWorld.hpp"
+#include "lupine/rendering/TextureCache.hpp"
+#include "lupine/rendering/TextureUpload.hpp"
 #include "lupine/rendering/gfx/IGfxDevice.hpp"
 #include "lupine/rendering/gfx/GfxDescriptors.hpp"
+#include "lupine/asset/AssetDatabase.hpp"
 #include "lupine/logger/Logger.hpp"
+#include <unordered_map>
+#include <mutex>
 
 namespace lupine {
 namespace components {
 
 using namespace core;
 using namespace math;
+
+// Static texture cache to share textures across all Sprite2D instances
+// Use lazy initialization to avoid static initialization order issues
+static std::unordered_map<std::string, TextureHandle>& GetSprite2DTextureCache() {
+    static std::unordered_map<std::string, TextureHandle> s_Sprite2DTextureCache;
+    return s_Sprite2DTextureCache;
+}
+
+static std::mutex& GetSprite2DTextureCacheMutex() {
+    static std::mutex s_Sprite2DTextureCacheMutex;
+    return s_Sprite2DTextureCacheMutex;
+}
+
+// Lazy registration with TextureCache system for hot-reloading
+static void EnsureSprite2DCacheRegistered() {
+    static bool registered = false;
+    if (registered) return;
+    registered = true;
+
+    rendering::TextureCache::RegisterCache(
+        "Sprite2D",
+        [](const std::string& path) -> bool {
+            std::lock_guard<std::mutex> lock(GetSprite2DTextureCacheMutex());
+            auto it = GetSprite2DTextureCache().find(path);
+            if (it != GetSprite2DTextureCache().end()) {
+                GetSprite2DTextureCache().erase(it);
+                return true;
+            }
+            return false;
+        },
+        []() {
+            std::lock_guard<std::mutex> lock(GetSprite2DTextureCacheMutex());
+            GetSprite2DTextureCache().clear();
+        }
+    );
+}
+
+// Helper to get or create a cached texture for Sprite2D
+static TextureHandle GetOrCreateSprite2DTexture(
+    IGfxDevice* device,
+    const std::string& path,
+    asset::AssetRef<asset::ImageAsset>& asset)
+{
+    if (path.empty() || !device) {
+        return TextureHandle();
+    }
+
+    // Ensure cache is registered with TextureCache system (lazy init)
+    EnsureSprite2DCacheRegistered();
+
+    // Check cache first
+    {
+        std::lock_guard<std::mutex> lock(GetSprite2DTextureCacheMutex());
+        auto it = GetSprite2DTextureCache().find(path);
+        if (it != GetSprite2DTextureCache().end() && it->second.isValid()) {
+            return it->second;
+        }
+    }
+
+    // Not in cache, need to load
+    if (!asset.IsValid()) {
+        asset = asset::AssetRef<asset::ImageAsset>(new asset::ImageAsset());
+        
+        if (!asset->LoadFromFile(path, true, asset::ImageColorSpace::sRGB)) {
+            LOG_ERROR(LogCategory::Render, "Sprite2D FAILED to load texture: {}", path);
+            return TextureHandle();
+        }
+        
+    }
+
+    if (!asset->IsLoaded() || asset->GetWidth() == 0 || asset->GetHeight() == 0 || asset->GetData() == nullptr) {
+        return TextureHandle();
+    }
+
+    // Create texture with a full mip chain (when smooth filtering is enabled) so
+    // the sprite minifies cleanly when the window is below the design resolution.
+    TextureHandle handle = CreateTexture2DFromImage(device, *asset, TextureFormat::RGBA8_UNORM);
+
+    // Cache it
+    {
+        std::lock_guard<std::mutex> lock(GetSprite2DTextureCacheMutex());
+        GetSprite2DTextureCache()[path] = handle;
+    }
+
+    return handle;
+}
 
 Sprite2D::Sprite2D()
     : Component("Sprite2D")
@@ -46,7 +137,9 @@ void Sprite2D::DefineProperties() {
 
     DefineProperty(PROPERTY_DEFAULT_GROUP(spriteSheetEnabled, Bool, false, "Sprite Sheet"));
     DefineProperty(PROPERTY_DEFAULT_GROUP(spriteSize, Vec2, Vec2(0.0f, 0.0f), "Sprite Sheet"));
-    DefineProperty(PROPERTY_INT_RANGE_GROUP(currentFrame, 0, 0, 10000, 1, "Sprite Sheet"));
+    DefineProperty(PROPERTY_INT_RANGE_GROUP(hframes, 0, 0, 4096, 1, "Sprite Sheet"));
+    DefineProperty(PROPERTY_INT_RANGE_GROUP(vframes, 0, 0, 4096, 1, "Sprite Sheet"));
+    DefineProperty(PROPERTY_INT_RANGE_GROUP(currentFrame, 0, 0, 100000, 1, "Sprite Sheet"));
 }
 
 void Sprite2D::OnAwake() {
@@ -117,6 +210,14 @@ Vec2 Sprite2D::CalculateRenderSize() const {
     Vec2 size = GetSize();
 
     if (size.x == 0.0f && size.y == 0.0f) {
+        // In sprite-sheet mode, default to a single cell so a sliced frame
+        // renders at its native size instead of stretching the whole sheet.
+        if (GetSpriteSheetEnabled()) {
+            Vec2 cell = GetCellSize();
+            if (cell.x > 0.0f && cell.y > 0.0f) {
+                return cell;
+            }
+        }
         if (m_TextureAsset.IsValid()) {
             size.x = static_cast<float>(m_TextureAsset->GetWidth());
             size.y = static_cast<float>(m_TextureAsset->GetHeight());
@@ -166,32 +267,106 @@ void Sprite2D::SetCurrentFrame(int frame) {
     SetPropertyValue<int>("currentFrame", frame);
 }
 
+int Sprite2D::GetHFrames() const {
+    return GetPropertyValue<int>("hframes");
+}
+
+void Sprite2D::SetHFrames(int columns) {
+    SetPropertyValue<int>("hframes", std::max(0, columns));
+}
+
+int Sprite2D::GetVFrames() const {
+    return GetPropertyValue<int>("vframes");
+}
+
+void Sprite2D::SetVFrames(int rows) {
+    SetPropertyValue<int>("vframes", std::max(0, rows));
+}
+
 int Sprite2D::GetFramesPerRow() const {
-    if (!m_TextureAsset.IsValid() || !GetSpriteSheetEnabled()) {
+    if (!GetSpriteSheetEnabled()) {
         return 0;
     }
 
+    // Prefer the explicit frame grid (Godot-style auto-slice); fall back to
+    // deriving from the manual spriteSize when the grid is unset.
+    int hframes = GetPropertyValue<int>("hframes");
+    if (hframes > 0) {
+        return hframes;
+    }
+
+    if (!m_TextureAsset.IsValid()) {
+        return 0;
+    }
     Vec2 spriteSize = GetSpriteSize();
     if (spriteSize.x <= 0.0f) {
         return 0;
     }
-
     int textureWidth = m_TextureAsset->GetWidth();
     return static_cast<int>(textureWidth / spriteSize.x);
 }
 
 int Sprite2D::GetFramesPerColumn() const {
-    if (!m_TextureAsset.IsValid() || !GetSpriteSheetEnabled()) {
+    if (!GetSpriteSheetEnabled()) {
         return 0;
     }
 
+    int vframes = GetPropertyValue<int>("vframes");
+    if (vframes > 0) {
+        return vframes;
+    }
+
+    if (!m_TextureAsset.IsValid()) {
+        return 0;
+    }
     Vec2 spriteSize = GetSpriteSize();
     if (spriteSize.y <= 0.0f) {
         return 0;
     }
-
     int textureHeight = m_TextureAsset->GetHeight();
     return static_cast<int>(textureHeight / spriteSize.y);
+}
+
+Vec2 Sprite2D::GetTextureSize() const {
+    if (m_TextureAsset.IsValid() && m_TextureAsset->IsLoaded()) {
+        return Vec2(static_cast<float>(m_TextureAsset->GetWidth()),
+                    static_cast<float>(m_TextureAsset->GetHeight()));
+    }
+    return Vec2(0.0f, 0.0f);
+}
+
+Vec2 Sprite2D::GetCellSize() const {
+    Vec2 tex = GetTextureSize();
+    if (GetSpriteSheetEnabled()) {
+        int fpr = GetFramesPerRow();
+        int fpc = GetFramesPerColumn();
+        if (fpr > 0 && fpc > 0 && tex.x > 0.0f && tex.y > 0.0f) {
+            return Vec2(tex.x / static_cast<float>(fpr), tex.y / static_cast<float>(fpc));
+        }
+    }
+    return tex;
+}
+
+nlohmann::json Sprite2D::CallMethod(const std::string& method, const nlohmann::json& args) {
+    (void)args;
+    if (method == "get_texture_size") {
+        Vec2 t = GetTextureSize();
+        return nlohmann::json{{"x", t.x}, {"y", t.y}};
+    }
+    if (method == "get_cell_size") {
+        Vec2 c = GetCellSize();
+        return nlohmann::json{{"x", c.x}, {"y", c.y}};
+    }
+    if (method == "get_frame_count") {
+        return GetFrameCount();
+    }
+    if (method == "get_frames_per_row") {
+        return GetFramesPerRow();
+    }
+    if (method == "get_frames_per_column") {
+        return GetFramesPerColumn();
+    }
+    return nlohmann::json();
 }
 
 int Sprite2D::GetFrameCount() const {
@@ -206,30 +381,28 @@ int Sprite2D::GetFrameCount() const {
 }
 
 Vec4 Sprite2D::CalculateFrameUVRect(int frameIndex) const {
-    if (!m_TextureAsset.IsValid() || !GetSpriteSheetEnabled()) {
-        return Vec4(0.0f, 0.0f, 1.0f, 1.0f);
-    }
-
-    Vec2 spriteSize = GetSpriteSize();
-    if (spriteSize.x <= 0.0f || spriteSize.y <= 0.0f) {
+    if (!GetSpriteSheetEnabled()) {
         return Vec4(0.0f, 0.0f, 1.0f, 1.0f);
     }
 
     int framesPerRow = GetFramesPerRow();
-    if (framesPerRow <= 0) {
+    int framesPerColumn = GetFramesPerColumn();
+    if (framesPerRow <= 0 || framesPerColumn <= 0) {
         return Vec4(0.0f, 0.0f, 1.0f, 1.0f);
     }
 
+    if (frameIndex < 0) {
+        frameIndex = 0;
+    }
     int column = frameIndex % framesPerRow;
-    int row = frameIndex / framesPerRow;
+    int row = (frameIndex / framesPerRow) % framesPerColumn;
 
-    float textureWidth = static_cast<float>(m_TextureAsset->GetWidth());
-    float textureHeight = static_cast<float>(m_TextureAsset->GetHeight());
-
-    float uMin = (column * spriteSize.x) / textureWidth;
-    float vMin = (row * spriteSize.y) / textureHeight;
-    float uMax = ((column + 1) * spriteSize.x) / textureWidth;
-    float vMax = ((row + 1) * spriteSize.y) / textureHeight;
+    // Fraction-based UVs work identically whether the grid came from
+    // hframes/vframes or from a derived spriteSize, and never leave seams.
+    float uMin = static_cast<float>(column) / static_cast<float>(framesPerRow);
+    float vMin = static_cast<float>(row) / static_cast<float>(framesPerColumn);
+    float uMax = static_cast<float>(column + 1) / static_cast<float>(framesPerRow);
+    float vMax = static_cast<float>(row + 1) / static_cast<float>(framesPerColumn);
 
     return Vec4(uMin, vMin, uMax, vMax);
 }
@@ -265,18 +438,71 @@ const std::string& Sprite2D::GetTexturePath() const {
 }
 
 void Sprite2D::SetTexturePath(const std::string& path) {
-    SetPropertyValue<std::string>("texturePath", path);
+    // Convert to res:// path if possible
+    std::string resPath = path;
+    if (!path.empty() && !(path.size() >= 6 && path.substr(0, 6) == "res://")) {
+        auto& assetDb = asset::AssetDatabase::GetInstance();
+        if (assetDb.IsInitialized()) {
+            std::string converted = assetDb.ToResourcePath(path);
+            if (!converted.empty()) {
+                resPath = converted;
+            }
+        }
+    }
+    SetPropertyValue<std::string>("texturePath", resPath);
 }
 
-const Color& Sprite2D::GetModulate() const {
-    static Color cachedColor;
+bool Sprite2D::OnAssetFileChanged(const std::string& changedPath, const std::string& resolvedChangedPath) {
+    // Get our current texture path
+    std::string currentPath = GetTexturePath();
+    if (currentPath.empty()) {
+        return false;
+    }
+
+    // Resolve our path for comparison
+    std::string resolvedCurrentPath;
+    auto& assetDb = asset::AssetDatabase::GetInstance();
+    if (assetDb.IsInitialized()) {
+        resolvedCurrentPath = assetDb.ResolveAsset(currentPath);
+    }
+
+    // Check if this is our texture
+    bool matches = (currentPath == changedPath) ||
+                   (!resolvedCurrentPath.empty() && !resolvedChangedPath.empty() &&
+                    resolvedCurrentPath == resolvedChangedPath);
+
+    if (matches) {
+
+        // IMPORTANT: Remove from the static texture cache first!
+        // This ensures the next buildDrawCommands will reload from disk
+        {
+            std::lock_guard<std::mutex> lock(GetSprite2DTextureCacheMutex());
+            auto& cache = GetSprite2DTextureCache();
+            auto it = cache.find(currentPath);
+            if (it != cache.end()) {
+                
+                cache.erase(it);
+            }
+        }
+
+        // Invalidate our cached texture handle - force reload on next render
+        m_TextureHandle = TextureHandle();
+        m_TextureAsset.Reset();
+        m_CurrentTexturePath.clear();  // Force path comparison to trigger reload
+        m_TextureNeedsUpload = true;
+
+        return true;
+    }
+
+    return false;
+}
+
+Color Sprite2D::GetModulate() const {
     const ComponentProperty* prop = m_CustomProperties.GetProperty("modulate");
     if (prop) {
-        cachedColor = prop->GetValue<Color>();
-        return cachedColor;
+        return prop->GetValue<Color>();
     }
-    static Color defaultColor = Color::White();
-    return defaultColor;
+    return Color::White();
 }
 
 void Sprite2D::SetModulate(const Color& color) {
@@ -371,53 +597,21 @@ void Sprite2D::buildDrawCommands(RenderContext& ctx) {
     }
 
     std::string currentPath = GetTexturePath();
+
+    // Check if we need to update the texture (path changed)
     if (currentPath != m_CurrentTexturePath) {
-
-        if (m_TextureHandle.isValid()) {
-            IGfxDevice* device = ctx.getDevice();
-            if (device) {
-                device->destroyTexture(m_TextureHandle);
-                m_TextureHandle = TextureHandle();
-            }
-        }
-
+        // Don't destroy textures from cache - they're shared!
+        // Just update our handle to point to the new cached texture
+        m_TextureHandle = TextureHandle();
         m_TextureAsset.Reset();
-
-        if (!currentPath.empty()) {
-
-            m_TextureAsset = asset::AssetRef<asset::ImageAsset>(new asset::ImageAsset());
-
-            bool loaded = m_TextureAsset->LoadFromFile(currentPath, true, asset::ImageColorSpace::sRGB);
-
-            if (!loaded) {
-
-                m_TextureAsset.Reset();
-            } else {
-
-            }
-        }
-
         m_CurrentTexturePath = currentPath;
     }
 
-    if (!m_TextureHandle.isValid() && m_TextureAsset.IsValid() && m_TextureAsset->IsLoaded()) {
-
-        if (m_TextureAsset->GetWidth() == 0 || m_TextureAsset->GetHeight() == 0 || m_TextureAsset->GetData() == nullptr) {
-
-            return;
-        }
-
-        TextureDesc desc;
-        desc.width = m_TextureAsset->GetWidth();
-        desc.height = m_TextureAsset->GetHeight();
-        desc.format = TextureFormat::RGBA8_SRGB;
-        desc.usage = TextureUsage::Sampled;
-        desc.initialData = m_TextureAsset->GetData();
-
+    // Get or create cached texture if we don't have a valid handle
+    if (!m_TextureHandle.isValid() && !currentPath.empty()) {
         IGfxDevice* device = ctx.getDevice();
         if (device) {
-            m_TextureHandle = device->createTexture(desc);
-
+            m_TextureHandle = GetOrCreateSprite2DTexture(device, currentPath, m_TextureAsset);
         }
     }
 
@@ -425,10 +619,12 @@ void Sprite2D::buildDrawCommands(RenderContext& ctx) {
         return;
     }
 
+    Vec2 renderSize = CalculateRenderSize();
+    Vec2 scale = node2D->GetGlobalScale();
+
     SpriteDrawData sprite;
     sprite.texture = m_TextureHandle;
     sprite.position = node2D->GetGlobalPosition();
-    sprite.size = CalculateRenderSize();
     sprite.rotation = node2D->GetGlobalRotation();
     sprite.tint = GetModulate();
 
@@ -438,8 +634,10 @@ void Sprite2D::buildDrawCommands(RenderContext& ctx) {
         sprite.pivot = Vec2(0.5f, 0.5f);
     } else {
         Vec2 offset = GetOffset();
-        sprite.pivot = Vec2(0.5f + offset.x / sprite.size.x, 0.5f + offset.y / sprite.size.y);
+        sprite.pivot = Vec2(0.5f + offset.x / renderSize.x, 0.5f + offset.y / renderSize.y);
     }
+
+    sprite.size = Vec2(renderSize.x * scale.x, renderSize.y * scale.y);
 
     ctx.drawSprite(sprite);
 }

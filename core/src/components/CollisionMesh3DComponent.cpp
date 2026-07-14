@@ -7,6 +7,8 @@
 #include "lupine/logger/Logger.hpp"
 #include "lupine/asset/ModelAsset.hpp"
 #include "lupine/rendering/debug/DebugDraw.hpp"
+#include "lupine/physics3d/PhysicsShapeCache.hpp"
+#include <BulletCollision/CollisionShapes/btBvhTriangleMeshShape.h>
 
 namespace lupine {
 namespace components {
@@ -14,6 +16,43 @@ namespace components {
 using namespace core;
 using namespace math;
 using namespace physics3d;
+
+namespace {
+
+// Serialize() writes vectors as arrays while the property registry stores them as {x,y,z}
+// objects, and both layouts reach Deserialize(), so every read has to accept either one.
+Vec3 ReadJsonVec3(const nlohmann::json& value, const Vec3& fallback) {
+    if (value.is_array() && value.size() >= 3) {
+        return Vec3(value[0].get<float>(), value[1].get<float>(), value[2].get<float>());
+    }
+    if (value.is_object()) {
+        return Vec3(
+            value.value("x", fallback.x),
+            value.value("y", fallback.y),
+            value.value("z", fallback.z));
+    }
+    return fallback;
+}
+
+Color ReadJsonColor(const nlohmann::json& value, const Color& fallback) {
+    if (value.is_array() && value.size() >= 4) {
+        return Color(
+            value[0].get<float>(),
+            value[1].get<float>(),
+            value[2].get<float>(),
+            value[3].get<float>());
+    }
+    if (value.is_object()) {
+        return Color(
+            value.value("r", fallback.r),
+            value.value("g", fallback.g),
+            value.value("b", fallback.b),
+            value.value("a", fallback.a));
+    }
+    return fallback;
+}
+
+}
 
 CollisionMesh3DComponent::CollisionMesh3DComponent()
     : Component("CollisionMesh3DComponent")
@@ -82,6 +121,7 @@ void CollisionMesh3DComponent::DefineProperties() {
     DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(friction, 0.5f, 0.0f, 1.0f, 0.01f, "Material"));
     DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(restitution, 0.0f, 0.0f, 1.0f, 0.01f, "Material"));
     DefineProperty(PROPERTY_DEFAULT_GROUP(isSensor, Bool, false, "Material"));
+    DefineProperty(PROPERTY_GROUP(collisionLayers, Int, 1, Layers3D, "", "Material"));
 
     DefineProperty(PROPERTY_DEFAULT_GROUP(debugColor, Color, Color(0.0f, 1.0f, 0.0f, 0.5f), "Debug"));
 }
@@ -109,37 +149,47 @@ nlohmann::json CollisionMesh3DComponent::Serialize() const {
     return json;
 }
 
+void CollisionMesh3DComponent::ReadShapeFields(const nlohmann::json& source) {
+    if (!source.is_object()) {
+        return;
+    }
+
+    if (source.contains("shapeType")) m_ShapeType = static_cast<CollisionShape3DType>(source["shapeType"].get<int>());
+    if (source.contains("size")) m_Size = ReadJsonVec3(source["size"], m_Size);
+    if (source.contains("radius")) m_Radius = source["radius"].get<float>();
+    if (source.contains("height")) m_Height = source["height"].get<float>();
+    if (source.contains("planeNormal")) m_PlaneNormal = ReadJsonVec3(source["planeNormal"], m_PlaneNormal);
+    if (source.contains("planeDistance")) m_PlaneDistance = source["planeDistance"].get<float>();
+    if (source.contains("planeWidth")) m_PlaneWidth = source["planeWidth"].get<float>();
+    if (source.contains("planeLength")) m_PlaneLength = source["planeLength"].get<float>();
+    if (source.contains("meshPath")) m_MeshPath = source["meshPath"].get<std::string>();
+    if (source.contains("meshSolver")) m_MeshSolver = static_cast<MeshSolverType>(source["meshSolver"].get<int>());
+    if (source.contains("offset")) m_Offset = ReadJsonVec3(source["offset"], m_Offset);
+    if (source.contains("density")) m_Density = source["density"].get<float>();
+    if (source.contains("friction")) m_Friction = source["friction"].get<float>();
+    if (source.contains("restitution")) m_Restitution = source["restitution"].get<float>();
+    if (source.contains("isSensor")) m_IsSensor = source["isSensor"].get<bool>();
+    if (source.contains("debugColor")) m_DebugColor = ReadJsonColor(source["debugColor"], m_DebugColor);
+}
+
 void CollisionMesh3DComponent::Deserialize(const nlohmann::json& json) {
     Component::Deserialize(json);
 
-    if (json.contains("shapeType")) m_ShapeType = static_cast<CollisionShape3DType>(json["shapeType"].get<int>());
-    if (json.contains("size")) {
-        auto s = json["size"];
-        m_Size = Vec3(s[0], s[1], s[2]);
+    // Shape state lives in two places in a saved component: the top-level keys written by
+    // Serialize() below, and the "properties" block that Component::Serialize() writes from
+    // the property registry. Hand-authored scenes and prefabs carry only the latter, so
+    // reading top-level alone silently left every field at its constructor default - a
+    // 1x1x1 box at zero offset, whatever the file actually asked for.
+    ReadShapeFields(json);
+
+    // The registry is what the inspector edits and what SetShapeType() and friends keep in
+    // sync, so it is authoritative and is applied last: a stale top-level key left behind by
+    // an older save must not win over the value the file actually shows.
+    if (json.contains("properties")) {
+        ReadShapeFields(json["properties"]);
     }
-    if (json.contains("radius")) m_Radius = json["radius"];
-    if (json.contains("height")) m_Height = json["height"];
-    if (json.contains("planeNormal")) {
-        auto n = json["planeNormal"];
-        m_PlaneNormal = Vec3(n[0], n[1], n[2]);
-    }
-    if (json.contains("planeDistance")) m_PlaneDistance = json["planeDistance"];
-    if (json.contains("planeWidth")) m_PlaneWidth = json["planeWidth"];
-    if (json.contains("planeLength")) m_PlaneLength = json["planeLength"];
-    if (json.contains("meshPath")) m_MeshPath = json["meshPath"];
-    if (json.contains("meshSolver")) m_MeshSolver = static_cast<MeshSolverType>(json["meshSolver"].get<int>());
-    if (json.contains("offset")) {
-        auto o = json["offset"];
-        m_Offset = Vec3(o[0], o[1], o[2]);
-    }
-    if (json.contains("density")) m_Density = json["density"];
-    if (json.contains("friction")) m_Friction = json["friction"];
-    if (json.contains("restitution")) m_Restitution = json["restitution"];
-    if (json.contains("isSensor")) m_IsSensor = json["isSensor"];
-    if (json.contains("debugColor")) {
-        auto c = json["debugColor"];
-        m_DebugColor = Color(c[0], c[1], c[2], c[3]);
-    }
+
+    m_CollisionLayers = static_cast<uint32_t>(GetPropertyValue<int>("collisionLayers"));
 }
 
 void CollisionMesh3DComponent::OnAwake() {
@@ -147,11 +197,37 @@ void CollisionMesh3DComponent::OnAwake() {
 }
 
 void CollisionMesh3DComponent::OnReady() {
-
+    // If collider wasn't created in OnAwake (e.g., physics body wasn't ready yet), try again
+    if (!m_Collider) {
+        CreateCollider();
+    }
 }
 
 void CollisionMesh3DComponent::OnDestroy() {
     DestroyCollider();
+}
+
+void CollisionMesh3DComponent::OnPhysicsWorldRebuild(PhysicsWorldRebuildPhase phase) {
+    // See Component::PhysicsWorldRebuildPhase. This component owns no body - it attaches a
+    // collider to a body found on its own node or its parent - so it does all of its work in
+    // the AttachColliders phase, once those bodies have been recreated.
+    switch (phase) {
+        case PhysicsWorldRebuildPhase::SaveState:
+            break;
+
+        case PhysicsWorldRebuildPhase::RecreateBodies:
+            // The body this collider was attached to has been destroyed, which already told
+            // the collider its body is gone (RigidBody3D's destructor), so the reset is safe.
+            // DestroyCollider also nulls m_PhysicsBody, which is now a dangling pointer into
+            // the old world.
+            DestroyCollider();
+            break;
+
+        case PhysicsWorldRebuildPhase::AttachColliders:
+            // CreateCollider re-finds the body itself.
+            CreateCollider();
+            break;
+    }
 }
 
 void CollisionMesh3DComponent::OnRender() {
@@ -229,6 +305,11 @@ void CollisionMesh3DComponent::OnPropertyChanged(const std::string& propertyName
         m_IsSensor = newValue.get<bool>();
         if (m_Collider) {
             m_Collider->SetIsSensor(m_IsSensor);
+        }
+    } else if (propertyName == "collisionLayers") {
+        m_CollisionLayers = static_cast<uint32_t>(newValue.get<int>());
+        if (m_Collider) {
+            m_Collider->SetCollisionLayers(m_CollisionLayers);
         }
     } else if (propertyName == "debugColor") {
 
@@ -401,6 +482,18 @@ void CollisionMesh3DComponent::SetSensor(bool isSensor) {
     }
 }
 
+uint32_t CollisionMesh3DComponent::GetCollisionLayers() const {
+    return m_CollisionLayers;
+}
+
+void CollisionMesh3DComponent::SetCollisionLayers(uint32_t layers) {
+    m_CollisionLayers = layers;
+    SetPropertyValue("collisionLayers", static_cast<int>(layers));
+    if (m_Collider) {
+        m_Collider->SetCollisionLayers(layers);
+    }
+}
+
 Color CollisionMesh3DComponent::GetDebugColor() const {
     return m_DebugColor;
 }
@@ -454,15 +547,19 @@ void CollisionMesh3DComponent::LoadMeshVertices() {
     m_MeshIndices.clear();
 
     if (m_MeshPath.empty()) {
-
         return;
     }
 
+    // Try to get cached mesh data first (avoids re-loading the mesh file)
+    if (PhysicsShapeCache::Instance().GetMeshData(m_MeshPath, m_MeshVertices, m_MeshIndices)) {
+        return;
+    }
+
+    // Fallback to direct loading (this path typically won't be hit due to cache)
     asset::AssetRef<asset::ModelAsset> modelAsset(new asset::ModelAsset());
     bool loaded = modelAsset->LoadFromFile(m_MeshPath, true);
 
     if (!loaded || !modelAsset.IsValid()) {
-
         return;
     }
 
@@ -478,14 +575,12 @@ void CollisionMesh3DComponent::LoadMeshVertices() {
             m_MeshIndices.push_back(vertexOffset + index);
         }
     }
-
 }
 
 void CollisionMesh3DComponent::CreateCollider() {
 
     m_PhysicsBody = FindPhysicsBody();
     if (!m_PhysicsBody) {
-
         return;
     }
 
@@ -502,6 +597,7 @@ void CollisionMesh3DComponent::CreateCollider() {
             boxCollider->SetMaterial(material);
             boxCollider->SetIsSensor(m_IsSensor);
             boxCollider->SetOffset(m_Offset);
+            boxCollider->SetCollisionLayers(m_CollisionLayers);
             m_Collider = std::move(boxCollider);
 
             break;
@@ -515,6 +611,7 @@ void CollisionMesh3DComponent::CreateCollider() {
             sphereCollider->SetMaterial(material);
             sphereCollider->SetIsSensor(m_IsSensor);
             sphereCollider->SetOffset(m_Offset);
+            sphereCollider->SetCollisionLayers(m_CollisionLayers);
             m_Collider = std::move(sphereCollider);
 
             break;
@@ -528,6 +625,7 @@ void CollisionMesh3DComponent::CreateCollider() {
             capsuleCollider->SetMaterial(material);
             capsuleCollider->SetIsSensor(m_IsSensor);
             capsuleCollider->SetOffset(m_Offset);
+            capsuleCollider->SetCollisionLayers(m_CollisionLayers);
             m_Collider = std::move(capsuleCollider);
 
             break;
@@ -541,6 +639,7 @@ void CollisionMesh3DComponent::CreateCollider() {
             cylinderCollider->SetMaterial(material);
             cylinderCollider->SetIsSensor(m_IsSensor);
             cylinderCollider->SetOffset(m_Offset);
+            cylinderCollider->SetCollisionLayers(m_CollisionLayers);
             m_Collider = std::move(cylinderCollider);
 
             break;
@@ -554,6 +653,7 @@ void CollisionMesh3DComponent::CreateCollider() {
             coneCollider->SetMaterial(material);
             coneCollider->SetIsSensor(m_IsSensor);
             coneCollider->SetOffset(m_Offset);
+            coneCollider->SetCollisionLayers(m_CollisionLayers);
             m_Collider = std::move(coneCollider);
 
             break;
@@ -583,6 +683,7 @@ void CollisionMesh3DComponent::CreateCollider() {
             boxCollider->SetMaterial(material);
             boxCollider->SetIsSensor(m_IsSensor);
             boxCollider->SetOffset(m_Offset + m_PlaneNormal * m_PlaneDistance);
+            boxCollider->SetCollisionLayers(m_CollisionLayers);
             m_Collider = std::move(boxCollider);
 
             break;
@@ -619,6 +720,7 @@ void CollisionMesh3DComponent::CreateCollider() {
                     boxCollider->SetMaterial(material);
                     boxCollider->SetIsSensor(m_IsSensor);
                     boxCollider->SetOffset(m_Offset + (min + max) * 0.5f);
+                    boxCollider->SetCollisionLayers(m_CollisionLayers);
                     m_Collider = std::move(boxCollider);
 
                     break;
@@ -635,6 +737,7 @@ void CollisionMesh3DComponent::CreateCollider() {
                     meshCollider->SetMaterial(material);
                     meshCollider->SetIsSensor(m_IsSensor);
                     meshCollider->SetOffset(m_Offset);
+                    meshCollider->SetCollisionLayers(m_CollisionLayers);
                     m_Collider = std::move(meshCollider);
 
                     break;
@@ -642,18 +745,31 @@ void CollisionMesh3DComponent::CreateCollider() {
 
                 case MeshSolverType::Concave:
                 case MeshSolverType::TriMesh: {
-
                     std::unique_ptr<MeshCollider3D> meshCollider;
-                    if (!m_MeshIndices.empty()) {
-                        meshCollider = std::make_unique<MeshCollider3D>(m_PhysicsBody, colliderID, m_MeshVertices, m_MeshIndices, false);
 
-                    } else {
-                        meshCollider = std::make_unique<MeshCollider3D>(m_PhysicsBody, colliderID, m_MeshVertices, false);
-
+                    // Try to use cached shape for better performance
+                    if (!m_MeshPath.empty()) {
+                        btBvhTriangleMeshShape* cachedShape = PhysicsShapeCache::Instance().GetOrCreateShape(m_MeshPath);
+                        if (cachedShape) {
+                            // Use the cached shape with scaling support
+                            meshCollider = std::make_unique<MeshCollider3D>(
+                                m_PhysicsBody, colliderID, cachedShape, m_MeshPath, scale);
+                        }
                     }
+
+                    // Fallback to building shape from vertices if cache failed
+                    if (!meshCollider) {
+                        if (!m_MeshIndices.empty()) {
+                            meshCollider = std::make_unique<MeshCollider3D>(m_PhysicsBody, colliderID, m_MeshVertices, m_MeshIndices, false);
+                        } else {
+                            meshCollider = std::make_unique<MeshCollider3D>(m_PhysicsBody, colliderID, m_MeshVertices, false);
+                        }
+                    }
+
                     meshCollider->SetMaterial(material);
                     meshCollider->SetIsSensor(m_IsSensor);
                     meshCollider->SetOffset(m_Offset);
+                    meshCollider->SetCollisionLayers(m_CollisionLayers);
                     m_Collider = std::move(meshCollider);
                     break;
                 }

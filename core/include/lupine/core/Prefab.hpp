@@ -4,6 +4,7 @@
 #include "Node.hpp"
 #include <string>
 #include <memory>
+#include <unordered_map>
 
 namespace lupine {
 namespace core {
@@ -71,6 +72,16 @@ public:
      */
     std::shared_ptr<Node> InstantiateAsChild(std::shared_ptr<Node> parent);
 
+    /**
+     * Instantiate the prefab for editing, preserving the original UUIDs.
+     * Unlike Instantiate(), this does NOT regenerate UUIDs so the resulting node
+     * tree round-trips identically when re-saved and keeps any internal
+     * UUID-based references (animation targets, signal connections) intact. This
+     * is what the editor uses to open a prefab as an editable document.
+     * @return A node tree mirroring the prefab data, or nullptr if invalid
+     */
+    std::shared_ptr<Node> InstantiateForEditing();
+
     // Prefab properties
     const std::string& GetName() const { return m_Name; }
     void SetName(const std::string& name) { m_Name = name; }
@@ -90,15 +101,20 @@ public:
 
 private:
     /**
-     * Clone a node and its entire hierarchy with new UUIDs
+     * Clone a node and its entire hierarchy from serialized data
      * This is used during instantiation to create independent copies
-     * @param sourceNode The node to clone
-     * @return A new node with a new UUID and cloned children/components
+     * @param nodeJson The serialized node data to clone
+     * @param regenerateUUIDs When true, assigns fresh UUIDs to the cloned tree
+     *        (for scene instances); when false, preserves the stored UUIDs
+     *        (for editing the prefab itself)
+     * @return A new node populated from the data, or nullptr on failure
      */
-    std::shared_ptr<Node> CloneNodeTree(const nlohmann::json& nodeJson);
+    std::shared_ptr<Node> CloneNodeTree(const nlohmann::json& nodeJson, bool regenerateUUIDs = true);
 
     /**
-     * Recursively regenerate UUIDs for a node tree
+     * Recursively regenerate UUIDs for a node tree and remap the intra-subtree
+     * signal-connection targets through the same map, so declarative connections inside an
+     * instantiated prefab survive the renumbering. See core::uuidremap.
      * @param node The node to process
      */
     void RegenerateUUIDs(std::shared_ptr<Node> node);

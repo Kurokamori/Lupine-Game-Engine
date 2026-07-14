@@ -60,6 +60,9 @@ public:
     virtual void setUniformMat4Array(const char* name, const math::Mat4* values, size_t count) = 0;
     virtual void setUniformColor(const char* name, const Color& value) = 0;
 
+    // Reset material data to defaults (prevents data leakage between draw calls)
+    virtual void resetMaterialData() = 0;
+
     // Draw commands
     virtual void draw(uint32_t vertexCount, uint32_t instanceCount = 1, uint32_t firstVertex = 0, uint32_t firstInstance = 0) = 0;
     virtual void drawIndexed(uint32_t indexCount, uint32_t instanceCount = 1, uint32_t firstIndex = 0, int32_t vertexOffset = 0, uint32_t firstInstance = 0) = 0;

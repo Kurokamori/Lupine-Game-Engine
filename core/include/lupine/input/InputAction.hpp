@@ -66,16 +66,29 @@ public:
     // Settings
     void SetDeadzone(float deadzone) { m_Deadzone = deadzone; }
     float GetDeadzone() const { return m_Deadzone; }
-    
+
+    // Context / action-set this action belongs to. An empty context is always
+    // active; a non-empty context only contributes input while its context is
+    // enabled on the InputManager (see InputManager::EnableContext). Lets a game
+    // toggle whole groups of actions on/off (gameplay vs menu vs vehicle).
+    void SetContext(const std::string& context) { m_Context = context; }
+    const std::string& GetContext() const { return m_Context; }
+
+    // When disabled, the action never evaluates as pressed regardless of bindings.
+    void SetEnabled(bool enabled) { m_Enabled = enabled; }
+    bool IsEnabled() const { return m_Enabled; }
+
     // Serialization
     nlohmann::json ToJson() const;
     static InputAction FromJson(const nlohmann::json& json);
-    
+
 private:
     std::string m_Name;
     std::vector<InputBinding> m_Bindings;
     float m_Deadzone = 0.5f; // For axis-based inputs
-    
+    std::string m_Context;   // "" = always active
+    bool m_Enabled = true;
+
     friend class InputManager;
 };
 
@@ -109,20 +122,30 @@ public:
     
     void SetSnap(bool snap) { m_Snap = snap; }
     bool GetSnap() const { return m_Snap; }
-    
+
+    // Context / action-set this axis belongs to (see InputAction::SetContext).
+    void SetContext(const std::string& context) { m_Context = context; }
+    const std::string& GetContext() const { return m_Context; }
+
+    // When disabled, the axis always reads 0 regardless of bindings.
+    void SetEnabled(bool enabled) { m_Enabled = enabled; }
+    bool IsEnabled() const { return m_Enabled; }
+
     // Serialization
     nlohmann::json ToJson() const;
     static InputAxis FromJson(const nlohmann::json& json);
-    
+
 private:
     std::string m_Name;
     std::vector<InputBinding> m_Bindings;
-    
+
     float m_Deadzone = 0.2f;      // Minimum value to register input
     float m_Sensitivity = 1.0f;    // Multiplier for digital inputs
     float m_Gravity = 3.0f;        // How fast the input resets to neutral
     bool m_Snap = false;           // If true, axis immediately resets when opposite input is pressed
-    
+    std::string m_Context;         // "" = always active
+    bool m_Enabled = true;
+
     friend class InputManager;
 };
 
@@ -163,7 +186,13 @@ public:
     // File I/O
     bool SaveToFile(const std::string& filepath) const;
     bool LoadFromFile(const std::string& filepath);
-    
+
+    /**
+     * Load input map from a JSON string
+     * Used for loading from pack files where file I/O isn't available
+     */
+    bool LoadFromString(const std::string& jsonString);
+
 private:
     std::vector<InputAction> m_Actions;
     std::vector<InputAxis> m_Axes;

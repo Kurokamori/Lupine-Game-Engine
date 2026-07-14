@@ -37,6 +37,7 @@ public:
     void OnAwake() override;
     void OnReady() override;
     void OnDestroy() override;
+    void OnPhysicsWorldRebuild(PhysicsWorldRebuildPhase phase) override;
     void OnPhysicsProcess(float deltaTime) override;
 
     // ===== Property Accessors =====
@@ -116,10 +117,17 @@ private:
     physics3d::RigidBody3D* m_PhysicsBody;
     core::UUID m_PhysicsBodyId;
     bool m_BodyCreated;
-    
+
     // Cached transform for synchronization
     math::Vec3 m_LastPosition;
     math::Quat m_LastRotation;
+
+    // Velocity captured just before a physics-world rebuild destroys the body. Unlike the
+    // 2D bodies, this component keeps no velocity of its own - the body is the only store -
+    // so it has to be parked here across the rebuild and re-applied to the fresh body, or an
+    // overlay would lose all its momentum on a change_scene. See OnPhysicsWorldRebuild.
+    math::Vec3 m_SavedLinearVelocity = math::Vec3(0.0f, 0.0f, 0.0f);
+    math::Vec3 m_SavedAngularVelocity = math::Vec3(0.0f, 0.0f, 0.0f);
     
     // Create physics body in the physics world
     void CreatePhysicsBody();

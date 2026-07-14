@@ -6,9 +6,10 @@ Reuses MaterialOverridePropertyWidget internals for consistency.
 """
 
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-                              QCheckBox, QPushButton, QFrame)
+                              QCheckBox, QPushButton, QFrame, QComboBox,
+                              QLineEdit, QFileDialog)
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QColor
 import json
 import sys
 from pathlib import Path
@@ -19,7 +20,11 @@ from theme import get_theme_manager
 
 
 class MaterialSlotWidget(QWidget):
-    """Widget for a single material slot with collapsible override properties"""
+    """Widget for a single material slot with collapsible override properties.
+
+    Supports shader selection (built-in and custom) with dynamic parameter categories
+    based on the selected shader type.
+    """
 
     value_changed = pyqtSignal(int, str, object)  # slot_index, property_name, value
 
@@ -31,9 +36,27 @@ class MaterialSlotWidget(QWidget):
         self.editor_bridge = editor_bridge
         self.main_editor = main_editor
         self.category_widgets = {}
+        self.current_shader_name = "PBR"  # Default shader
+        self._custom_shader_path = ""
+
+        # Import shader registry
+        from editor.widgets.shader_definitions import get_shader_registry
+        self.shader_registry = get_shader_registry()
+
+        # Set backend from editor bridge if available
+        self._update_backend_from_engine()
 
         self._init_ui()
         self._load_values()
+
+    def _update_backend_from_engine(self):
+        """Update the shader registry with the current graphics backend from the engine"""
+        if self.editor_bridge:
+            try:
+                engine_backend = self.editor_bridge.get_backend()
+                self.shader_registry.set_current_backend_from_engine(engine_backend)
+            except Exception as e:
+                print(f"[Warning] Could not get graphics backend: {e}")
 
     def _log(self, message, level="Debug"):
         """Helper to log messages to console if available"""
@@ -93,126 +116,382 @@ class MaterialSlotWidget(QWidget):
         self.properties_layout.setContentsMargins(15, 2, 0, 2)
         self.properties_layout.setSpacing(2)
 
-        # Create categories similar to MaterialOverridePropertyWidget
-        self._create_material_categories()
+        # Shader selection dropdown
+        self._create_shader_selector()
+
+        # Custom shader path (initially hidden)
+        self._create_custom_shader_path()
+
+        # Custom .lsh shader path (always visible; takes precedence over shaderType)
+        self._create_lsh_shader_path()
+
+        # Dynamic categories container
+        self.dynamic_categories_widget = QWidget()
+        self.dynamic_categories_layout = QVBoxLayout()
+        self.dynamic_categories_layout.setContentsMargins(0, 0, 0, 0)
+        self.dynamic_categories_layout.setSpacing(2)
+        self.dynamic_categories_widget.setLayout(self.dynamic_categories_layout)
+        self.properties_layout.addWidget(self.dynamic_categories_widget)
+
+        # Build categories for default shader (PBR)
+        self._rebuild_categories()
+
+        # Add stretch at the end
+        self.properties_layout.addStretch()
 
         layout.addWidget(self.properties_widget)
 
         # Initially collapsed
         self.properties_widget.setVisible(False)
-    
-    def _create_material_categories(self):
-        """Create material property categories (reusing MaterialOverridePropertyWidget structure)"""
-        from editor.panels.inspector_panel import (
-            ColorPropertyWidget, FloatPropertyWidget, PathPropertyWidget
-        )
 
-        # Albedo category
-        albedo_category = self._create_category("Albedo")
-        self.category_widgets['Albedo'] = {
-            'frame': albedo_category,
-            'widgets': {}
-        }
+    def _create_shader_selector(self):
+        """Create the shader selection dropdown"""
+        theme = get_theme_manager().get_current_theme()
+        colors = theme.colors
 
-        albedo_color = ColorPropertyWidget("Color")
-        albedo_color.value_changed.connect(lambda v: self._on_property_changed('albedoColor', v))
-        albedo_category.layout().addWidget(albedo_color)
-        self.category_widgets['Albedo']['widgets']['color'] = albedo_color
+        shader_layout = QHBoxLayout()
+        shader_layout.setContentsMargins(0, 2, 0, 4)
+        shader_layout.setSpacing(4)
 
-        albedo_texture = PathPropertyWidget("Texture")
-        albedo_texture.value_changed.connect(lambda v: self._on_property_changed('albedoTexturePath', v))
-        albedo_category.layout().addWidget(albedo_texture)
-        self.category_widgets['Albedo']['widgets']['texture'] = albedo_texture
+        shader_label = QLabel("Shader:")
+        shader_label.setStyleSheet(f"color: {colors.text_primary}; font-weight: bold;")
+        shader_layout.addWidget(shader_label)
 
-        self.properties_layout.addWidget(albedo_category)
+        self.shader_combo = QComboBox()
+        # Add built-in shaders
+        for shader_name in self.shader_registry.get_builtin_shader_names():
+            self.shader_combo.addItem(shader_name)
+        # Add "Custom" option
+        self.shader_combo.addItem("Custom")
 
-        # Metallic/Roughness category
-        metal_rough_category = self._create_category("Metallic/Roughness")
-        self.category_widgets['MetallicRoughness'] = {
-            'frame': metal_rough_category,
-            'widgets': {}
-        }
+        self.shader_combo.setCurrentText("PBR")
+        self.shader_combo.currentTextChanged.connect(self._on_shader_changed)
+        self.shader_combo.setStyleSheet(f"""
+            QComboBox {{
+                background-color: {colors.surface};
+                color: {colors.text_primary};
+                border: 1px solid {colors.border};
+                border-radius: 3px;
+                padding: 3px 6px;
+            }}
+            QComboBox:hover {{
+                background-color: {colors.surface_hover};
+            }}
+            QComboBox::drop-down {{
+                border: none;
+            }}
+            QComboBox::down-arrow {{
+                image: none;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 6px solid {colors.text_secondary};
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: {colors.surface};
+                color: {colors.text_primary};
+                selection-background-color: {colors.accent_color};
+            }}
+        """)
+        shader_layout.addWidget(self.shader_combo, 1)
 
-        metallic_widget = FloatPropertyWidget("Metallic")
-        metallic_widget.value_changed.connect(lambda v: self._on_property_changed('metallic', v))
-        metal_rough_category.layout().addWidget(metallic_widget)
-        self.category_widgets['MetallicRoughness']['widgets']['metallic'] = metallic_widget
+        self.properties_layout.addLayout(shader_layout)
 
-        roughness_widget = FloatPropertyWidget("Roughness")
-        roughness_widget.value_changed.connect(lambda v: self._on_property_changed('roughness', v))
-        metal_rough_category.layout().addWidget(roughness_widget)
-        self.category_widgets['MetallicRoughness']['widgets']['roughness'] = roughness_widget
+    def _create_custom_shader_path(self):
+        """Create the custom shader path browser (hidden by default)"""
+        theme = get_theme_manager().get_current_theme()
+        colors = theme.colors
 
-        metal_rough_texture = PathPropertyWidget("Texture")
-        metal_rough_texture.value_changed.connect(lambda v: self._on_property_changed('metallicRoughnessTexturePath', v))
-        metal_rough_category.layout().addWidget(metal_rough_texture)
-        self.category_widgets['MetallicRoughness']['widgets']['texture'] = metal_rough_texture
+        # Get backend for appropriate labels
+        backend = self.shader_registry.get_current_backend()
 
-        self.properties_layout.addWidget(metal_rough_category)
+        self.custom_shader_widget = QWidget()
+        custom_layout = QVBoxLayout()
+        custom_layout.setContentsMargins(0, 0, 0, 4)
+        custom_layout.setSpacing(2)
 
-        # Normal category
-        normal_category = self._create_category("Normal")
-        self.category_widgets['Normal'] = {
-            'frame': normal_category,
-            'widgets': {}
-        }
+        # Vertex shader path - use backend-specific label
+        vert_layout = QHBoxLayout()
+        vert_layout.setSpacing(4)
+        # Shorten the label for UI (e.g., "Vertex Shader (HLSL)" -> "Vertex:")
+        vert_label_text = backend.vertex_shader_name.split()[0] + ":"
+        self.vert_shader_label = QLabel(vert_label_text)
+        self.vert_shader_label.setStyleSheet(f"color: {colors.text_secondary};")
+        self.vert_shader_label.setFixedWidth(60)
+        self.vert_shader_label.setToolTip(backend.vertex_shader_name)
+        vert_layout.addWidget(self.vert_shader_label)
 
-        normal_texture = PathPropertyWidget("Texture")
-        normal_texture.value_changed.connect(lambda v: self._on_property_changed('normalTexturePath', v))
-        normal_category.layout().addWidget(normal_texture)
-        self.category_widgets['Normal']['widgets']['texture'] = normal_texture
+        self.vert_shader_edit = QLineEdit()
+        self.vert_shader_edit.setPlaceholderText(backend.vertex_file_placeholder)
+        self.vert_shader_edit.setStyleSheet(f"""
+            QLineEdit {{
+                background-color: {colors.surface};
+                color: {colors.text_primary};
+                border: 1px solid {colors.border};
+                border-radius: 3px;
+                padding: 2px;
+            }}
+        """)
+        vert_layout.addWidget(self.vert_shader_edit, 1)
 
-        normal_scale = FloatPropertyWidget("Scale")
-        normal_scale.value_changed.connect(lambda v: self._on_property_changed('normalScale', v))
-        normal_category.layout().addWidget(normal_scale)
-        self.category_widgets['Normal']['widgets']['scale'] = normal_scale
+        vert_browse = QPushButton("...")
+        vert_browse.setFixedWidth(25)
+        vert_browse.clicked.connect(lambda: self._browse_shader("vertex"))
+        vert_layout.addWidget(vert_browse)
+        custom_layout.addLayout(vert_layout)
 
-        self.properties_layout.addWidget(normal_category)
+        # Fragment shader path - use backend-specific label
+        frag_layout = QHBoxLayout()
+        frag_layout.setSpacing(4)
+        # Shorten the label for UI (e.g., "Pixel Shader (HLSL)" -> "Pixel:")
+        frag_label_text = backend.fragment_shader_name.split()[0] + ":"
+        self.frag_shader_label = QLabel(frag_label_text)
+        self.frag_shader_label.setStyleSheet(f"color: {colors.text_secondary};")
+        self.frag_shader_label.setFixedWidth(60)
+        self.frag_shader_label.setToolTip(backend.fragment_shader_name)
+        frag_layout.addWidget(self.frag_shader_label)
 
-        # Emissive category
-        emissive_category = self._create_category("Emissive")
-        self.category_widgets['Emissive'] = {
-            'frame': emissive_category,
-            'widgets': {}
-        }
+        self.frag_shader_edit = QLineEdit()
+        self.frag_shader_edit.setPlaceholderText(backend.fragment_file_placeholder)
+        self.frag_shader_edit.setStyleSheet(f"""
+            QLineEdit {{
+                background-color: {colors.surface};
+                color: {colors.text_primary};
+                border: 1px solid {colors.border};
+                border-radius: 3px;
+                padding: 2px;
+            }}
+        """)
+        frag_layout.addWidget(self.frag_shader_edit, 1)
 
-        emissive_color = ColorPropertyWidget("Color")
-        emissive_color.value_changed.connect(lambda v: self._on_property_changed('emissiveColor', v))
-        emissive_category.layout().addWidget(emissive_color)
-        self.category_widgets['Emissive']['widgets']['color'] = emissive_color
+        frag_browse = QPushButton("...")
+        frag_browse.setFixedWidth(25)
+        frag_browse.clicked.connect(lambda: self._browse_shader("fragment"))
+        frag_layout.addWidget(frag_browse)
+        custom_layout.addLayout(frag_layout)
 
-        emissive_strength = FloatPropertyWidget("Strength")
-        emissive_strength.value_changed.connect(lambda v: self._on_property_changed('emissiveStrength', v))
-        emissive_category.layout().addWidget(emissive_strength)
-        self.category_widgets['Emissive']['widgets']['strength'] = emissive_strength
+        # Apply button
+        apply_layout = QHBoxLayout()
+        apply_layout.addStretch()
+        self.apply_shader_btn = QPushButton("Apply")
+        self.apply_shader_btn.clicked.connect(self._apply_custom_shader)
+        self.apply_shader_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {colors.accent_color};
+                color: {colors.text_primary};
+                border: none;
+                border-radius: 3px;
+                padding: 3px 10px;
+            }}
+            QPushButton:hover {{
+                background-color: {colors.accent_hover};
+            }}
+        """)
+        apply_layout.addWidget(self.apply_shader_btn)
+        custom_layout.addLayout(apply_layout)
 
-        emissive_texture = PathPropertyWidget("Texture")
-        emissive_texture.value_changed.connect(lambda v: self._on_property_changed('emissiveTexturePath', v))
-        emissive_category.layout().addWidget(emissive_texture)
-        self.category_widgets['Emissive']['widgets']['texture'] = emissive_texture
+        self.custom_shader_widget.setLayout(custom_layout)
+        self.custom_shader_widget.setVisible(False)
+        self.properties_layout.addWidget(self.custom_shader_widget)
 
-        self.properties_layout.addWidget(emissive_category)
+    def _create_lsh_shader_path(self):
+        """Create the custom .lsh shader path row (always visible). A .lsh shader is
+        translated to the active backend at runtime and its #render_mode drives the
+        pipeline state; it takes precedence over the selected shader type when set."""
+        theme = get_theme_manager().get_current_theme()
+        colors = theme.colors
 
-        # Alpha category
-        alpha_category = self._create_category("Alpha")
-        self.category_widgets['Alpha'] = {
-            'frame': alpha_category,
-            'widgets': {}
-        }
+        self.lsh_shader_widget = QWidget()
+        lsh_layout = QHBoxLayout()
+        lsh_layout.setContentsMargins(0, 0, 0, 4)
+        lsh_layout.setSpacing(4)
 
-        alpha_cutoff = FloatPropertyWidget("Cutoff")
-        alpha_cutoff.value_changed.connect(lambda v: self._on_property_changed('alphaCutoff', v))
-        alpha_category.layout().addWidget(alpha_cutoff)
-        self.category_widgets['Alpha']['widgets']['cutoff'] = alpha_cutoff
+        lsh_label = QLabel("LSH:")
+        lsh_label.setStyleSheet(f"color: {colors.text_secondary};")
+        lsh_label.setFixedWidth(60)
+        lsh_label.setToolTip("Custom .lsh shader (overrides shader type when set)")
+        lsh_layout.addWidget(lsh_label)
 
-        self.properties_layout.addWidget(alpha_category)
+        self.lsh_shader_edit = QLineEdit()
+        self.lsh_shader_edit.setPlaceholderText("res:// path to a .lsh shader")
+        self.lsh_shader_edit.setStyleSheet(f"""
+            QLineEdit {{
+                background-color: {colors.surface};
+                color: {colors.text_primary};
+                border: 1px solid {colors.border};
+                border-radius: 3px;
+                padding: 2px;
+            }}
+        """)
+        self.lsh_shader_edit.editingFinished.connect(
+            lambda: self._on_property_changed('customLshShader', self.lsh_shader_edit.text()))
+        lsh_layout.addWidget(self.lsh_shader_edit, 1)
 
-        # Add stretch at the end
-        self.properties_layout.addStretch()
+        lsh_browse = QPushButton("...")
+        lsh_browse.setFixedWidth(25)
+        lsh_browse.clicked.connect(self._browse_lsh_shader)
+        lsh_layout.addWidget(lsh_browse)
 
-    def _create_category(self, title):
-        """Create a category frame"""
-        # Get theme colors
+        lsh_clear = QPushButton("x")
+        lsh_clear.setFixedWidth(25)
+        lsh_clear.setToolTip("Clear the .lsh shader")
+        lsh_clear.clicked.connect(self._clear_lsh_shader)
+        lsh_layout.addWidget(lsh_clear)
+
+        self.lsh_shader_widget.setLayout(lsh_layout)
+        self.properties_layout.addWidget(self.lsh_shader_widget)
+
+    def _browse_lsh_shader(self):
+        """Browse for a .lsh shader file and apply it to this slot."""
+        from panels.inspector_panel import get_project_root, convert_to_res_path
+        start_dir = get_project_root() or ""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select .lsh Shader", start_dir, "Lupine Shader (*.lsh)")
+        if file_path:
+            res_path = convert_to_res_path(file_path)
+            self.lsh_shader_edit.setText(res_path)
+            self._on_property_changed('customLshShader', res_path)
+
+    def _clear_lsh_shader(self):
+        """Clear the .lsh shader from this slot."""
+        self.lsh_shader_edit.setText("")
+        self._on_property_changed('customLshShader', "")
+
+    def _browse_shader(self, shader_type):
+        """Browse for a shader file with backend-appropriate extensions"""
+        # Get appropriate file filter based on current backend
+        backend = self.shader_registry.get_current_backend()
+        from editor.widgets.shader_definitions import GraphicsBackend
+
+        if backend in (GraphicsBackend.OPENGL, GraphicsBackend.WEBGL):
+            file_filter = "GLSL Shader (*.vert *.frag *.glsl)"
+        elif backend == GraphicsBackend.VULKAN:
+            file_filter = "SPIR-V Shader (*.spv);;GLSL Source (*.vert *.frag *.glsl)"
+        elif backend in (GraphicsBackend.DIRECTX11, GraphicsBackend.DIRECTX12):
+            file_filter = "HLSL Shader (*.hlsl)"
+        elif backend == GraphicsBackend.METAL:
+            file_filter = "Metal Shader (*.metal)"
+        else:
+            file_filter = "Vertex Shader (*.vert *.glsl)" if shader_type == "vertex" else "Fragment Shader (*.frag *.glsl)"
+
+        from panels.inspector_panel import get_project_root, convert_to_res_path
+        start_dir = get_project_root() or ""
+        file_path, _ = QFileDialog.getOpenFileName(self, f"Select {shader_type.title()} Shader ({backend.value})", start_dir, file_filter)
+        if file_path:
+            # Convert to res:// path
+            res_path = convert_to_res_path(file_path)
+            if shader_type == "vertex":
+                self.vert_shader_edit.setText(res_path)
+            else:
+                self.frag_shader_edit.setText(res_path)
+
+    def _apply_custom_shader(self):
+        """Apply the custom shader and reload parameters"""
+        from editor.widgets.shader_definitions import CustomShaderLoader
+
+        vert_path = self.vert_shader_edit.text()
+        frag_path = self.frag_shader_edit.text()
+
+        if not vert_path and not frag_path:
+            return
+
+        shader_def = CustomShaderLoader.load_from_file(vert_path or frag_path)
+        if shader_def:
+            self.shader_registry.register_custom_shader(shader_def)
+            self._custom_shader_path = vert_path or frag_path
+            self._rebuild_categories(shader_def)
+
+            # Notify engine of custom shader change
+            self._on_property_changed('customShaderVert', vert_path)
+            self._on_property_changed('customShaderFrag', frag_path)
+
+    def _on_shader_changed(self, shader_name):
+        """Handle shader selection change"""
+        self.current_shader_name = shader_name
+
+        # Show/hide custom shader path widget
+        is_custom = (shader_name == "Custom")
+        self.custom_shader_widget.setVisible(is_custom)
+
+        if not is_custom:
+            # Rebuild categories for built-in shader
+            shader_def = self.shader_registry.get_shader_by_display_name(shader_name)
+            if shader_def:
+                self._rebuild_categories(shader_def)
+                # Notify engine of shader change
+                self._on_property_changed('shaderType', shader_def.name)
+                # Initialize all shader params with default values for modular shaders
+                self._initialize_shader_params(shader_def)
+
+    def _initialize_shader_params(self, shader_def):
+        """Initialize all shader parameters with default values when shader is selected.
+        This ensures uniforms like u_GlowParams are set even before user changes values."""
+        if not self.component or not self.editor_bridge:
+            return
+
+        # Group parameters by uniform name
+        uniform_groups = {}
+        for category in shader_def.categories:
+            for param in category.parameters:
+                if param.uniform_name and param.uniform_component >= 0:
+                    if param.uniform_name not in uniform_groups:
+                        uniform_groups[param.uniform_name] = {}
+                    uniform_groups[param.uniform_name][param.uniform_component] = param.default_value if param.default_value is not None else 0.0
+
+        # Send each uniform Vec4 with default values
+        for uniform_name, components in uniform_groups.items():
+            vec4 = [0.0, 0.0, 0.0, 0.0]
+            for idx, value in components.items():
+                if 0 <= idx < 4:
+                    vec4[idx] = float(value)
+
+            value_json = json.dumps({
+                "type": "vec4",
+                "value": vec4
+            })
+
+            try:
+                self.editor_bridge.set_material_slot_property(
+                    self.component,
+                    self.slot_index,
+                    uniform_name,
+                    value_json
+                )
+            except Exception as e:
+                self._log(f"Failed to initialize shader param {uniform_name}: {e}", "Warning")
+
+    def _rebuild_categories(self, shader_def=None):
+        """Rebuild the material categories based on the current shader"""
+        from editor.widgets.shader_definitions import ParameterType
+
+        # Get shader definition if not provided
+        if shader_def is None:
+            shader_def = self.shader_registry.get_shader_by_display_name(self.current_shader_name)
+            if shader_def is None:
+                shader_def = self.shader_registry.get_shader("PBR")
+
+        # Clear existing categories
+        self._clear_categories()
+
+        # Build new categories from shader definition
+        for category in shader_def.categories:
+            cat_widgets = self._create_category_dynamic(category.display_name)
+
+            for param in category.parameters:
+                widget = self._create_parameter_widget(param)
+                if widget:
+                    cat_widgets['layout'].addWidget(widget)
+                    cat_widgets['widgets'][param.name] = widget
+
+    def _clear_categories(self):
+        """Clear all category widgets"""
+        while self.dynamic_categories_layout.count():
+            item = self.dynamic_categories_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.category_widgets.clear()
+
+    def _create_category_dynamic(self, title):
+        """Create a category frame for dynamic shader parameters"""
         theme = get_theme_manager().get_current_theme()
         bg_color = theme.colors.surface if theme else "#1e1a28"
         text_color = theme.colors.text_primary if theme else "#ffffff"
@@ -241,7 +520,74 @@ class MaterialSlotWidget(QWidget):
         title_label.setStyleSheet(f"color: {text_color}; border: none; padding: 0px;")
         layout.addWidget(title_label)
 
-        return frame
+        self.dynamic_categories_layout.addWidget(frame)
+
+        category = {
+            'frame': frame,
+            'layout': layout,
+            'widgets': {}
+        }
+        self.category_widgets[title] = category
+        return category
+
+    def _create_parameter_widget(self, param):
+        """Create a widget for a shader parameter based on its type"""
+        from editor.widgets.shader_definitions import ParameterType
+        from editor.panels.inspector_panel import (
+            ColorPropertyWidget, FloatPropertyWidget, PathPropertyWidget,
+            Vec2PropertyWidget, Vec3PropertyWidget, Vec4PropertyWidget,
+            IntPropertyWidget, BoolPropertyWidget
+        )
+
+        if param.param_type == ParameterType.FLOAT:
+            widget = FloatPropertyWidget(param.display_name)
+            if param.default_value is not None:
+                widget.set_value(param.default_value)
+            widget.value_changed.connect(lambda v, p=param.name: self._on_property_changed(p, v))
+            return widget
+
+        elif param.param_type == ParameterType.COLOR:
+            widget = ColorPropertyWidget(param.display_name)
+            if param.default_value:
+                widget.set_value(QColor.fromRgbF(*param.default_value[:4]))
+            widget.value_changed.connect(lambda v, p=param.name: self._on_property_changed(p, v))
+            return widget
+
+        elif param.param_type == ParameterType.TEXTURE:
+            widget = PathPropertyWidget(param.display_name)
+            widget.value_changed.connect(lambda v, p=param.name: self._on_property_changed(p + "Path", v))
+            return widget
+
+        elif param.param_type == ParameterType.VEC2:
+            widget = Vec2PropertyWidget(param.display_name)
+            widget.value_changed.connect(lambda v, p=param.name: self._on_property_changed(p, v))
+            return widget
+
+        elif param.param_type == ParameterType.VEC3:
+            widget = Vec3PropertyWidget(param.display_name)
+            widget.value_changed.connect(lambda v, p=param.name: self._on_property_changed(p, v))
+            return widget
+
+        elif param.param_type == ParameterType.VEC4:
+            widget = Vec4PropertyWidget(param.display_name)
+            widget.value_changed.connect(lambda v, p=param.name: self._on_property_changed(p, v))
+            return widget
+
+        elif param.param_type == ParameterType.INT:
+            widget = IntPropertyWidget(param.display_name)
+            if param.default_value is not None:
+                widget.set_value(param.default_value)
+            widget.value_changed.connect(lambda v, p=param.name: self._on_property_changed(p, v))
+            return widget
+
+        elif param.param_type == ParameterType.BOOL:
+            widget = BoolPropertyWidget(param.display_name)
+            if param.default_value is not None:
+                widget.set_value(param.default_value)
+            widget.value_changed.connect(lambda v, p=param.name: self._on_property_changed(p, v))
+            return widget
+
+        return None
 
     def _toggle_collapsed(self, checked):
         """Toggle the collapsed state"""
@@ -261,7 +607,17 @@ class MaterialSlotWidget(QWidget):
             return
 
         try:
-            # Convert value to JSON
+            # Check if this parameter has uniform mapping (for modular shader params)
+            shader_def = self.shader_registry.get_shader_by_display_name(self.current_shader_name)
+            if shader_def:
+                param_def = self._find_parameter_definition(shader_def, property_name)
+                if param_def and param_def.uniform_name:
+                    # Use modular shader params system
+                    self._set_shader_param_vec4(shader_def, param_def.uniform_name, property_name, value)
+                    self.value_changed.emit(self.slot_index, property_name, value)
+                    return
+
+            # Legacy path - convert value to JSON
             if property_name in ['albedoColor', 'emissiveColor']:
                 # Color value - convert QColor to dict
                 value_json = json.dumps({
@@ -289,6 +645,67 @@ class MaterialSlotWidget(QWidget):
         except Exception as e:
             self._log(f"Failed to set material slot property: {e}", "Warning")
 
+    def _find_parameter_definition(self, shader_def, param_name):
+        """Find a parameter definition by name in the shader definition"""
+        for category in shader_def.categories:
+            for param in category.parameters:
+                if param.name == param_name:
+                    return param
+        return None
+
+    def _get_all_uniform_params(self, shader_def, uniform_name):
+        """Get all parameters that map to the same uniform"""
+        params = []
+        for category in shader_def.categories:
+            for param in category.parameters:
+                if param.uniform_name == uniform_name:
+                    params.append(param)
+        return params
+
+    def _set_shader_param_vec4(self, shader_def, uniform_name, changed_param_name, new_value):
+        """Build and send a Vec4 shader param from all parameters mapping to the uniform"""
+        # Get all parameters for this uniform
+        params = self._get_all_uniform_params(shader_def, uniform_name)
+
+        # Build Vec4 from current widget values, with the new value for the changed param
+        vec4 = [0.0, 0.0, 0.0, 0.0]
+        for param in params:
+            if param.uniform_component >= 0 and param.uniform_component < 4:
+                if param.name == changed_param_name:
+                    vec4[param.uniform_component] = float(new_value)
+                else:
+                    # Get current value from widget
+                    current_value = self._get_widget_value(param.name)
+                    if current_value is not None:
+                        vec4[param.uniform_component] = float(current_value)
+                    elif param.default_value is not None:
+                        vec4[param.uniform_component] = float(param.default_value)
+
+        # Send as shaderParams format: {"type": "vec4", "value": [x, y, z, w]}
+        value_json = json.dumps({
+            "type": "vec4",
+            "value": vec4
+        })
+
+        self.editor_bridge.set_material_slot_property(
+            self.component,
+            self.slot_index,
+            uniform_name,
+            value_json
+        )
+
+    def _get_widget_value(self, param_name):
+        """Get current value from a parameter widget"""
+        for category_name, category_data in self.category_widgets.items():
+            widgets = category_data.get('widgets', {})
+            if param_name in widgets:
+                widget = widgets[param_name]
+                if hasattr(widget, 'get_value'):
+                    return widget.get_value()
+                elif hasattr(widget, 'value'):
+                    return widget.value()
+        return None
+
     def _load_values(self):
         """Load current values from component"""
         if not self.component or not self.editor_bridge:
@@ -306,56 +723,50 @@ class MaterialSlotWidget(QWidget):
                 self.enable_checkbox.setChecked(properties['enableOverride'])
                 self.properties_widget.setEnabled(properties['enableOverride'])
 
-            # Load albedo
-            if 'Albedo' in self.category_widgets:
-                widgets = self.category_widgets['Albedo']['widgets']
-                if 'color' in widgets and 'albedoColor' in properties:
-                    albedo = properties['albedoColor']
-                    # ColorPropertyWidget expects a tuple (r, g, b, a)
-                    widgets['color'].set_value((albedo.get('r', 1.0), albedo.get('g', 1.0),
-                                                albedo.get('b', 1.0), albedo.get('a', 1.0)))
-                if 'texture' in widgets and 'albedoTexturePath' in properties:
-                    widgets['texture'].set_value(properties['albedoTexturePath'])
+            # Set shader type if stored
+            shader_type = properties.get('shaderType', 'PBR')
+            if shader_type and shader_type != self.current_shader_name:
+                shader_def = self.shader_registry.get_shader(shader_type)
+                if shader_def:
+                    self.shader_combo.blockSignals(True)
+                    self.shader_combo.setCurrentText(shader_def.display_name)
+                    self.shader_combo.blockSignals(False)
+                    self.current_shader_name = shader_def.display_name
+                    self._rebuild_categories(shader_def)
 
-            # Load metallic/roughness
-            if 'MetallicRoughness' in self.category_widgets:
-                widgets = self.category_widgets['MetallicRoughness']['widgets']
-                if 'metallic' in widgets and 'metallic' in properties:
-                    widgets['metallic'].set_value(properties['metallic'])
-                if 'roughness' in widgets and 'roughness' in properties:
-                    widgets['roughness'].set_value(properties['roughness'])
-                if 'texture' in widgets and 'metallicRoughnessTexturePath' in properties:
-                    widgets['texture'].set_value(properties['metallicRoughnessTexturePath'])
+            # Load the custom .lsh shader path
+            if hasattr(self, 'lsh_shader_edit'):
+                self.lsh_shader_edit.blockSignals(True)
+                self.lsh_shader_edit.setText(properties.get('customLshShader', ''))
+                self.lsh_shader_edit.blockSignals(False)
 
-            # Load normal
-            if 'Normal' in self.category_widgets:
-                widgets = self.category_widgets['Normal']['widgets']
-                if 'texture' in widgets and 'normalTexturePath' in properties:
-                    widgets['texture'].set_value(properties['normalTexturePath'])
-                if 'scale' in widgets and 'normalScale' in properties:
-                    widgets['scale'].set_value(properties['normalScale'])
-
-            # Load emissive
-            if 'Emissive' in self.category_widgets:
-                widgets = self.category_widgets['Emissive']['widgets']
-                if 'color' in widgets and 'emissiveColor' in properties:
-                    emissive = properties['emissiveColor']
-                    # ColorPropertyWidget expects a tuple (r, g, b, a)
-                    widgets['color'].set_value((emissive.get('r', 0.0), emissive.get('g', 0.0),
-                                                emissive.get('b', 0.0), emissive.get('a', 1.0)))
-                if 'strength' in widgets and 'emissiveStrength' in properties:
-                    widgets['strength'].set_value(properties['emissiveStrength'])
-                if 'texture' in widgets and 'emissiveTexturePath' in properties:
-                    widgets['texture'].set_value(properties['emissiveTexturePath'])
-
-            # Load alpha
-            if 'Alpha' in self.category_widgets:
-                widgets = self.category_widgets['Alpha']['widgets']
-                if 'cutoff' in widgets and 'alphaCutoff' in properties:
-                    widgets['cutoff'].set_value(properties['alphaCutoff'])
+            # Load parameter values dynamically
+            self._load_parameter_values(properties)
 
         except Exception as e:
             self._log(f"Failed to load material slot values: {e}", "Warning")
+
+    def _load_parameter_values(self, properties):
+        """Load parameter values from properties into widgets"""
+        for category_name, category_data in self.category_widgets.items():
+            widgets = category_data.get('widgets', {})
+            for param_name, widget in widgets.items():
+                if param_name in properties:
+                    value = properties[param_name]
+                    try:
+                        # Handle color values
+                        if isinstance(value, dict) and 'r' in value:
+                            qcolor = QColor.fromRgbF(
+                                value.get('r', 1.0),
+                                value.get('g', 1.0),
+                                value.get('b', 1.0),
+                                value.get('a', 1.0)
+                            )
+                            widget.set_value(qcolor)
+                        else:
+                            widget.set_value(value)
+                    except Exception as e:
+                        self._log(f"Failed to set widget value for {param_name}: {e}", "Warning")
 
 
 class MaterialSlotsPropertyWidget(QWidget):

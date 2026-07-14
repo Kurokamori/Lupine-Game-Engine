@@ -8,6 +8,7 @@
 #include "lupine/math/Mat4.hpp"
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -79,6 +80,21 @@ enum class RenderLayer : uint32_t {
 };
 
 /**
+ * Vertex-layout / host kind for a custom .lsh material. Selects the pipeline vertex
+ * input layout and the default render state when the shader declares no #render_mode:
+ *   UI2D           - 2D UI / sprite quad (pos/normal/uv/color), no depth, no cull (overlay)
+ *   Mesh3D         - 3D mesh (pos/normal/uv/color/tangent), depth test+write, back cull
+ *   SkeletalMesh3D - Mesh3D + bone ids/weights and the bone-transform UBO
+ */
+enum class LshMaterialLayout {
+    UI2D,
+    Mesh3D,
+    SkeletalMesh3D,
+    InstancedMesh3D   // 3D mesh (pos/normal/uv/color) + per-instance buffer at binding 1
+                      // (a_InstanceModel0..3/Color/Custom, locations 4-9); for MultiMesh.
+};
+
+/**
  * Material definition.
  * Describes shaders, textures, and properties for rendering.
  */
@@ -102,6 +118,24 @@ struct Material {
     // Alpha/transparency
     bool isTransparent = false;
     float alphaClipThreshold = 0.5f;
+
+    // Feature flags (set from .lsh #feature directives for custom shaders)
+    bool usesLighting = false;
+
+    // True when the shader declares a `u_SceneTexture` sampler. The renderer captures the
+    // scene color into an offscreen target and binds it here for screen-space post-processing
+    // (e.g. a full-screen ColorRect that grades what's behind it).
+    bool usesSceneTexture = false;
+
+    // Per-frame engine-fed uniforms for custom .lsh shaders. Set when the shader source
+    // references the corresponding built-in (Gap E/F). The renderer fills them in
+    // executeBatch so the shader gets a live TIME / texel size / resolution.
+    bool usesTime = false;        // shader references TIME -> u_Time
+    bool usesScreenSize = false;  // shader references u_TexelSize / u_Resolution
+
+    // Per-texture sampler overrides from .lsh sampler hints (Gap G): (texture slot,
+    // sampler) pairs bound after the default sampler so @filter/@repeat take effect.
+    std::vector<std::pair<int, SamplerHandle>> customSamplers;
 };
 
 /**

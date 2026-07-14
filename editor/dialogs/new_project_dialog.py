@@ -3,28 +3,34 @@ Lupine Engine New Project Dialog
 Dialog for creating new projects with name and location selection
 """
 
-from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
-                             QLineEdit, QPushButton, QFileDialog, QMessageBox)
+from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
+                             QLineEdit, QPushButton, QFileDialog, QMessageBox,
+                             QFrame)
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QPixmap
 from pathlib import Path
 import os
+
+from project_file import ProjectFile
 
 
 class NewProjectDialog(QDialog):
     """Dialog for creating a new Lupine Engine project"""
-    
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("New Project")
         self.setModal(True)
         self.setMinimumWidth(500)
-        
+
         self.project_name = ""
         self.project_location = ""
         self.creator_name = ""
-        
+        self.icon_path = ""
+
         self._setup_ui()
         self._set_default_location()
+        self._set_default_icon()
     
     def _setup_ui(self):
         """Setup the dialog UI"""
@@ -50,7 +56,37 @@ class NewProjectDialog(QDialog):
         self.creator_edit.setPlaceholderText("Your name...")
         layout.addWidget(creator_label)
         layout.addWidget(self.creator_edit)
-        
+
+        # Project Icon
+        icon_label = QLabel("Project Icon:")
+        layout.addWidget(icon_label)
+
+        icon_layout = QHBoxLayout()
+        icon_layout.setSpacing(12)
+
+        self.icon_preview = QLabel()
+        self.icon_preview.setFixedSize(64, 64)
+        self.icon_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.icon_preview.setFrameShape(QFrame.Shape.StyledPanel)
+        icon_layout.addWidget(self.icon_preview)
+
+        icon_buttons_layout = QVBoxLayout()
+        icon_buttons_layout.setSpacing(6)
+
+        choose_icon_button = QPushButton("Choose Icon...")
+        choose_icon_button.setProperty("secondary", True)
+        choose_icon_button.clicked.connect(self._browse_icon)
+        icon_buttons_layout.addWidget(choose_icon_button)
+
+        reset_icon_button = QPushButton("Use Default")
+        reset_icon_button.setProperty("secondary", True)
+        reset_icon_button.clicked.connect(self._set_default_icon)
+        icon_buttons_layout.addWidget(reset_icon_button)
+
+        icon_layout.addLayout(icon_buttons_layout)
+        icon_layout.addStretch()
+        layout.addLayout(icon_layout)
+
         # Project Location
         location_label = QLabel("Project Location:")
         layout.addWidget(location_label)
@@ -103,6 +139,40 @@ class NewProjectDialog(QDialog):
         default_location = documents / "LupineProjects"
         self.location_edit.setText(str(default_location))
     
+    def _set_default_icon(self):
+        """Reset the icon selection to the engine's default icon"""
+        default_icon = ProjectFile.get_engine_default_icon_path()
+        self.icon_path = default_icon or ""
+        self._update_icon_preview()
+
+    def _browse_icon(self):
+        """Open file dialog to select a project icon"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Project Icon",
+            str(Path.home()),
+            "Image Files (*.png *.jpg *.jpeg *.bmp *.ico)"
+        )
+
+        if file_path:
+            self.icon_path = file_path
+            self._update_icon_preview()
+
+    def _update_icon_preview(self):
+        """Refresh the icon preview thumbnail"""
+        if self.icon_path and os.path.exists(self.icon_path):
+            pixmap = QPixmap(self.icon_path).scaled(
+                64, 64,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.icon_preview.setPixmap(pixmap)
+            self.icon_preview.setText("")
+        else:
+            self.icon_preview.setPixmap(QPixmap())
+            self.icon_preview.setText("🎮")
+            self.icon_preview.setStyleSheet("font-size: 28px;")
+
     def _browse_location(self):
         """Open file dialog to select project location"""
         current_location = self.location_edit.text()
@@ -214,5 +284,6 @@ class NewProjectDialog(QDialog):
         return {
             "name": self.project_name,
             "location": self.project_location,
-            "creator": self.creator_name
+            "creator": self.creator_name,
+            "icon": self.icon_path
         }

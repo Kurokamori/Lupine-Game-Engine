@@ -6,10 +6,17 @@ Entry point for the PyQt-based game editor
 
 import sys
 import os
+import argparse
 
-# Add editor directory to path
+# Add editor directory to path and DLL search
 editor_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'editor')
 sys.path.insert(0, editor_dir)
+if sys.platform == 'win32' and hasattr(os, 'add_dll_directory'):
+    os.add_dll_directory(editor_dir)  # Finds dxcompiler.dll from vcpkg build
+
+
+# Global renderer setting
+RENDERER_BACKEND = None
 
 def load_engine_modules():
     """
@@ -45,16 +52,55 @@ def load_engine_modules():
 
     return engine_module, runtime_module, success_messages, error_messages
 
+def parse_args():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(
+        description='Lupine Engine Editor',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        '--renderer', '-r',
+        choices=['opengl', 'vulkan', 'metal', 'dx11', 'dx12'],
+        default='opengl',
+        help='Graphics backend to use (default: opengl)'
+    )
+    parser.add_argument(
+        '--debug',
+        action='store_true',
+        help='Enable debug mode'
+    )
+    return parser.parse_args()
+
 def main():
     """Main entry point for the Lupine Engine Editor"""
+    global RENDERER_BACKEND
+
+    # Parse command line arguments
+    args = parse_args()
+    RENDERER_BACKEND = args.renderer
+
     print("=" * 60)
     print("Lupine Engine Editor v0.1.0")
+    print(f"Renderer Backend: {RENDERER_BACKEND.upper()}")
     print("=" * 60)
     print()
 
     # Load engine modules
     print("Loading engine modules...")
     engine, runtime, success_msgs, error_msgs = load_engine_modules()
+
+    # Map renderer string to GraphicsBackend enum
+    backend_enum = None
+    if engine:
+        backend_map = {
+            'opengl': engine.GraphicsBackend.OpenGL,
+            'vulkan': engine.GraphicsBackend.Vulkan,
+            'metal': engine.GraphicsBackend.Metal,
+            'dx11': engine.GraphicsBackend.DirectX11,
+            'dx12': engine.GraphicsBackend.DirectX12,
+        }
+        backend_enum = backend_map.get(RENDERER_BACKEND, engine.GraphicsBackend.OpenGL)
+        print(f"[OK] Renderer backend set to {RENDERER_BACKEND.upper()}")
 
     # Print results
     print()
@@ -100,16 +146,16 @@ def main():
         print("\n" + "=" * 60)
         print("OPENING EDITOR")
         print("=" * 60)
-        
-        # Create and show editor
-        state.current_editor = MainEditor(project_data)
+
+        # Create and show editor with selected backend
+        state.current_editor = MainEditor(project_data, backend=backend_enum)
         state.current_editor.project_closed.connect(open_project_manager)
         state.current_editor.show()
-        
+
         # Close project manager after showing editor
         if state.project_manager:
             state.project_manager.hide()
-        
+
         # Apply theme to editor
         theme_manager.apply_theme(app)
     

@@ -1,10 +1,28 @@
 #include "lupine/platform/FileSystem.hpp"
+#include "lupine/platform/PlatformDetection.hpp"
 #include "lupine/logger/Logger.hpp"
 #include <fstream>
 #include <sstream>
 #include <cstring>
+#include <system_error>
 
-#if defined(LUPINE_PLATFORM_WINDOWS)
+// Platform-specific includes for file system operations
+// Order matters: Check EMSCRIPTEN first (it also defines __unix__), then Windows, then Unix-like
+#if defined(__EMSCRIPTEN__) || defined(LUPINE_PLATFORM_WEB)
+    // Emscripten / WebAssembly
+    #include <emscripten.h>
+    #include <dirent.h>
+    #include <sys/types.h>
+    #include <sys/stat.h>
+    #include <stdio.h>
+    #include <limits.h>
+    #include <stdlib.h>
+    #include <unistd.h>
+    #define stat_struct struct stat
+    #define stat_func stat
+
+#elif defined(_WIN32) || defined(_WIN64) || defined(LUPINE_PLATFORM_WINDOWS)
+    // Windows
     #include <windows.h>
     #include <direct.h>
     #include <sys/stat.h>
@@ -29,6 +47,7 @@
     #endif
     #define getcwd _getcwd
     #define chdir _chdir
+    #define rmdir _rmdir
     #define stat_struct struct _stat
     #define stat_func _stat
 
@@ -38,7 +57,9 @@
     #ifndef PATH_MAX
         #define PATH_MAX MAX_PATH
     #endif
+
 #else
+    // Unix-like systems (Linux, macOS, BSD, etc.)
     #include <unistd.h>
     #include <dirent.h>
     #include <sys/types.h>
@@ -54,7 +75,9 @@ namespace platform {
 namespace {
 
     std::string GetErrorMessage() {
-        return std::strerror(errno);
+        // generic_category() maps errno values to the same text as strerror(), but is
+        // thread-safe and not deprecated on MSVC.
+        return std::generic_category().message(errno);
     }
 
     bool GetFileStat(const std::string& path, stat_struct& statbuf) {
@@ -63,7 +86,7 @@ namespace {
 }
 
 FileResult<std::string> FileSystem::ReadFile(const std::string& path) {
-    std::ifstream file(path, std::ios::in);
+    std::ifstream file(path, std::ios::in | std::ios::binary);
     if (!file.is_open()) {
         std::string error = "Failed to open file: " + path + " - " + GetErrorMessage();
 
@@ -100,7 +123,7 @@ FileResult<std::vector<uint8_t>> FileSystem::ReadBinaryFile(const std::string& p
 }
 
 FileResult<> FileSystem::WriteFile(const std::string& path, const std::string& contents) {
-    std::ofstream file(path, std::ios::out | std::ios::trunc);
+    std::ofstream file(path, std::ios::out | std::ios::trunc | std::ios::binary);
     if (!file.is_open()) {
         std::string error = "Failed to open file for writing: " + path + " - " + GetErrorMessage();
 
@@ -140,7 +163,7 @@ FileResult<> FileSystem::WriteBinaryFile(const std::string& path, const std::vec
 }
 
 FileResult<> FileSystem::AppendFile(const std::string& path, const std::string& contents) {
-    std::ofstream file(path, std::ios::out | std::ios::app);
+    std::ofstream file(path, std::ios::out | std::ios::app | std::ios::binary);
     if (!file.is_open()) {
         std::string error = "Failed to open file for appending: " + path + " - " + GetErrorMessage();
 
@@ -311,11 +334,8 @@ FileResult<> FileSystem::DeleteDirectory(const std::string& path, bool recursive
         }
     }
 
-#if defined(LUPINE_PLATFORM_WINDOWS)
-    if (_rmdir(path.c_str()) != 0) {
-#else
+    // rmdir is defined as _rmdir on Windows via macro above
     if (rmdir(path.c_str()) != 0) {
-#endif
         std::string error = "Failed to delete directory: " + path + " - " + GetErrorMessage();
 
         return FileResult<>(false, error);

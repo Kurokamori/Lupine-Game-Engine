@@ -53,7 +53,14 @@ public:
 
     // Load from file
     bool LoadFromFile(const std::string& filepath, AudioLoadMode loadMode = AudioLoadMode::Preload);
-    
+
+    // Build a preloaded asset directly from in-memory interleaved PCM samples.
+    // Used to play the decoded audio track of a video through AudioManager.
+    // `channels` must be 1 or 2 and `bitsPerSample` must be 16 (the format the
+    // audio backend plays preloaded buffers as). Returns false on invalid input.
+    bool LoadFromPCM(const uint8_t* pcm, size_t sizeBytes, uint32_t sampleRate,
+                     uint32_t channels, uint32_t bitsPerSample = 16);
+
     // Audio properties
     uint32_t GetSampleRate() const { return m_AudioData.sampleRate; }
     uint32_t GetChannels() const { return m_AudioData.channels; }
@@ -87,6 +94,9 @@ private:
     bool LoadWAV(const std::string& filepath);
     bool LoadOGG(const std::string& filepath);
     bool LoadMP3(const std::string& filepath);
+    // Memory-based loading for pack file support
+    bool LoadWAVFromMemory(const uint8_t* data, size_t dataSize);
+    bool LoadMP3FromMemory(const uint8_t* data, size_t dataSize);
     // Note: FLAC uses LoadMP3 which handles all formats via miniaudio decoder
 
     // Determine format from file extension

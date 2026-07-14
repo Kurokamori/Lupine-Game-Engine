@@ -5,6 +5,7 @@
 #include "lupine/math/Math.hpp"
 #include "lupine/rendering/ResourceHandles.hpp"
 #include "lupine/rendering/RenderWorld.hpp"
+#include "lupine/components/CustomShaderParams.hpp"
 #include <string>
 
 namespace lupine {
@@ -67,7 +68,7 @@ public:
     /**
      * Get/Set the fill color
      */
-    const math::Color& GetColor() const;
+    math::Color GetColor() const;
     void SetColor(const math::Color& color);
     
     /**
@@ -113,7 +114,7 @@ public:
     /**
      * Get/Set border color
      */
-    const math::Color& GetBorderColor() const;
+    math::Color GetBorderColor() const;
     void SetBorderColor(const math::Color& color);
     
     /**
@@ -150,6 +151,22 @@ public:
     bool GetUISpace() const;
     void SetUISpace(bool uiSpace);
 
+    // ===== Custom Shader (.lsh) =====
+
+    /**
+     * Get/Set the attached Lupine Shader (.lsh) path. Empty = built-in primitives.
+     * When set, the shape (fill + border) is rendered by the custom shader, which receives
+     * the shape type, size and border as uniforms and performs the SDF itself.
+     */
+    const std::string& GetShader() const;
+    void SetShader(const std::string& shaderPath);
+
+    /**
+     * Get/Set the serialized exported-shader-parameter values (JSON object string).
+     */
+    const std::string& GetShaderParameters() const;
+    void SetShaderParameters(const std::string& parametersJson);
+
     // ===== IRenderableComponent Implementation =====
     
     void buildDrawCommands(RenderContext& ctx) override;
@@ -166,6 +183,16 @@ private:
     void RenderSquare(RenderContext& ctx, const math::Vec2& position, const math::Vec2& size, float rotation);
     void RenderTriangle(RenderContext& ctx, const math::Vec2& position, float radius, float rotation);
     void RenderPolygon(RenderContext& ctx, const math::Vec2& position, float radius, int sides, float rotation);
+
+    /**
+     * Render the whole shape (fill + border) using the attached custom shader on a bounding
+     * quad. Returns false if the shader could not be resolved/compiled (caller falls back to
+     * the built-in primitives).
+     */
+    bool RenderFillCustomShader(RenderContext& ctx, const math::Vec2& position, float rotation);
+
+    // Custom shader parameter parsing + texture-parameter cache (shared helper).
+    CustomShaderParams m_ShaderParams;
 };
 
 } // namespace components

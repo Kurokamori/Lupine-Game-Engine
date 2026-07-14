@@ -47,7 +47,7 @@ void TestPlatform::OnAwake() {
     }
 }
 
-void TestPlatform::OnInput(float deltaTime) {
+void TestPlatform::OnInput(float) {
     if (!m_Owner || !m_CharacterController) return;
 
     InputManager& input = InputManager::Get();
@@ -79,7 +79,7 @@ void TestPlatform::OnInput(float deltaTime) {
     m_CharacterController->SetVelocity(velocity);
 }
 
-void TestPlatform::OnPhysicsProcess(float deltaTime) {
+void TestPlatform::OnPhysicsProcess(float) {
 
     if (m_CharacterController) {
         m_IsOnGround = m_CharacterController->IsOnGround();

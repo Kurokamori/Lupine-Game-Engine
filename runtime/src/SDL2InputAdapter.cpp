@@ -1,8 +1,19 @@
 #include "lupine/runtime/SDL2InputAdapter.hpp"
 #include "lupine/logger/Logger.hpp"
+#include "lupine/input/InputCodes.hpp"
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#include <emscripten/html5.h>
+#endif
 
 namespace lupine {
 namespace runtime {
+
+#ifdef __EMSCRIPTEN__
+// Static instance for Emscripten callbacks
+SDL2InputAdapter* SDL2InputAdapter::s_Instance = nullptr;
+#endif
 
 SDL2InputAdapter::SDL2InputAdapter() = default;
 
@@ -12,23 +23,55 @@ SDL2InputAdapter::~SDL2InputAdapter() {
 
 bool SDL2InputAdapter::Initialize(input::InputManager* inputManager) {
     if (!inputManager) {
-
         return false;
     }
 
     m_InputManager = inputManager;
 
     if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK) != 0) {
-
         return false;
     }
 
     InitializeGameControllers();
 
+    // Install the gamepad vibration backend so core's SetGamepadVibration drives
+    // SDL rumble. Motor strengths arrive clamped to [0, 1]; a durationMs of 0
+    // means "until changed/stopped", which SDL expresses as the maximum duration.
+    m_InputManager->SetVibrationProvider(
+        [this](uint32_t gamepadID, float leftMotor, float rightMotor, uint32_t durationMs) {
+            SDL_GameController* controller = FindControllerByGamepadID(gamepadID);
+            if (!controller) {
+                return;
+            }
+            Uint16 low = static_cast<Uint16>(leftMotor * 65535.0f);
+            Uint16 high = static_cast<Uint16>(rightMotor * 65535.0f);
+            Uint32 duration = (durationMs == 0) ? 0xFFFFFFFFu : static_cast<Uint32>(durationMs);
+            SDL_GameControllerRumble(controller, low, high, duration);
+        });
+
+#ifdef __EMSCRIPTEN__
+    InitializeEmscriptenCallbacks();
+#endif
+
     return true;
 }
 
+SDL_GameController* SDL2InputAdapter::FindControllerByGamepadID(uint32_t gamepadID) const {
+    for (const auto& [instanceID, mappedGamepadID] : m_JoystickIDToGamepadID) {
+        if (mappedGamepadID == gamepadID) {
+            auto it = m_GameControllers.find(instanceID);
+            if (it != m_GameControllers.end()) {
+                return it->second;
+            }
+        }
+    }
+    return nullptr;
+}
+
 void SDL2InputAdapter::Shutdown() {
+#ifdef __EMSCRIPTEN__
+    ShutdownEmscriptenCallbacks();
+#endif
 
     for (auto& [instanceID, controller] : m_GameControllers) {
         if (controller) {
@@ -38,6 +81,12 @@ void SDL2InputAdapter::Shutdown() {
     m_GameControllers.clear();
     m_JoystickIDToGamepadID.clear();
 
+    // Clear the vibration provider so its captured `this` cannot dangle if the
+    // InputManager (a singleton) outlives this adapter.
+    if (m_InputManager) {
+        m_InputManager->SetVibrationProvider(nullptr);
+    }
+
     SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK);
 
     m_InputManager = nullptr;
@@ -46,8 +95,6 @@ void SDL2InputAdapter::Shutdown() {
 
 void SDL2InputAdapter::PollInput() {
     if (!m_InputManager) return;
-
-    UpdateKeyboardState();
 
     UpdateMouseState();
 
@@ -64,6 +111,13 @@ bool SDL2InputAdapter::ProcessEvent(const SDL_Event& event) {
             input::KeyCode keyCode = MapSDLKeyToKeyCode(event.key.keysym.sym);
             if (keyCode != input::KeyCode::Unknown) {
                 m_InputManager->GetKeyboard()->SetKeyState(keyCode, event.type == SDL_KEYDOWN);
+
+                input::InputEvent ie;
+                ie.type = (event.type == SDL_KEYDOWN) ? input::InputEventType::KeyDown
+                                                      : input::InputEventType::KeyUp;
+                ie.key = keyCode;
+                ie.repeat = event.key.repeat != 0;
+                m_InputManager->PushInputEvent(ie);
                 return true;
             }
             break;
@@ -74,22 +128,54 @@ bool SDL2InputAdapter::ProcessEvent(const SDL_Event& event) {
             input::MouseButton button = MapSDLMouseButton(event.button.button);
             if (button != input::MouseButton::Unknown) {
                 m_InputManager->GetMouse()->SetButtonState(button, event.type == SDL_MOUSEBUTTONDOWN);
+
+                input::InputEvent ie;
+                ie.type = (event.type == SDL_MOUSEBUTTONDOWN) ? input::InputEventType::MouseButtonDown
+                                                              : input::InputEventType::MouseButtonUp;
+                ie.mouseButton = button;
+                ie.position = m_InputManager->GetMouse()->GetPosition();
+                m_InputManager->PushInputEvent(ie);
                 return true;
             }
             break;
         }
 
         case SDL_MOUSEMOTION: {
-
-            m_InputManager->GetMouse()->SetPosition(glm::vec2(event.motion.x, event.motion.y));
+#ifdef __EMSCRIPTEN__
+            // On web, SDL reports mouse coordinates in CSS display space, but we need
+            // coordinates in internal canvas space (which matches our rendering resolution).
+            // Scale the coordinates by the ratio of internal canvas size to CSS display size.
+            glm::vec2 scale = GetCanvasScaleFactor();
+            float scaledX = static_cast<float>(event.motion.x) * scale.x;
+            float scaledY = static_cast<float>(event.motion.y) * scale.y;
+            m_InputManager->GetMouse()->SetPosition(glm::vec2(scaledX, scaledY));
+#else
+            // On desktop, SDL reports coordinates in window pixel space which matches our viewport
+            m_InputManager->GetMouse()->SetPosition(
+                glm::vec2(static_cast<float>(event.motion.x), static_cast<float>(event.motion.y)));
+#endif
+            input::InputEvent ie;
+            ie.type = input::InputEventType::MouseMotion;
+            ie.position = m_InputManager->GetMouse()->GetPosition();
+            ie.relative = glm::vec2(static_cast<float>(event.motion.xrel),
+                                    static_cast<float>(event.motion.yrel));
+            m_InputManager->PushInputEvent(ie);
             return true;
         }
 
         case SDL_WINDOWEVENT: {
             if (event.window.event == SDL_WINDOWEVENT_RESIZED ||
                 event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
-
+#ifdef __EMSCRIPTEN__
+                // On Emscripten, always use internal canvas size for consistency
+                // The resize event might report CSS display size, but we need
+                // the internal canvas resolution to match our mouse coordinate scaling
+                int canvasWidth = 0, canvasHeight = 0;
+                emscripten_get_canvas_element_size("#canvas", &canvasWidth, &canvasHeight);
+                m_InputManager->SetWindowSize(canvasWidth, canvasHeight);
+#else
                 m_InputManager->SetWindowSize(event.window.data1, event.window.data2);
+#endif
                 return false;
             }
             break;
@@ -98,6 +184,11 @@ bool SDL2InputAdapter::ProcessEvent(const SDL_Event& event) {
         case SDL_MOUSEWHEEL: {
             glm::vec2 scrollDelta(event.wheel.x, event.wheel.y);
             m_InputManager->GetMouse()->SetScrollDelta(scrollDelta);
+
+            input::InputEvent ie;
+            ie.type = input::InputEventType::MouseWheel;
+            ie.scroll = scrollDelta;
+            m_InputManager->PushInputEvent(ie);
             return true;
         }
 
@@ -124,6 +215,13 @@ bool SDL2InputAdapter::ProcessEvent(const SDL_Event& event) {
                     if (gamepad) {
                         gamepad->SetButtonState(button, event.type == SDL_CONTROLLERBUTTONDOWN);
                     }
+
+                    input::InputEvent ie;
+                    ie.type = (event.type == SDL_CONTROLLERBUTTONDOWN) ? input::InputEventType::GamepadButtonDown
+                                                                       : input::InputEventType::GamepadButtonUp;
+                    ie.gamepadButton = button;
+                    ie.gamepadID = gamepadID;
+                    m_InputManager->PushInputEvent(ie);
                 }
                 return true;
             }
@@ -138,16 +236,106 @@ bool SDL2InputAdapter::ProcessEvent(const SDL_Event& event) {
                     static_cast<SDL_GameControllerAxis>(event.caxis.axis));
 
                 if (axis != input::GamepadAxis::Unknown) {
+                    float normalizedValue = event.caxis.value / 32767.0f;
                     auto* gamepad = m_InputManager->GetGamepad(gamepadID);
                     if (gamepad) {
-
-                        float normalizedValue = event.caxis.value / 32767.0f;
                         gamepad->SetAxisValue(axis, normalizedValue);
                     }
+
+                    input::InputEvent ie;
+                    ie.type = input::InputEventType::GamepadAxis;
+                    ie.gamepadAxis = axis;
+                    ie.axisValue = normalizedValue;
+                    ie.gamepadID = gamepadID;
+                    m_InputManager->PushInputEvent(ie);
                 }
                 return true;
             }
             break;
+        }
+
+        // Touch events (SDL handles these on mobile/web)
+        case SDL_FINGERDOWN: {
+            // SDL normalized coordinates (0-1)
+            glm::ivec2 windowSize = m_InputManager->GetWindowSize();
+            glm::vec2 pos(
+                event.tfinger.x * windowSize.x,
+                event.tfinger.y * windowSize.y
+            );
+            m_InputManager->GetTouch()->BeginTouch(
+                static_cast<uint32_t>(event.tfinger.fingerId),
+                pos,
+                event.tfinger.pressure
+            );
+            return true;
+        }
+
+        case SDL_FINGERMOTION: {
+            glm::ivec2 windowSize = m_InputManager->GetWindowSize();
+            glm::vec2 pos(
+                event.tfinger.x * windowSize.x,
+                event.tfinger.y * windowSize.y
+            );
+            m_InputManager->GetTouch()->UpdateTouch(
+                static_cast<uint32_t>(event.tfinger.fingerId),
+                pos,
+                event.tfinger.pressure
+            );
+            return true;
+        }
+
+        case SDL_FINGERUP: {
+            m_InputManager->GetTouch()->EndTouch(
+                static_cast<uint32_t>(event.tfinger.fingerId)
+            );
+            return true;
+        }
+
+        case SDL_TEXTINPUT: {
+            // SDL delivers committed text as UTF-8 (layout/dead-keys/IME resolved).
+            // Decode to UTF-32 codepoints so text fields receive proper characters.
+            const unsigned char* bytes = reinterpret_cast<const unsigned char*>(event.text.text);
+            size_t i = 0;
+            while (bytes[i] != '\0') {
+                unsigned char lead = bytes[i];
+                uint32_t codepoint = 0;
+                size_t extra = 0;
+
+                if (lead < 0x80) {
+                    codepoint = lead;
+                    extra = 0;
+                } else if ((lead & 0xE0) == 0xC0) {
+                    codepoint = lead & 0x1F;
+                    extra = 1;
+                } else if ((lead & 0xF0) == 0xE0) {
+                    codepoint = lead & 0x0F;
+                    extra = 2;
+                } else if ((lead & 0xF8) == 0xF0) {
+                    codepoint = lead & 0x07;
+                    extra = 3;
+                } else {
+                    // Invalid lead byte; skip it and resync.
+                    ++i;
+                    continue;
+                }
+
+                ++i;
+                bool valid = true;
+                for (size_t k = 0; k < extra; ++k) {
+                    unsigned char cont = bytes[i];
+                    if ((cont & 0xC0) != 0x80) {
+                        valid = false;
+                        break;
+                    }
+                    codepoint = (codepoint << 6) | (cont & 0x3F);
+                    ++i;
+                }
+
+                if (valid) {
+                    m_InputManager->GetKeyboard()->AddTextInput(codepoint);
+                }
+            }
+            return true;
         }
     }
 
@@ -180,8 +368,15 @@ void SDL2InputAdapter::OpenGameController(int deviceIndex) {
 
     m_InputManager->RegisterGamepad(gamepadID);
 
-    const char* name = SDL_GameControllerName(controller);
-
+    // Record the human-readable name and controller family so glyph/prompt
+    // resolution can pick the right button labels (Xbox / PlayStation / Nintendo).
+    if (auto* gamepad = m_InputManager->GetGamepad(gamepadID)) {
+        const char* name = SDL_GameControllerName(controller);
+        if (name) {
+            gamepad->SetDeviceName(name);
+        }
+        gamepad->SetGamepadType(MapSDLGamepadType(SDL_GameControllerGetType(controller)));
+    }
 }
 
 void SDL2InputAdapter::CloseGameController(SDL_JoystickID instanceID) {
@@ -201,24 +396,25 @@ void SDL2InputAdapter::CloseGameController(SDL_JoystickID instanceID) {
     }
 }
 
-void SDL2InputAdapter::UpdateKeyboardState() {
-
-    const Uint8* keyState = SDL_GetKeyboardState(nullptr);
-
-}
-
 void SDL2InputAdapter::UpdateMouseState() {
 
     int mouseX, mouseY;
     Uint32 buttons = SDL_GetMouseState(&mouseX, &mouseY);
 
-    int globalX, globalY;
-    SDL_GetGlobalMouseState(&globalX, &globalY);
+    (void)buttons;  // Buttons are handled via events
 
-    m_InputManager->GetMouse()->SetPosition(glm::vec2(static_cast<float>(mouseX), static_cast<float>(mouseY)));
-
-    glm::vec2 verifyPos = m_InputManager->GetMouse()->GetPosition();
-
+#ifdef __EMSCRIPTEN__
+    // On web, SDL reports mouse coordinates in CSS display space, but we need
+    // coordinates in internal canvas space (which matches our rendering resolution).
+    glm::vec2 scale = GetCanvasScaleFactor();
+    float scaledX = static_cast<float>(mouseX) * scale.x;
+    float scaledY = static_cast<float>(mouseY) * scale.y;
+    m_InputManager->GetMouse()->SetPosition(glm::vec2(scaledX, scaledY));
+#else
+    // On desktop, SDL reports coordinates in window pixel space which matches our viewport
+    m_InputManager->GetMouse()->SetPosition(
+        glm::vec2(static_cast<float>(mouseX), static_cast<float>(mouseY)));
+#endif
 }
 
 void SDL2InputAdapter::UpdateGamepadStates() {
@@ -403,6 +599,276 @@ input::GamepadAxis SDL2InputAdapter::MapSDLGamepadAxis(SDL_GameControllerAxis ax
         default: return input::GamepadAxis::Unknown;
     }
 }
+
+input::GamepadType SDL2InputAdapter::MapSDLGamepadType(SDL_GameControllerType type) const {
+    switch (type) {
+        case SDL_CONTROLLER_TYPE_XBOX360:
+        case SDL_CONTROLLER_TYPE_XBOXONE:
+            return input::GamepadType::Xbox;
+
+        case SDL_CONTROLLER_TYPE_PS3:
+        case SDL_CONTROLLER_TYPE_PS4:
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+        case SDL_CONTROLLER_TYPE_PS5:
+#endif
+            return input::GamepadType::PlayStation;
+
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+        case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO:
+#endif
+#if SDL_VERSION_ATLEAST(2, 24, 0)
+        case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
+        case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
+        case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
+#endif
+            return input::GamepadType::Nintendo;
+
+        case SDL_CONTROLLER_TYPE_UNKNOWN:
+            return input::GamepadType::Unknown;
+
+        default:
+            // Virtual / Amazon Luna / Google Stadia / NVIDIA SHIELD and any other
+            // recognized-but-unmapped controllers use the generic glyph set.
+            return input::GamepadType::Generic;
+    }
+}
+
+// ============================================================================
+// Emscripten/Web-specific implementations
+// ============================================================================
+
+#ifdef __EMSCRIPTEN__
+
+void SDL2InputAdapter::InitializeEmscriptenCallbacks() {
+    s_Instance = this;
+
+    // Set up Emscripten-specific input callbacks for better browser integration
+    // These provide lower-latency input than SDL events in some browsers
+
+    // Keyboard callbacks - capture on canvas for game input
+    emscripten_set_keydown_callback("#canvas", this, EM_TRUE, EmscriptenKeyCallback);
+    emscripten_set_keyup_callback("#canvas", this, EM_TRUE, EmscriptenKeyCallback);
+
+    // Also capture on window for when canvas doesn't have focus
+    emscripten_set_keydown_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, this, EM_FALSE, EmscriptenKeyCallback);
+    emscripten_set_keyup_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, this, EM_FALSE, EmscriptenKeyCallback);
+
+    // Touch callbacks for mobile web
+    emscripten_set_touchstart_callback("#canvas", this, EM_TRUE, EmscriptenTouchCallback);
+    emscripten_set_touchend_callback("#canvas", this, EM_TRUE, EmscriptenTouchCallback);
+    emscripten_set_touchmove_callback("#canvas", this, EM_TRUE, EmscriptenTouchCallback);
+    emscripten_set_touchcancel_callback("#canvas", this, EM_TRUE, EmscriptenTouchCallback);
+
+    // Mouse wheel for better scroll handling
+    emscripten_set_wheel_callback("#canvas", this, EM_TRUE, EmscriptenWheelCallback);
+
+}
+
+void SDL2InputAdapter::ShutdownEmscriptenCallbacks() {
+    // Remove callbacks
+    emscripten_set_keydown_callback("#canvas", nullptr, EM_TRUE, nullptr);
+    emscripten_set_keyup_callback("#canvas", nullptr, EM_TRUE, nullptr);
+    emscripten_set_keydown_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, nullptr, EM_FALSE, nullptr);
+    emscripten_set_keyup_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, nullptr, EM_FALSE, nullptr);
+    emscripten_set_touchstart_callback("#canvas", nullptr, EM_TRUE, nullptr);
+    emscripten_set_touchend_callback("#canvas", nullptr, EM_TRUE, nullptr);
+    emscripten_set_touchmove_callback("#canvas", nullptr, EM_TRUE, nullptr);
+    emscripten_set_touchcancel_callback("#canvas", nullptr, EM_TRUE, nullptr);
+    emscripten_set_wheel_callback("#canvas", nullptr, EM_TRUE, nullptr);
+
+    s_Instance = nullptr;
+}
+
+glm::vec2 SDL2InputAdapter::GetCanvasScaleFactor() const {
+    // Get the internal canvas rendering resolution (canvas.width/height in JS)
+    int canvasWidth = 0, canvasHeight = 0;
+    emscripten_get_canvas_element_size("#canvas", &canvasWidth, &canvasHeight);
+
+    // Get the CSS display size (the actual size shown on screen)
+    double cssWidth = 0.0, cssHeight = 0.0;
+    emscripten_get_element_css_size("#canvas", &cssWidth, &cssHeight);
+
+    // Calculate scale factor: mouse coords are in CSS space, we need canvas space
+    // If CSS size is smaller than canvas size, we need to scale up mouse coords
+    glm::vec2 scale(1.0f, 1.0f);
+    if (cssWidth > 0.0 && cssHeight > 0.0) {
+        scale.x = static_cast<float>(canvasWidth) / static_cast<float>(cssWidth);
+        scale.y = static_cast<float>(canvasHeight) / static_cast<float>(cssHeight);
+    }
+
+    return scale;
+}
+
+EM_BOOL SDL2InputAdapter::EmscriptenKeyCallback(int eventType, const EmscriptenKeyboardEvent* event, void* userData) {
+    SDL2InputAdapter* adapter = static_cast<SDL2InputAdapter*>(userData);
+    if (!adapter || !adapter->m_InputManager) return EM_FALSE;
+
+    // Map Emscripten key code to SDL keycode, then to our KeyCode
+    // The event->key contains the key name (e.g., "KeyA", "ArrowUp", "Space")
+    // event->code contains the physical key code
+
+    SDL_Keycode sdlKey = SDLK_UNKNOWN;
+
+    // Map common keys from event->code (physical key location)
+    const char* code = event->code;
+
+    // Letter keys
+    if (code[0] == 'K' && code[1] == 'e' && code[2] == 'y' && code[3] >= 'A' && code[3] <= 'Z') {
+        sdlKey = SDLK_a + (code[3] - 'A');
+    }
+    // Digit keys
+    else if (code[0] == 'D' && code[1] == 'i' && code[2] == 'g' && code[3] == 'i' && code[4] == 't') {
+        sdlKey = SDLK_0 + (code[5] - '0');
+    }
+    // Function keys
+    else if (code[0] == 'F' && code[1] >= '1' && code[1] <= '9') {
+        if (code[2] == '\0') {
+            sdlKey = SDLK_F1 + (code[1] - '1');
+        } else if (code[1] == '1' && code[2] >= '0' && code[2] <= '2') {
+            sdlKey = SDLK_F10 + (code[2] - '0');
+        }
+    }
+    // Arrow keys
+    else if (strcmp(code, "ArrowUp") == 0) sdlKey = SDLK_UP;
+    else if (strcmp(code, "ArrowDown") == 0) sdlKey = SDLK_DOWN;
+    else if (strcmp(code, "ArrowLeft") == 0) sdlKey = SDLK_LEFT;
+    else if (strcmp(code, "ArrowRight") == 0) sdlKey = SDLK_RIGHT;
+    // Special keys
+    else if (strcmp(code, "Space") == 0) sdlKey = SDLK_SPACE;
+    else if (strcmp(code, "Enter") == 0) sdlKey = SDLK_RETURN;
+    else if (strcmp(code, "Escape") == 0) sdlKey = SDLK_ESCAPE;
+    else if (strcmp(code, "Tab") == 0) sdlKey = SDLK_TAB;
+    else if (strcmp(code, "Backspace") == 0) sdlKey = SDLK_BACKSPACE;
+    else if (strcmp(code, "Delete") == 0) sdlKey = SDLK_DELETE;
+    else if (strcmp(code, "Insert") == 0) sdlKey = SDLK_INSERT;
+    else if (strcmp(code, "Home") == 0) sdlKey = SDLK_HOME;
+    else if (strcmp(code, "End") == 0) sdlKey = SDLK_END;
+    else if (strcmp(code, "PageUp") == 0) sdlKey = SDLK_PAGEUP;
+    else if (strcmp(code, "PageDown") == 0) sdlKey = SDLK_PAGEDOWN;
+    // Modifier keys
+    else if (strcmp(code, "ShiftLeft") == 0) sdlKey = SDLK_LSHIFT;
+    else if (strcmp(code, "ShiftRight") == 0) sdlKey = SDLK_RSHIFT;
+    else if (strcmp(code, "ControlLeft") == 0) sdlKey = SDLK_LCTRL;
+    else if (strcmp(code, "ControlRight") == 0) sdlKey = SDLK_RCTRL;
+    else if (strcmp(code, "AltLeft") == 0) sdlKey = SDLK_LALT;
+    else if (strcmp(code, "AltRight") == 0) sdlKey = SDLK_RALT;
+    else if (strcmp(code, "MetaLeft") == 0) sdlKey = SDLK_LGUI;  // Command/Windows key
+    else if (strcmp(code, "MetaRight") == 0) sdlKey = SDLK_RGUI;
+    // Punctuation
+    else if (strcmp(code, "Comma") == 0) sdlKey = SDLK_COMMA;
+    else if (strcmp(code, "Period") == 0) sdlKey = SDLK_PERIOD;
+    else if (strcmp(code, "Slash") == 0) sdlKey = SDLK_SLASH;
+    else if (strcmp(code, "Semicolon") == 0) sdlKey = SDLK_SEMICOLON;
+    else if (strcmp(code, "Quote") == 0) sdlKey = SDLK_QUOTE;
+    else if (strcmp(code, "BracketLeft") == 0) sdlKey = SDLK_LEFTBRACKET;
+    else if (strcmp(code, "BracketRight") == 0) sdlKey = SDLK_RIGHTBRACKET;
+    else if (strcmp(code, "Backslash") == 0) sdlKey = SDLK_BACKSLASH;
+    else if (strcmp(code, "Backquote") == 0) sdlKey = SDLK_BACKQUOTE;
+    else if (strcmp(code, "Minus") == 0) sdlKey = SDLK_MINUS;
+    else if (strcmp(code, "Equal") == 0) sdlKey = SDLK_EQUALS;
+
+    if (sdlKey != SDLK_UNKNOWN) {
+        input::KeyCode keyCode = adapter->MapSDLKeyToKeyCode(sdlKey);
+        if (keyCode != input::KeyCode::Unknown) {
+            bool pressed = (eventType == EMSCRIPTEN_EVENT_KEYDOWN);
+            adapter->m_InputManager->GetKeyboard()->SetKeyState(keyCode, pressed);
+            return EM_TRUE;  // Event consumed
+        }
+    }
+
+    return EM_FALSE;  // Let browser handle unrecognized keys
+}
+
+EM_BOOL SDL2InputAdapter::EmscriptenMouseCallback(int eventType, const EmscriptenMouseEvent* event, void* userData) {
+    // Mouse events are typically handled by SDL, but this can be used for additional processing
+    (void)eventType;
+    (void)event;
+    (void)userData;
+    return EM_FALSE;
+}
+
+EM_BOOL SDL2InputAdapter::EmscriptenTouchCallback(int eventType, const EmscriptenTouchEvent* event, void* userData) {
+    SDL2InputAdapter* adapter = static_cast<SDL2InputAdapter*>(userData);
+    if (!adapter || !adapter->m_InputManager) return EM_FALSE;
+
+    // For simple games, map first touch to mouse position and left click
+    if (event->numTouches > 0) {
+        const EmscriptenTouchPoint& touch = event->touches[0];
+
+        // Touch targetX/Y are in CSS pixels - scale to internal canvas resolution
+        // using the same approach as mouse coordinates
+        glm::vec2 scale = adapter->GetCanvasScaleFactor();
+        float scaledX = static_cast<float>(touch.targetX) * scale.x;
+        float scaledY = static_cast<float>(touch.targetY) * scale.y;
+
+        // Update mouse position from touch
+        adapter->m_InputManager->GetMouse()->SetPosition(glm::vec2(scaledX, scaledY));
+
+        // Map touch to left mouse button
+        bool pressed = (eventType == EMSCRIPTEN_EVENT_TOUCHSTART || eventType == EMSCRIPTEN_EVENT_TOUCHMOVE);
+        if (eventType == EMSCRIPTEN_EVENT_TOUCHEND || eventType == EMSCRIPTEN_EVENT_TOUCHCANCEL) {
+            pressed = false;
+        }
+        adapter->m_InputManager->GetMouse()->SetButtonState(input::MouseButton::Left, pressed);
+    }
+
+    return EM_TRUE;  // Consume touch events to prevent mouse emulation issues
+}
+
+EM_BOOL SDL2InputAdapter::EmscriptenWheelCallback(int eventType, const EmscriptenWheelEvent* event, void* userData) {
+    SDL2InputAdapter* adapter = static_cast<SDL2InputAdapter*>(userData);
+    if (!adapter || !adapter->m_InputManager) return EM_FALSE;
+
+    (void)eventType;
+
+    // Normalize wheel delta (browsers report different units)
+    float deltaX = static_cast<float>(event->deltaX);
+    float deltaY = static_cast<float>(event->deltaY);
+
+    // Normalize based on deltaMode
+    switch (event->deltaMode) {
+        case DOM_DELTA_PIXEL:
+            deltaX /= 100.0f;
+            deltaY /= 100.0f;
+            break;
+        case DOM_DELTA_LINE:
+            // Line-based scrolling, values are typically reasonable
+            break;
+        case DOM_DELTA_PAGE:
+            deltaX *= 10.0f;
+            deltaY *= 10.0f;
+            break;
+    }
+
+    adapter->m_InputManager->GetMouse()->SetScrollDelta(glm::vec2(deltaX, -deltaY));  // Invert Y for natural scrolling
+
+    return EM_TRUE;
+}
+
+bool SDL2InputAdapter::ProcessTouchEvent(const SDL_Event& event) {
+    // SDL touch events - convert to mouse for simple games
+    if (event.type == SDL_FINGERDOWN || event.type == SDL_FINGERUP || event.type == SDL_FINGERMOTION) {
+        // SDL normalized coordinates (0-1) - these are already normalized to [0,1] range
+        // relative to the window, so we just convert to game coordinates using window size
+        float x = event.tfinger.x;
+        float y = event.tfinger.y;
+
+        // Convert to game coordinates (window size is already in game space)
+        glm::ivec2 windowSize = m_InputManager->GetWindowSize();
+        m_InputManager->GetMouse()->SetPosition(
+            glm::vec2(x * static_cast<float>(windowSize.x), y * static_cast<float>(windowSize.y))
+        );
+
+        // Map to left mouse button
+        bool pressed = (event.type == SDL_FINGERDOWN || event.type == SDL_FINGERMOTION);
+        m_InputManager->GetMouse()->SetButtonState(input::MouseButton::Left, pressed);
+
+        return true;
+    }
+    return false;
+}
+
+#endif // __EMSCRIPTEN__
 
 }
 }

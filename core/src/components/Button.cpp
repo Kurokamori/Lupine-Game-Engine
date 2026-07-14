@@ -1,14 +1,20 @@
 #include "lupine/components/Button.hpp"
+#include "lupine/components/StyleBoxRenderer.hpp"
+#include "lupine/localization/LocalizationManager.hpp"
 #include "lupine/core/Node.hpp"
+#include "lupine/ui/ThemeManager.hpp"
+#include "lupine/ui/Theme.hpp"
 #include "lupine/rendering/RenderContext.hpp"
 #include "lupine/rendering/RenderWorld.hpp"
 #include "lupine/rendering/Mesh.hpp"
 #include "lupine/rendering/Font.hpp"
 #include "lupine/rendering/DrawCommand.hpp"
 #include "lupine/rendering/gfx/IGfxDevice.hpp"
+#include "lupine/rendering/TextureUpload.hpp"
 #include "lupine/rendering/gfx/GfxDescriptors.hpp"
 #include "lupine/input/InputManager.hpp"
 #include "lupine/rendering/ViewportUtils.hpp"
+#include "lupine/asset/AssetDatabase.hpp"
 #include "lupine/logger/Logger.hpp"
 
 namespace lupine {
@@ -20,8 +26,21 @@ using namespace math;
 using core::Node2D;
 using core::Node3D;
 
+namespace {
+// Maps an interaction state to its themed-stylebox entry name (Godot Button parity).
+const char* ButtonStateThemeEntry(ButtonState state) {
+    switch (state) {
+        case ButtonState::Normal:   return "normal";
+        case ButtonState::Hover:    return "hover";
+        case ButtonState::Pressed:  return "pressed";
+        case ButtonState::Disabled: return "disabled";
+        default:                    return "normal";
+    }
+}
+} // namespace
+
 Button::Button()
-    : Component("Button")
+    : UIControl("Button")
     , m_BaseStyleBox(nullptr)
     , m_CornerRadius(0.0f, true)
     , m_BorderWidth(0.0f, true)
@@ -37,7 +56,7 @@ Button::Button()
 }
 
 Button::Button(const std::string& name)
-    : Component(name)
+    : UIControl(name)
     , m_BaseStyleBox(nullptr)
     , m_CornerRadius(0.0f, true)
     , m_BorderWidth(0.0f, true)
@@ -58,12 +77,10 @@ Button::~Button() {
 
 void Button::DefineProperties() {
 
-    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(width, 120.0f, 0.0f, 10000.0f, 1.0f, "Size"));
-    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(height, 40.0f, 0.0f, 10000.0f, 1.0f, "Size"));
+    DefineUIControlProperties(120.0f, 40.0f, "useUISpace", "Size");
 
     DefineProperty(PROPERTY_INT_RANGE_GROUP(layer, 0, -100, 100, 1, "Rendering"));
     DefineProperty(PROPERTY_INT_RANGE_GROUP(sortingOrder, 0, -1000, 1000, 1, "Rendering"));
-    DefineProperty(PROPERTY_DEFAULT_GROUP(useUISpace, Bool, true, "Rendering"));
 
     DefineProperty(PROPERTY_DEFAULT_GROUP(buttonEnabled, Bool, true, "Button"));
     DefineProperty(PROPERTY_ENUM_GROUP(styleMode, 0, "Button", Automatic, Manual));
@@ -73,6 +90,13 @@ void Button::DefineProperties() {
 
     DefineProperty(PROPERTY_DEFAULT_GROUP(backgroundColor, Color, Color(0.3f, 0.3f, 0.3f, 1.0f), "Background"));
     DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(opacity, 1.0f, 0.0f, 1.0f, 0.01f, "Background"));
+    DefineProperty(PROPERTY_FILE_GROUP(backgroundImagePath, std::string(""), "*.png,*.jpg,*.jpeg,*.bmp,*.tga", "Background"));
+    DefineProperty(PROPERTY_ENUM_GROUP(backgroundImageStretchMode, 0, "Background", Stretch, KeepCentered, NineSlice));
+
+    DefineProperty(PROPERTY_DEFAULT_GROUP(nineSliceMargins, Vec4, Vec4(8.0f, 8.0f, 8.0f, 8.0f), "NineSlice"));
+    DefineProperty(PROPERTY_ENUM_GROUP(nineSliceAxisH, 0, "NineSlice", Stretch, Tile));
+    DefineProperty(PROPERTY_ENUM_GROUP(nineSliceAxisV, 0, "NineSlice", Stretch, Tile));
+    DefineProperty(PROPERTY_DEFAULT_GROUP(nineSliceDrawCenter, Bool, true, "NineSlice"));
 
     DefineProperty(PROPERTY_DEFAULT_GROUP(borderEnabled, Bool, true, "Border"));
     DefineProperty(PROPERTY_DEFAULT_GROUP(borderWidthLinked, Bool, true, "Border"));
@@ -83,10 +107,29 @@ void Button::DefineProperties() {
     DefineProperty(PROPERTY_DEFAULT_GROUP(cornerRadius, Vec4, Vec4(4.0f, 4.0f, 4.0f, 4.0f), "CornerRadius"));
 
     DefineProperty(PROPERTY_DEFAULT_GROUP(text, String, std::string("Button"), "Text"));
+
+    // localizationKey overrides "text" and resolves through the LocalizationManager.
+    DefineProperty(PROPERTY_DEFAULT_GROUP(localizationKey, String, std::string(""), "Localization"));
+    DefineProperty(PROPERTY_DEFAULT_GROUP(localizationTable, String, std::string(""), "Localization"));
     DefineProperty(PROPERTY_FILE_GROUP(fontPath, std::string(""), "*.ttf,*.otf", "Text"));
     DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(fontSize, 16.0f, 1.0f, 256.0f, 1.0f, "Text"));
     DefineProperty(PROPERTY_DEFAULT_GROUP(fontColor, Color, Color::White(), "Text"));
     DefineProperty(PROPERTY_DEFAULT_GROUP(wordWrap, Bool, false, "Text"));
+    // Alignment and line spacing. A Button had NO alignment properties at all -- its text was
+    // hard-centered on the button's center by a hand-rolled glyph loop, so a left-aligned
+    // menu-row button was simply not expressible.
+    DefineProperty(PROPERTY_ENUM_GROUP(textHAlign, 1, "Text", Left, Center, Right, Fill));
+    DefineProperty(PROPERTY_ENUM_GROUP(textVAlign, 1, "Text", Top, Center, Bottom));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(lineSpacing, 1.0f, 0.1f, 5.0f, 0.05f, "Text"));
+    // Line-breaking and overflow, as on Label. `wordWrap` was already advertised here but was
+    // never read by the renderer at all -- long text just overflowed the button unclipped.
+    DefineProperty(PROPERTY_ENUM_GROUP(autowrapMode, 0, "Text", Off, Arbitrary, Word, WordSmart));
+    DefineProperty(PROPERTY_ENUM_GROUP(overrunBehavior, 0, "Text",
+        None, TrimChar, TrimWord, EllipsisChar, EllipsisWord));
+    DefineProperty(PROPERTY_DEFAULT_GROUP(clipText, Bool, false, "Text"));
+    DefineProperty(PROPERTY_INT_RANGE_GROUP(tabSize, 4, 1, 16, 1, "Text"));
+    DefineProperty(PROPERTY_DEFAULT_GROUP(shadowOffset, Vec2, Vec2(0.0f, 0.0f), "Shadow"));
+    DefineProperty(PROPERTY_DEFAULT_GROUP(shadowColor, Color, Color(0.0f, 0.0f, 0.0f, 0.0f), "Shadow"));
 
     DefineProperty(PROPERTY_DEFAULT_GROUP(normalModulation, Color, Color::White(), "StateModulation"));
     DefineProperty(PROPERTY_DEFAULT_GROUP(hoverModulation, Color, Color(1.2f, 1.2f, 1.2f, 1.0f), "StateModulation"));
@@ -135,24 +178,7 @@ void Button::OnAwake() {
     m_BorderWidth.FromVec4(borderWidthVec);
     m_BorderWidth.SetLinked(borderWidthLinked);
 
-    m_StateStyles[static_cast<int>(ButtonState::Normal)].modulationColor = GetPropertyValue<Color>("normalModulation");
-    m_StateStyles[static_cast<int>(ButtonState::Hover)].modulationColor = GetPropertyValue<Color>("hoverModulation");
-    m_StateStyles[static_cast<int>(ButtonState::Pressed)].modulationColor = GetPropertyValue<Color>("pressedModulation");
-    m_StateStyles[static_cast<int>(ButtonState::Disabled)].modulationColor = GetPropertyValue<Color>("disabledModulation");
-
-    auto loadTween = [this](ButtonState state, const std::string& prefix) {
-        int idx = static_cast<int>(state);
-        m_StateTweens[idx].enabled = GetPropertyValue<bool>(prefix + "TweenEnabled");
-        m_StateTweens[idx].scaleOffset = GetPropertyValue<Vec2>(prefix + "TweenScale");
-        m_StateTweens[idx].rotationOffset = GetPropertyValue<float>(prefix + "TweenRotation");
-        m_StateTweens[idx].positionOffset = GetPropertyValue<Vec2>(prefix + "TweenPosition");
-        m_StateTweens[idx].duration = GetPropertyValue<float>(prefix + "TweenDuration");
-    };
-
-    loadTween(ButtonState::Normal, "normal");
-    loadTween(ButtonState::Hover, "hover");
-    loadTween(ButtonState::Pressed, "pressed");
-    loadTween(ButtonState::Disabled, "disabled");
+    LoadThemedStateData();
 
     auto loadSound = [this](ButtonState state, const std::string& prefix) {
         std::string path = GetPropertyValue<std::string>(prefix + "SoundPath");
@@ -192,6 +218,8 @@ void Button::OnInput(float deltaTime) {
 }
 
 void Button::OnUpdate(float deltaTime) {
+    UIControl::OnUpdate(deltaTime);
+
     if (!IsEnabled()) {
         return;
     }
@@ -219,29 +247,20 @@ void Button::OnRender() {
 }
 
 bool Button::OnGizmoScale(float scaleDelta, int axis, bool is3D) {
-
-    if (!is3D && m_ScaleMode == ButtonScaleMode::Fixed) {
-        float currentWidth = GetWidth();
-        float currentHeight = GetHeight();
-
-        if (axis == 0) {
-
-            SetWidth(std::max(0.1f, currentWidth + scaleDelta * currentWidth));
-        } else if (axis == 1) {
-
-            SetHeight(std::max(0.1f, currentHeight + scaleDelta * currentHeight));
-        } else if (axis == -1) {
-
-            SetWidth(std::max(0.1f, currentWidth + scaleDelta * currentWidth));
-            SetHeight(std::max(0.1f, currentHeight + scaleDelta * currentHeight));
-        }
-
-        m_MeshNeedsRegeneration = true;
-
-        return true;
+    // A FitToText button derives its size from its label, so a manual resize has nothing to
+    // write to and is refused rather than accepted and discarded.
+    if (m_ScaleMode != ButtonScaleMode::Fixed) {
+        return false;
     }
 
-    return false;
+    // The base writes whichever property actually drives the axis: width/height when
+    // point-anchored, the offsets when anchor-stretched, and nothing when a parent container
+    // owns the rect.
+    const bool handled = UIControl::OnGizmoScale(scaleDelta, axis, is3D);
+    if (handled) {
+        m_MeshNeedsRegeneration = true;
+    }
+    return handled;
 }
 
 float Button::GetWidth() const {
@@ -284,14 +303,6 @@ void Button::SetSortingOrder(int order) {
     SetPropertyValue<int>("sortingOrder", order);
 }
 
-bool Button::GetUseUISpace() const {
-    return GetPropertyValue<bool>("useUISpace");
-}
-
-void Button::SetUseUISpace(bool useUISpace) {
-    SetPropertyValue<bool>("useUISpace", useUISpace);
-}
-
 void Button::SetEnabled(bool enabled) {
     m_ButtonEnabled = enabled;
     SetPropertyValue<bool>("buttonEnabled", enabled);
@@ -326,18 +337,39 @@ void Button::SetBaseStyleBox(std::shared_ptr<StyleBox> styleBox) {
     m_MeshNeedsRegeneration = true;
 }
 
-const Color& Button::GetBackgroundColor() const {
-    static Color cachedColor;
-    const ComponentProperty* prop = m_CustomProperties.GetProperty("backgroundColor");
-    if (prop) {
-        cachedColor = prop->GetValue<Color>();
-        return cachedColor;
-    }
-    return Color::White();
+const std::vector<UIControl::ThemeBinding>& Button::GetThemeBindings() const {
+    static const std::vector<ThemeBinding> kBindings = []() {
+        std::vector<ThemeBinding> b = {
+            { "backgroundColor",     "background",       ThemeBinding::Kind::Color },
+            { "backgroundImagePath", "background_image", ThemeBinding::Kind::Image },
+            { "borderColor",     "border_color",  ThemeBinding::Kind::Color },
+            { "fontColor",       "font_color",    ThemeBinding::Kind::Color },
+            { "fontPath",        "font",          ThemeBinding::Kind::Font },
+            { "fontSize",        "font_size",     ThemeBinding::Kind::Constant },
+            { "cornerRadius",    "corner_radius", ThemeBinding::Kind::Constant },
+        };
+        // Per-state modulation + tween: the entry name matches the property name.
+        const char* states[] = { "normal", "hover", "pressed", "disabled" };
+        for (const char* s : states) {
+            std::string p(s);
+            b.push_back({ p + "Modulation",    p + "Modulation",    ThemeBinding::Kind::Color });
+            b.push_back({ p + "TweenEnabled",  p + "TweenEnabled",  ThemeBinding::Kind::Bool });
+            b.push_back({ p + "TweenScale",    p + "TweenScale",    ThemeBinding::Kind::Vec2 });
+            b.push_back({ p + "TweenRotation", p + "TweenRotation", ThemeBinding::Kind::Constant });
+            b.push_back({ p + "TweenPosition", p + "TweenPosition", ThemeBinding::Kind::Vec2 });
+            b.push_back({ p + "TweenDuration", p + "TweenDuration", ThemeBinding::Kind::Constant });
+        }
+        return b;
+    }();
+    return kBindings;
+}
+
+Color Button::GetBackgroundColor() const {
+    return ResolveThemedColor("backgroundColor", "background");
 }
 
 void Button::SetBackgroundColor(const Color& color) {
-    SetPropertyValue<Color>("backgroundColor", color);
+    SetThemedProperty<Color>("backgroundColor", color);
     if (auto flatStyle = std::dynamic_pointer_cast<StyleBoxFlat>(m_BaseStyleBox)) {
         flatStyle->SetBackgroundColor(color);
     }
@@ -353,6 +385,70 @@ void Button::SetOpacity(float opacity) {
     if (auto flatStyle = std::dynamic_pointer_cast<StyleBoxFlat>(m_BaseStyleBox)) {
         flatStyle->SetOpacity(opacity);
     }
+    m_MeshNeedsRegeneration = true;
+}
+
+std::string Button::GetBackgroundImagePath() const {
+    return ResolveThemedImage("backgroundImagePath", "background_image");
+}
+
+void Button::SetBackgroundImagePath(const std::string& path) {
+    std::string resPath = path;
+    if (!path.empty() && !(path.size() >= 6 && path.substr(0, 6) == "res://")) {
+        asset::AssetDatabase& assetDb = asset::AssetDatabase::GetInstance();
+        if (assetDb.IsInitialized()) {
+            std::string converted = assetDb.ToResourcePath(path);
+            if (!converted.empty()) {
+                resPath = converted;
+            }
+        }
+    }
+    SetThemedProperty<std::string>("backgroundImagePath", resPath);
+    m_MeshNeedsRegeneration = true;
+}
+
+UIImageStretchMode Button::GetBackgroundImageStretchMode() const {
+    return UIImageStretchModeFromInt(GetPropertyValue<int>("backgroundImageStretchMode"));
+}
+
+void Button::SetBackgroundImageStretchMode(UIImageStretchMode mode) {
+    SetPropertyValue<int>("backgroundImageStretchMode", static_cast<int>(mode));
+    m_MeshNeedsRegeneration = true;
+}
+
+Vec4 Button::GetNineSliceMargins() const {
+    return GetPropertyValue<Vec4>("nineSliceMargins");
+}
+
+void Button::SetNineSliceMargins(const Vec4& margins) {
+    SetPropertyValue<Vec4>("nineSliceMargins", margins);
+    m_MeshNeedsRegeneration = true;
+}
+
+UINineSliceAxisMode Button::GetNineSliceAxisHorizontal() const {
+    return UINineSliceAxisModeFromInt(GetPropertyValue<int>("nineSliceAxisH"));
+}
+
+void Button::SetNineSliceAxisHorizontal(UINineSliceAxisMode mode) {
+    SetPropertyValue<int>("nineSliceAxisH", static_cast<int>(mode));
+    m_MeshNeedsRegeneration = true;
+}
+
+UINineSliceAxisMode Button::GetNineSliceAxisVertical() const {
+    return UINineSliceAxisModeFromInt(GetPropertyValue<int>("nineSliceAxisV"));
+}
+
+void Button::SetNineSliceAxisVertical(UINineSliceAxisMode mode) {
+    SetPropertyValue<int>("nineSliceAxisV", static_cast<int>(mode));
+    m_MeshNeedsRegeneration = true;
+}
+
+bool Button::GetNineSliceDrawCenter() const {
+    return GetPropertyValue<bool>("nineSliceDrawCenter");
+}
+
+void Button::SetNineSliceDrawCenter(bool drawCenter) {
+    SetPropertyValue<bool>("nineSliceDrawCenter", drawCenter);
     m_MeshNeedsRegeneration = true;
 }
 
@@ -414,19 +510,12 @@ void Button::SetBorderEnabled(bool enabled) {
     m_MeshNeedsRegeneration = true;
 }
 
-const Color& Button::GetBorderColor() const {
-    static Color cachedColor;
-    static Color defaultColor(0.5f, 0.5f, 0.5f, 1.0f);
-    const ComponentProperty* prop = m_CustomProperties.GetProperty("borderColor");
-    if (prop && !prop->GetValueAsJson().is_null()) {
-        cachedColor = prop->GetValue<Color>();
-        return cachedColor;
-    }
-    return defaultColor;
+Color Button::GetBorderColor() const {
+    return ResolveThemedColor("borderColor", "border_color");
 }
 
 void Button::SetBorderColor(const Color& color) {
-    SetPropertyValue<Color>("borderColor", color);
+    SetThemedProperty<Color>("borderColor", color);
     m_MeshNeedsRegeneration = true;
 }
 
@@ -445,7 +534,7 @@ float Button::GetCornerRadiusTopLeft() const {
 
 void Button::SetCornerRadiusTopLeft(float radius) {
     m_CornerRadius.Set(0, radius);
-    SetPropertyValue<Vec4>("cornerRadius", m_CornerRadius.AsVec4());
+    SetThemedProperty<Vec4>("cornerRadius", m_CornerRadius.AsVec4());
     m_MeshNeedsRegeneration = true;
 }
 
@@ -455,7 +544,7 @@ float Button::GetCornerRadiusTopRight() const {
 
 void Button::SetCornerRadiusTopRight(float radius) {
     m_CornerRadius.Set(1, radius);
-    SetPropertyValue<Vec4>("cornerRadius", m_CornerRadius.AsVec4());
+    SetThemedProperty<Vec4>("cornerRadius", m_CornerRadius.AsVec4());
     m_MeshNeedsRegeneration = true;
 }
 
@@ -465,7 +554,7 @@ float Button::GetCornerRadiusBottomLeft() const {
 
 void Button::SetCornerRadiusBottomLeft(float radius) {
     m_CornerRadius.Set(3, radius);
-    SetPropertyValue<Vec4>("cornerRadius", m_CornerRadius.AsVec4());
+    SetThemedProperty<Vec4>("cornerRadius", m_CornerRadius.AsVec4());
     m_MeshNeedsRegeneration = true;
 }
 
@@ -475,11 +564,16 @@ float Button::GetCornerRadiusBottomRight() const {
 
 void Button::SetCornerRadiusBottomRight(float radius) {
     m_CornerRadius.Set(2, radius);
-    SetPropertyValue<Vec4>("cornerRadius", m_CornerRadius.AsVec4());
+    SetThemedProperty<Vec4>("cornerRadius", m_CornerRadius.AsVec4());
     m_MeshNeedsRegeneration = true;
 }
 
 std::string Button::GetText() const {
+    std::string locKey = GetPropertyValue<std::string>("localizationKey");
+    if (!locKey.empty()) {
+        return localization::LocalizationManager::GetInstance().Translate(
+            locKey, GetPropertyValue<std::string>("localizationTable"));
+    }
     return GetPropertyValue<std::string>("text");
 }
 
@@ -490,38 +584,32 @@ void Button::SetText(const std::string& text) {
 }
 
 std::string Button::GetFontPath() const {
-    return GetPropertyValue<std::string>("fontPath");
+    return ResolveThemedFontPath("fontPath", "font");
 }
 
 void Button::SetFontPath(const std::string& path) {
-    SetPropertyValue<std::string>("fontPath", path);
+    SetThemedProperty<std::string>("fontPath", path);
     m_CurrentFontPath = path;
     m_MeshNeedsRegeneration = true;
 }
 
 float Button::GetFontSize() const {
-    return GetPropertyValue<float>("fontSize");
+    return ResolveThemedFontSize("fontSize", "font_size", "font");
 }
 
 void Button::SetFontSize(float size) {
-    SetPropertyValue<float>("fontSize", size);
+    SetThemedProperty<float>("fontSize", size);
     m_CurrentFontSize = size;
     m_MeshNeedsRegeneration = true;
     m_TextMeshNeedsRegeneration = true;
 }
 
-const Color& Button::GetFontColor() const {
-    static Color cachedColor;
-    const ComponentProperty* prop = m_CustomProperties.GetProperty("fontColor");
-    if (prop) {
-        cachedColor = prop->GetValue<Color>();
-        return cachedColor;
-    }
-    return Color::White();
+Color Button::GetFontColor() const {
+    return ResolveThemedColor("fontColor", "font_color");
 }
 
 void Button::SetFontColor(const Color& color) {
-    SetPropertyValue<Color>("fontColor", color);
+    SetThemedProperty<Color>("fontColor", color);
     m_MeshNeedsRegeneration = true;
     m_TextMeshNeedsRegeneration = true;
 }
@@ -618,17 +706,34 @@ void Button::SyncFromProperties() {
     m_BorderWidth.FromVec4(borderWidthVec);
     m_BorderWidth.SetLinked(borderWidthLinked);
 
-    m_StateStyles[static_cast<int>(ButtonState::Normal)].modulationColor = GetPropertyValue<Color>("normalModulation");
-    m_StateStyles[static_cast<int>(ButtonState::Hover)].modulationColor = GetPropertyValue<Color>("hoverModulation");
-    m_StateStyles[static_cast<int>(ButtonState::Pressed)].modulationColor = GetPropertyValue<Color>("pressedModulation");
-    m_StateStyles[static_cast<int>(ButtonState::Disabled)].modulationColor = GetPropertyValue<Color>("disabledModulation");
+    LoadThemedStateData();
 
     m_ButtonEnabled = GetPropertyValue<bool>("buttonEnabled");
     m_StyleMode = static_cast<ButtonStyleMode>(GetPropertyValue<int>("styleMode"));
     m_ScaleMode = static_cast<ButtonScaleMode>(GetPropertyValue<int>("scaleMode"));
 }
 
-void Button::UpdateMouseInteraction(float deltaTime) {
+void Button::LoadThemedStateData() {
+    struct StateMap { ButtonState state; const char* prefix; };
+    static const StateMap kStates[] = {
+        { ButtonState::Normal,   "normal" },
+        { ButtonState::Hover,    "hover" },
+        { ButtonState::Pressed,  "pressed" },
+        { ButtonState::Disabled, "disabled" },
+    };
+    for (const StateMap& sm : kStates) {
+        int idx = static_cast<int>(sm.state);
+        std::string p(sm.prefix);
+        m_StateStyles[idx].modulationColor = ResolveThemedColor(p + "Modulation", p + "Modulation");
+        m_StateTweens[idx].enabled        = ResolveThemedBool(p + "TweenEnabled", p + "TweenEnabled");
+        m_StateTweens[idx].scaleOffset    = ResolveThemedVec2(p + "TweenScale", p + "TweenScale");
+        m_StateTweens[idx].rotationOffset = ResolveThemedConstant(p + "TweenRotation", p + "TweenRotation");
+        m_StateTweens[idx].positionOffset = ResolveThemedVec2(p + "TweenPosition", p + "TweenPosition");
+        m_StateTweens[idx].duration       = ResolveThemedConstant(p + "TweenDuration", p + "TweenDuration");
+    }
+}
+
+void Button::UpdateMouseInteraction(float) {
 
     if (!m_ButtonEnabled) {
         if (m_CurrentState != ButtonState::Disabled) {
@@ -639,50 +744,15 @@ void Button::UpdateMouseInteraction(float deltaTime) {
 
     input::InputManager& inputMgr = input::InputManager::Get();
 
-    SpatialType spatialType = getSpatialType();
+    // Mouse in the centered canvas space the control rects live in, so hit-testing
+    // matches rendering on every backend (shared helper).
+    Vec2 mousePos = GetCanvasMousePosition();
 
-    glm::vec2 rawMousePos = inputMgr.GetMousePosition();
-
-    Viewport viewport = GetCurrentViewport();
-    Vec2 logicalSize = GetLogicalCanvasSize();
-    glm::ivec2 windowSize = inputMgr.GetWindowSize();
-
-    glm::vec2 mouseWindowGL;
-    mouseWindowGL.x = rawMousePos.x;
-    mouseWindowGL.y = static_cast<float>(windowSize.y) - rawMousePos.y;
-
-    glm::vec2 viewportRelativePos;
-    viewportRelativePos.x = mouseWindowGL.x - viewport.x;
-    viewportRelativePos.y = mouseWindowGL.y - viewport.y;
-
-    glm::vec2 normalizedPos;
-    normalizedPos.x = viewportRelativePos.x / viewport.width;
-    normalizedPos.y = viewportRelativePos.y / viewport.height;
-
-    glm::vec2 mousePosGame;
-    mousePosGame.x = normalizedPos.x * logicalSize.x;
-    mousePosGame.y = normalizedPos.y * logicalSize.y;
-
-    Vec2 mousePos(mousePosGame.x, mousePosGame.y);
-
-    bool isOver = IsMouseOver(mousePos);
+    // Only the front-most button under the cursor handles the click; a button behind
+    // another sees isOver=false so a single click never passes through to it.
+    bool isOver = IsMouseOver(mousePos) && IsTopPointerTarget(mousePos);
 
     bool leftPressed = inputMgr.IsMouseButtonPressed(input::MouseButton::Left);
-    bool leftJustPressed = inputMgr.IsMouseButtonJustPressed(input::MouseButton::Left);
-    bool leftJustReleased = inputMgr.IsMouseButtonJustReleased(input::MouseButton::Left);
-
-    Vec2 position = Vec2(0, 0);
-    Vec2 size = CalculateButtonSize();
-    if (GetOwner()) {
-        core::Node2D* node2D = dynamic_cast<core::Node2D*>(GetOwner());
-        if (node2D) {
-            position = node2D->GetGlobalPosition();
-        }
-    }
-
-    Vec2 buttonCenter = Vec2(position.x + size.x * 0.5f, position.y + size.y * 0.5f);
-    Vec2 toCenter = buttonCenter - mousePos;
-    float dist = sqrtf(toCenter.x * toCenter.x + toCenter.y * toCenter.y);
 
     ButtonState newState = m_CurrentState;
 
@@ -692,13 +762,14 @@ void Button::UpdateMouseInteraction(float deltaTime) {
         } else {
             newState = ButtonState::Hover;
         }
+    } else if (leftPressed && m_CurrentState == ButtonState::Pressed) {
+        newState = ButtonState::Pressed;
+    } else if (HasFocus()) {
+        // Keyboard / gamepad focus lights the button with its Hover (focus) visual
+        // so directional navigation shows the same highlight a mouse hover would.
+        newState = ButtonState::Hover;
     } else {
-        if (leftPressed && m_CurrentState == ButtonState::Pressed) {
-
-            newState = ButtonState::Pressed;
-        } else {
-            newState = ButtonState::Normal;
-        }
+        newState = ButtonState::Normal;
     }
 
     if (newState != m_CurrentState) {
@@ -720,12 +791,14 @@ bool Button::IsMouseOver(const Vec2& mousePos) const {
     }
 
     Vec2 position = node2D->GetGlobalPosition();
-    Vec2 size = CalculateButtonSize();
+    Vec2 size = GetEffectiveSize();
 
     position += m_CurrentPositionOffset;
 
-    return mousePos.x >= position.x && mousePos.x <= position.x + size.x &&
-           mousePos.y >= position.y && mousePos.y <= position.y + size.y;
+    // Position is center-pivot, so calculate bounds from center
+    Vec2 halfSize = size * 0.5f;
+    return mousePos.x >= position.x - halfSize.x && mousePos.x <= position.x + halfSize.x &&
+           mousePos.y >= position.y - halfSize.y && mousePos.y <= position.y + halfSize.y;
 }
 
 void Button::TransitionToState(ButtonState newState) {
@@ -740,19 +813,45 @@ void Button::TransitionToState(ButtonState newState) {
 
     const ButtonStateTween& tween = m_StateTweens[static_cast<int>(newState)];
     if (tween.enabled) {
-
         m_TweenStartScaleOffset = m_CurrentScaleOffset;
         m_TweenStartRotationOffset = m_CurrentRotationOffset;
         m_TweenStartPositionOffset = m_CurrentPositionOffset;
 
         m_IsTweening = true;
         m_TweenProgress = 0.0f;
+    } else {
+        // Snap to target immediately
+        m_CurrentScaleOffset = tween.scaleOffset;
+        m_CurrentRotationOffset = tween.rotationOffset;
+        m_CurrentPositionOffset = tween.positionOffset;
+        m_IsTweening = false;
     }
 
     InvokeStateCallback(newState);
 
+    // Emit named signals alongside the legacy state callbacks so the transition
+    // is observable from scripts/editor connections.
+    Emit("state_changed", { static_cast<int>(newState) });
+    if (newState == ButtonState::Pressed) {
+        Emit("pressed");
+    } else if (m_PreviousState == ButtonState::Pressed) {
+        Emit("released");
+    }
+    if (newState == ButtonState::Hover) {
+        Emit("hovered");
+    }
+
     m_MeshNeedsRegeneration = true;
     m_TextMeshNeedsRegeneration = true;
+}
+
+void Button::DefineSignals() {
+    RegisterSignal({"pressed", {}, "Emitted when the button is pressed down."});
+    RegisterSignal({"released", {}, "Emitted when a press is released."});
+    RegisterSignal({"hovered", {}, "Emitted when the pointer enters the button."});
+    RegisterSignal({"state_changed",
+                    {{"state", core::PropertyValueType::Int}},
+                    "Emitted on any button state change (Normal/Hover/Pressed/Disabled)."});
 }
 
 void Button::PlayStateSound(ButtonState state) {
@@ -828,15 +927,85 @@ Vec2 Button::CalculateButtonSize() const {
     return baseSize;
 }
 
+Vec2 Button::GetEffectiveSize() const {
+    Vec2 resolved = GetResolvedRect().size;
+    bool resolvedValid = (resolved.x > 0.0f || resolved.y > 0.0f);
+
+    switch (m_ScaleMode) {
+        case ButtonScaleMode::Fixed:
+            // Follow the resolved (anchor-driven) rect so the button stretches with anchors.
+            return resolvedValid ? resolved : CalculateButtonSize();
+        case ButtonScaleMode::FitToTextWidth: {
+            // Width is content-driven; height follows the resolved rect (vertical anchors stretch).
+            Vec2 textFit = CalculateButtonSize();
+            return resolvedValid ? Vec2(textFit.x, resolved.y) : textFit;
+        }
+        case ButtonScaleMode::FitToText:
+        default:
+            // Content-driven on both axes: "fit to text" overrides anchor stretching.
+            return CalculateButtonSize();
+    }
+}
+
 Vec2 Button::CalculateTextSize() const {
     if (!m_FontAsset.IsValid() || !m_FontAsset->IsLoaded()) {
         return Vec2(0.0f, 0.0f);
     }
 
-    std::string text = GetText();
-    float fontSize = GetFontSize();
+    // Measured through the same layout engine that positions the glyphs, so word wrap, line
+    // spacing and multiline are all accounted for exactly as drawn.
+    //
+    // Only the wrap width comes from the resolved rect (minus the content margins): reading
+    // the box HEIGHT here would recurse, since GetBoundsSize() -> GetMinSize() ->
+    // GetContentMinSize() lands back in this function.
+    const Vec4 margins = GetContentMargins();
+    const float available = GetResolvedRect().size.x - (margins.w + margins.y);
 
-    return m_FontAsset->MeasureText(text, fontSize);
+    const Vec2 measureBox(std::max(0.0f, available), 0.0f);
+    TextLayoutParams params = BuildLayoutParams(measureBox);
+
+    return TextLayout::Measure(GetText(), m_FontAsset->GetMetricsAtlas(), params);
+}
+
+TextHAlign Button::GetTextHAlign() const {
+    return static_cast<TextHAlign>(GetPropertyValue<int>("textHAlign"));
+}
+
+void Button::SetTextHAlign(TextHAlign align) {
+    SetPropertyValue<int>("textHAlign", static_cast<int>(align));
+    m_TextMeshNeedsRegeneration = true;
+}
+
+TextVAlign Button::GetTextVAlign() const {
+    return static_cast<TextVAlign>(GetPropertyValue<int>("textVAlign"));
+}
+
+void Button::SetTextVAlign(TextVAlign align) {
+    SetPropertyValue<int>("textVAlign", static_cast<int>(align));
+    m_TextMeshNeedsRegeneration = true;
+}
+
+float Button::GetLineSpacing() const {
+    return GetPropertyValue<float>("lineSpacing");
+}
+
+void Button::SetLineSpacing(float spacing) {
+    SetPropertyValue<float>("lineSpacing", spacing);
+    m_TextMeshNeedsRegeneration = true;
+}
+
+Vec2 Button::GetContentMinSize() const {
+    // A button's minimum content is its label plus the content margins on all four sides --
+    // which is textPadding, the themed StyleBox's content margins, or whichever of the two is
+    // larger per side. Reading textPadding directly (as this used to) ignored a theme that
+    // asked for room around the label.
+    Vec2 textSize = CalculateTextSize();
+    const Vec4 margins = GetContentMargins();
+
+    textSize.x += margins.w + margins.y;   // left + right
+    textSize.y += margins.x + margins.z;   // top + bottom
+
+    return textSize;
 }
 
 std::shared_ptr<StyleBoxFlat> Button::GetEffectiveStyle() const {
@@ -876,6 +1045,12 @@ void Button::buildDrawCommands(RenderContext& ctx) {
         return;
     }
 
+    // A resolution change re-bakes the font atlas at a new oversampling density,
+    // which repacks glyph UVs; regenerate the cached text mesh so it matches.
+    if (ConsumeFontOversampleChanged()) {
+        m_TextMeshNeedsRegeneration = true;
+    }
+
     Vec4 cornerRadiusVec = GetPropertyValue<Vec4>("cornerRadius");
     bool cornerRadiusLinked = GetPropertyValue<bool>("cornerRadiusLinked");
     if (cornerRadiusVec != m_CornerRadius.AsVec4() || cornerRadiusLinked != m_CornerRadius.IsLinked()) {
@@ -883,6 +1058,18 @@ void Button::buildDrawCommands(RenderContext& ctx) {
     }
     m_CornerRadius.FromVec4(cornerRadiusVec);
     m_CornerRadius.SetLinked(cornerRadiusLinked);
+
+    // A theme may supply a uniform corner radius (applied only when defined and the
+    // property is not a local override).
+    if (!IsThemeOverridden("cornerRadius")) {
+        const ui::ThemeAsset* theme = GetEffectiveTheme();
+        ui::ThemeManager& tm = ui::ThemeManager::GetInstance();
+        if (tm.HasConstant(theme, GetThemeTypeName(), GetThemeTypeVariation(), "corner_radius")) {
+            float r = tm.ResolveConstant(theme, GetThemeTypeName(), GetThemeTypeVariation(), "corner_radius", 0.0f);
+            m_CornerRadius.FromVec4(Vec4(r, r, r, r));
+            m_CornerRadius.SetLinked(true);
+        }
+    }
 
     Vec4 borderWidthVec = GetPropertyValue<Vec4>("borderWidth");
     bool borderWidthLinked = GetPropertyValue<bool>("borderWidthLinked");
@@ -913,11 +1100,17 @@ void Button::buildDrawCommands(RenderContext& ctx) {
         m_TextMeshNeedsRegeneration = true;
     }
 
-    SpatialType spatialType = getSpatialType();
-    const char* spatialTypeStr = (spatialType == SpatialType::Canvas) ? "Canvas" :
-                                 (spatialType == SpatialType::World2D) ? "World2D" : "World3D";
-
     std::string fontPath = GetFontPath();
+
+    // Fall back to the project's default font when none is set, matching Label so a
+    // button with no explicit font still renders its text.
+    if (fontPath.empty()) {
+        asset::AssetDatabase& assetDb = asset::AssetDatabase::GetInstance();
+        if (assetDb.IsInitialized()) {
+            fontPath = assetDb.GetDefaultFontPath();
+        }
+    }
+
     bool fontPathChanged = (fontPath != m_CurrentFontPath);
     bool fontSizeChanged = (currentFontSize != m_CurrentFontSize);
 
@@ -944,10 +1137,12 @@ void Button::buildDrawCommands(RenderContext& ctx) {
 
             bool loaded = m_FontAsset->LoadFromFile(fontPath, currentFontSize, atlasSize, atlasSize);
             if (!loaded) {
-
                 m_FontAsset.Reset();
             } else {
-
+                // The label is measured with this font, and the font arrives lazily -- on
+                // the first draw, i.e. after any parent container has already measured and
+                // arranged this button against a fontless estimate. Tell it to re-measure.
+                NotifyContentSizeChanged();
             }
         }
     }
@@ -955,7 +1150,8 @@ void Button::buildDrawCommands(RenderContext& ctx) {
     if (m_FontAsset.IsValid() && m_FontAsset->IsLoaded() && !m_FontHandle.isValid()) {
 
         FontDesc fontDesc;
-        fontDesc.fontPath = m_FontAsset->GetPath();
+        // Use GetPhysicalPath() to resolve res:// path to filesystem path for file loading
+        fontDesc.fontPath = m_FontAsset->GetPhysicalPath();
         fontDesc.fontSize = currentFontSize;
         fontDesc.atlasWidth = m_FontAsset->GetAtlasWidth();
         fontDesc.atlasHeight = m_FontAsset->GetAtlasHeight();
@@ -971,8 +1167,8 @@ void Button::buildDrawCommands(RenderContext& ctx) {
         }
     }
 
-    Vec2 position = node2D->GetGlobalPosition();
-    Vec2 size = CalculateButtonSize();
+    Vec2 position = GetResolvedRect().GetCenter();
+    Vec2 size = GetEffectiveSize();
 
     position += m_CurrentPositionOffset;
     Vec2 scale = Vec2(1.0f, 1.0f) + m_CurrentScaleOffset;
@@ -986,6 +1182,19 @@ void Button::buildDrawCommands(RenderContext& ctx) {
 void Button::RenderBackground(RenderContext& ctx, const Vec2& position, const Vec2& size, float rotation) {
     auto effectiveStyle = GetEffectiveStyle();
     if (!effectiveStyle) {
+        return;
+    }
+
+    // A themed StyleBox entry for the current interaction state (Godot Button parity:
+    // "normal"/"hover"/"pressed"/"disabled"), when the effective theme defines one,
+    // fully replaces the flat property-driven background+border for that state. It is
+    // tinted by the state's modulation colour and the control's opacity, and the
+    // background image still paints over it.
+    if (std::shared_ptr<StyleBox> themedBox = ResolveThemedStyleBox(ButtonStateThemeEntry(m_CurrentState))) {
+        Color modulate = GetEffectiveColor(Color::White());
+        modulate.a *= GetOpacity();
+        DrawStyleBox(ctx, themedBox.get(), position, size, rotation, modulate);
+        RenderBackgroundImage(ctx, position, size, rotation, modulate);
         return;
     }
 
@@ -1008,7 +1217,6 @@ void Button::RenderBackground(RenderContext& ctx, const Vec2& position, const Ve
             Vec4 innerRadius = cornerRadiusVec;
 
             Vec2 outerSize = Vec2(size.x + borderLeft + borderRight, size.y + borderTop + borderBottom);
-            Vec2 outerPosition = Vec2(position.x, position.y);
 
             Vec4 outerRadius = Vec4(
                 innerRadius.x + std::max(borderTop, borderLeft),
@@ -1019,14 +1227,28 @@ void Button::RenderBackground(RenderContext& ctx, const Vec2& position, const Ve
 
             Vec4 borderWidthVec = Vec4(borderTop, borderRight, borderBottom, borderLeft);
 
-            ctx.drawRoundedRectBorder(
-                outerPosition,
-                outerSize,
-                outerRadius,
-                borderWidthVec,
-                borderColor,
-                rotation
-            );
+            if (std::abs(rotation) > 0.0001f) {
+                // Rotated: position is center-pivot, use as-is
+                ctx.drawRoundedRectBorder(
+                    position,
+                    outerSize,
+                    outerRadius,
+                    borderWidthVec,
+                    borderColor,
+                    rotation
+                );
+            } else {
+                // Non-rotated: convert center-pivot to top-left
+                Vec2 topLeft = Vec2(position.x - size.x * 0.5f, position.y - size.y * 0.5f);
+                Vec2 outerPos = Vec2(topLeft.x - borderLeft, topLeft.y - borderTop);
+                ctx.drawRoundedRectBorder(
+                    outerPos,
+                    outerSize,
+                    outerRadius,
+                    borderWidthVec,
+                    borderColor
+                );
+            }
         }
     }
 
@@ -1040,22 +1262,132 @@ void Button::RenderBackground(RenderContext& ctx, const Vec2& position, const Ve
             0
         );
     } else {
+        // Position is center-pivot, convert to top-left for non-rotated rendering
+        Vec2 topLeft = Vec2(position.x - size.x * 0.5f, position.y - size.y * 0.5f);
         ctx.drawRoundedRect(
-            position,
+            topLeft,
             size,
             cornerRadiusVec,
             bgColor,
             0
         );
     }
+
+    // Optional background image, painted over the flat fill and tinted by the current
+    // state modulation + opacity (so hover/pressed brightness affects the image too).
+    Color imageTint = GetEffectiveColor(Color::White());
+    imageTint.a *= GetOpacity();
+    RenderBackgroundImage(ctx, position, size, rotation, imageTint);
 }
 
-void Button::RegenerateTextMesh(RenderContext& ctx, const Vec2& position, const Vec2& size) {
-    std::string text = GetText();
-    float fontSize = GetFontSize();
+void Button::RenderBackgroundImage(RenderContext& ctx, const Vec2& position, const Vec2& size,
+                                   float rotation, const Color& tint) {
+    std::string path = ResolveThemedImage("backgroundImagePath", "background_image");
+
+    if (path != m_CurrentBackgroundImagePath) {
+        if (m_BackgroundImageHandle.isValid()) {
+            if (IGfxDevice* device = ctx.getDevice()) {
+                device->destroyTexture(m_BackgroundImageHandle);
+            }
+            m_BackgroundImageHandle = TextureHandle();
+        }
+        m_BackgroundImageAsset.Reset();
+        m_CurrentBackgroundImagePath = path;
+
+        if (!path.empty()) {
+            m_BackgroundImageAsset = asset::AssetRef<asset::ImageAsset>(new asset::ImageAsset());
+            if (!m_BackgroundImageAsset->LoadFromFile(path, true, asset::ImageColorSpace::sRGB)) {
+                m_BackgroundImageAsset.Reset();
+            }
+        }
+    }
+
+    if (!m_BackgroundImageHandle.isValid() && m_BackgroundImageAsset.IsValid() &&
+        m_BackgroundImageAsset->IsLoaded()) {
+        if (m_BackgroundImageAsset->GetWidth() > 0 && m_BackgroundImageAsset->GetHeight() > 0 &&
+            m_BackgroundImageAsset->GetData() != nullptr) {
+            if (IGfxDevice* device = ctx.getDevice()) {
+                m_BackgroundImageHandle = lupine::CreateTexture2DFromImage(device, *m_BackgroundImageAsset, TextureFormat::RGBA8_UNORM);
+            }
+        }
+    }
+
+    if (!m_BackgroundImageHandle.isValid() || !m_BackgroundImageAsset.IsValid()) {
+        return;
+    }
+
+    UIImageStretchMode stretchMode = GetBackgroundImageStretchMode();
+    Vec4 margins = GetNineSliceMargins();
+    UINineSlice nineSlice;
+    nineSlice.marginLeft = margins.x;
+    nineSlice.marginTop = margins.y;
+    nineSlice.marginRight = margins.z;
+    nineSlice.marginBottom = margins.w;
+    nineSlice.axisHorizontal = GetNineSliceAxisHorizontal();
+    nineSlice.axisVertical = GetNineSliceAxisVertical();
+    nineSlice.drawCenter = GetNineSliceDrawCenter();
+
+    // A themed "background_image" entry may also dictate the fit (stretch / nine-slice),
+    // overriding this control's own stretch + nine-slice properties.
+    ui::ThemeImage themedImage;
+    if (ResolveThemedImageEx("backgroundImagePath", "background_image", themedImage) && themedImage.hasStretch) {
+        stretchMode = UIImageStretchModeFromInt(themedImage.stretchMode);
+        if (themedImage.stretchMode == 2) {
+            nineSlice.marginLeft = themedImage.marginLeft;
+            nineSlice.marginTop = themedImage.marginTop;
+            nineSlice.marginRight = themedImage.marginRight;
+            nineSlice.marginBottom = themedImage.marginBottom;
+            nineSlice.axisHorizontal = UINineSliceAxisModeFromInt(themedImage.axisH);
+            nineSlice.axisVertical = UINineSliceAxisModeFromInt(themedImage.axisV);
+            nineSlice.drawCenter = themedImage.drawCenter;
+        }
+    }
+
+    DrawUIImage(ctx, position, size, rotation, m_BackgroundImageHandle,
+                m_BackgroundImageAsset->GetWidth(), m_BackgroundImageAsset->GetHeight(),
+                tint, m_CornerRadius.AsVec4(), stretchMode, nineSlice);
+}
+
+TextLayoutParams Button::BuildLayoutParams(const Vec2& boxSize) const {
+    TextLayoutParams params;
+    params.fontSize = GetFontSize();
+    params.color = GetEffectiveColor(GetFontColor());
+    params.hAlign = GetTextHAlign();
+    params.vAlign = GetTextVAlign();
+    params.multiline = true;
+    params.wordWrap = GetWordWrap();
+    params.autowrapMode = static_cast<TextAutowrapMode>(GetPropertyValue<int>("autowrapMode"));
+    params.overrunBehavior = static_cast<TextOverrunBehavior>(GetPropertyValue<int>("overrunBehavior"));
+    params.clipText = GetPropertyValue<bool>("clipText");
+    params.tabSize = GetPropertyValue<int>("tabSize");
+    params.lineSpacing = GetLineSpacing();
+    params.shadowOffset = GetPropertyValue<Vec2>("shadowOffset");
+    params.shadowColor = GetPropertyValue<Color>("shadowColor");
+    params.boxWidth = (boxSize.x > 0.0f) ? boxSize.x : 0.0f;
+    params.boxHeight = (boxSize.y > 0.0f) ? boxSize.y : 0.0f;
+    return params;
+}
+
+math::Rect Button::GetTextBoxRect(const Vec2& center) const {
+    // The box the label is laid out inside: the button's on-screen rect, inset by the content
+    // margins. textPadding used to be read ONLY when auto-sizing -- it never moved the drawn
+    // text -- and the themed StyleBox's content margins were not read by anything at all.
+    //
+    // The center is passed in rather than read off the node, because the draw pass offsets it
+    // by the active state tween's position offset; the label has to travel with the button.
+    //
+    // GetEffectiveSize(), not GetBoundsSize(): in FitToText mode the fitted size is what the
+    // button actually draws at.
+    const Vec2 size = GetEffectiveSize();
+    const math::Rect box(center.x - size.x * 0.5f, center.y - size.y * 0.5f, size.x, size.y);
+
+    return GetContentInsetRect(box);
+}
+
+void Button::RegenerateTextMesh(RenderContext& ctx, const Vec2& position, const Vec2&) {
+    const std::string text = GetText();
 
     if (text.empty()) {
-
         if (m_TextMesh.isValid()) {
             ctx.getDevice()->destroyMesh(m_TextMesh);
             m_TextMesh = MeshHandle();
@@ -1063,105 +1395,72 @@ void Button::RegenerateTextMesh(RenderContext& ctx, const Vec2& position, const 
         m_CachedText = "";
         m_CachedFontSize = 0.0f;
         m_CachedPosition = position;
+        m_TextMeshNeedsRegeneration = false;
         return;
     }
 
     const FontAtlas* fontAtlas = ctx.getDevice()->getFontAtlas(m_FontHandle);
     if (!fontAtlas) {
-
         return;
     }
 
-    Vec2 textSize = CalculateTextSize();
-    Vec2 textPos;
-    textPos.x = position.x + (size.x - textSize.x) * 0.5f;
+    // Laid out through TextLayout, exactly as Label is. The old implementation was a
+    // hand-rolled glyph loop that hard-CENTERED the text on the button's center: there was no
+    // horizontal or vertical alignment at all (you could not left-align a menu-row button),
+    // the wordWrap property it advertised was never read by the renderer (long text simply
+    // overflowed), lineSpacing did not exist, and the loop was byte-wise so non-ASCII UTF-8
+    // produced garbage codepoints.
+    const math::Rect box = GetTextBoxRect(position);
+    const Vec2 boxTopLeft = box.GetTopLeft();
 
-    if (m_FontAsset.IsValid() && m_FontAsset->IsLoaded()) {
-        float scaleFactor = fontSize / m_FontAsset->GetFontSize();
-        float ascent = m_FontAsset->GetAscent() * scaleFactor;
-        float descent = m_FontAsset->GetDescent() * scaleFactor;
+    TextLayoutParams params = BuildLayoutParams(box.size);
+    TextLayoutResult layout = TextLayout::Layout(text, *fontAtlas, params);
 
-        float buttonCenterY = position.y + size.y * 0.5f;
-        textPos.y = buttonCenterY - (ascent + descent) * 0.5f;
-    } else {
-        textPos.y = position.y + size.y * 0.5f;
+    if (m_TextMesh.isValid()) {
+        ctx.getDevice()->destroyMesh(m_TextMesh);
+        m_TextMesh = MeshHandle();
     }
 
-    float scale = fontSize / fontAtlas->fontSize;
+    if (layout.quads.empty()) {
+        m_CachedText = text;
+        m_CachedFontSize = params.fontSize;
+        m_CachedPosition = position;
+        m_TextMeshNeedsRegeneration = false;
+        return;
+    }
+
+    // TextLayout's local space has its origin at the box's TOP-left and descends into
+    // negative Y, so the glyphs land inside the box by adding that corner and nothing else.
+    const float textZ = 0.1f;
+
     MeshData textMeshData;
-    Vec2 cursor = textPos;
+    textMeshData.vertices.reserve(layout.quads.size() * 4);
+    textMeshData.indices.reserve(layout.quads.size() * 6);
+
     uint32_t vertexOffset = 0;
-
-    for (size_t i = 0; i < text.length(); ++i) {
-        char c = text[i];
-        uint32_t codepoint = static_cast<uint32_t>(c);
-
-        if (c == '\n') {
-            cursor.x = textPos.x;
-            cursor.y += fontAtlas->lineHeight * scale;
-            continue;
+    for (const TextGlyphQuad& q : layout.quads) {
+        for (int k = 0; k < 4; ++k) {
+            Vertex vtx;
+            vtx.position = Vec3(boxTopLeft.x + q.pos[k].x, boxTopLeft.y + q.pos[k].y, textZ);
+            vtx.normal = Vec3(0.0f, 0.0f, 1.0f);
+            vtx.texCoord = q.uv[k];
+            vtx.color = Vec4(q.color.r, q.color.g, q.color.b, q.color.a);
+            textMeshData.vertices.push_back(vtx);
         }
-
-        const Glyph* glyph = fontAtlas->getGlyph(codepoint);
-        if (!glyph) {
-            if (c == ' ') {
-                cursor.x += fontAtlas->fontSize * 0.25f * scale;
-            }
-            continue;
-        }
-
-        Vec2 glyphPos;
-        glyphPos.x = cursor.x + glyph->bearing.x * scale;
-        glyphPos.y = cursor.y - glyph->bearing.y * scale;
-        Vec2 glyphSize = glyph->size * scale;
-
-        float textZ = 0.1f;
-        Color fontColor = GetEffectiveColor(GetFontColor());
-
-        Vertex v0, v1, v2, v3;
-        v0.position = Vec3(glyphPos.x, glyphPos.y - glyphSize.y, textZ);
-        v0.normal = Vec3(0, 0, 1);
-        v0.texCoord = Vec2(glyph->uvMin.x, glyph->uvMax.y);
-        v0.color = Vec4(fontColor.r, fontColor.g, fontColor.b, fontColor.a);
-
-        v1.position = Vec3(glyphPos.x + glyphSize.x, glyphPos.y - glyphSize.y, textZ);
-        v1.normal = Vec3(0, 0, 1);
-        v1.texCoord = Vec2(glyph->uvMax.x, glyph->uvMax.y);
-        v1.color = Vec4(fontColor.r, fontColor.g, fontColor.b, fontColor.a);
-
-        v2.position = Vec3(glyphPos.x + glyphSize.x, glyphPos.y, textZ);
-        v2.normal = Vec3(0, 0, 1);
-        v2.texCoord = Vec2(glyph->uvMax.x, glyph->uvMin.y);
-        v2.color = Vec4(fontColor.r, fontColor.g, fontColor.b, fontColor.a);
-
-        v3.position = Vec3(glyphPos.x, glyphPos.y, textZ);
-        v3.normal = Vec3(0, 0, 1);
-        v3.texCoord = Vec2(glyph->uvMin.x, glyph->uvMin.y);
-        v3.color = Vec4(fontColor.r, fontColor.g, fontColor.b, fontColor.a);
-
-        textMeshData.vertices.push_back(v0);
-        textMeshData.vertices.push_back(v1);
-        textMeshData.vertices.push_back(v2);
-        textMeshData.vertices.push_back(v3);
-
         textMeshData.indices.push_back(vertexOffset + 0);
         textMeshData.indices.push_back(vertexOffset + 1);
         textMeshData.indices.push_back(vertexOffset + 2);
         textMeshData.indices.push_back(vertexOffset + 0);
         textMeshData.indices.push_back(vertexOffset + 2);
         textMeshData.indices.push_back(vertexOffset + 3);
-
         vertexOffset += 4;
-        cursor.x += glyph->advance * scale;
     }
 
-    if (m_TextMesh.isValid()) {
-        ctx.getDevice()->destroyMesh(m_TextMesh);
-    }
+    textMeshData.calculateBounds();
 
     m_TextMesh = ctx.getDevice()->createMesh(textMeshData);
     m_CachedText = text;
-    m_CachedFontSize = fontSize;
+    m_CachedFontSize = params.fontSize;
     m_CachedPosition = position;
     m_TextMeshNeedsRegeneration = false;
 
@@ -1215,7 +1514,7 @@ AABB Button::getWorldBounds() const {
 
     Vec2 position = node2D->GetGlobalPosition();
     Vec2 globalScale = node2D->GetGlobalScale();
-    Vec2 size = CalculateButtonSize();
+    Vec2 size = GetEffectiveSize();
 
     size.x *= globalScale.x;
     size.y *= globalScale.y;
@@ -1273,7 +1572,7 @@ math::OBB Button::getOrientedBounds() const {
     }
 
     Vec2 position = node2D->GetGlobalPosition();
-    Vec2 size = CalculateButtonSize();
+    Vec2 size = GetEffectiveSize();
     Vec2 globalScale = node2D->GetGlobalScale();
     float rotation = node2D->GetGlobalRotation();
 
@@ -1312,12 +1611,43 @@ RenderLayer Button::getRenderLayer() const {
 }
 
 SpatialType Button::getSpatialType() const {
+    return GetUISpatialType();
+}
 
-    if (GetUseUISpace()) {
-        return SpatialType::Canvas;
-    } else {
-        return SpatialType::World2D;
+bool Button::OnAssetFileChanged(const std::string& changedPath, const std::string& resolvedChangedPath) {
+    asset::AssetDatabase& assetDb = asset::AssetDatabase::GetInstance();
+
+    auto matchesPath = [&](const std::string& assetPath) -> bool {
+        if (assetPath.empty()) {
+            return false;
+        }
+        std::string resolved;
+        if (assetDb.IsInitialized()) {
+            resolved = assetDb.ResolveAsset(assetPath);
+        }
+        return (assetPath == changedPath) ||
+               (!resolved.empty() && !resolvedChangedPath.empty() && resolved == resolvedChangedPath);
+    };
+
+    bool handled = false;
+
+    if (matchesPath(GetFontPath())) {
+        m_FontHandle = FontHandle();
+        m_FontAsset.Reset();
+        m_CurrentFontPath.clear();
+        m_TextMeshNeedsRegeneration = true;
+        handled = true;
     }
+
+    if (matchesPath(GetBackgroundImagePath())) {
+        m_BackgroundImageHandle = TextureHandle();
+        m_BackgroundImageAsset.Reset();
+        m_CurrentBackgroundImagePath.clear();
+        m_MeshNeedsRegeneration = true;
+        handled = true;
+    }
+
+    return handled;
 }
 
 }

@@ -4,6 +4,7 @@
 #include "lupine/rendering/RenderWorld.hpp"
 #include "lupine/rendering/Mesh.hpp"
 #include "lupine/rendering/gfx/IGfxDevice.hpp"
+#include "lupine/asset/AssetDatabase.hpp"
 #include "lupine/logger/Logger.hpp"
 #include <cmath>
 
@@ -51,6 +52,9 @@ void Shape2D::DefineProperties() {
     DefineProperty(PROPERTY_INT_RANGE_GROUP(layer, 0, -100, 100, 1, "Rendering"));
     DefineProperty(PROPERTY_INT_RANGE_GROUP(sortingOrder, 0, -1000, 1000, 1, "Rendering"));
     DefineProperty(PROPERTY_DEFAULT_GROUP(uiSpace, Bool, true, "Rendering"));
+
+    DefineProperty(PROPERTY_FILE_GROUP(materialOverride, std::string(""), "*.lsh,*.mat,*.material", "Appearance"));
+    DefineProperty(PROPERTY_DEFAULT_GROUP(shaderParameters, String, std::string(""), "Appearance"));
 }
 
 void Shape2D::OnAwake() {
@@ -74,13 +78,8 @@ void Shape2D::SetShapeType(ShapeType type) {
     SetPropertyValue<int>("shapeType", ShapeTypeToInt(type));
 }
 
-const Color& Shape2D::GetColor() const {
-    static Color defaultColor = Color::White();
-    const ComponentProperty* prop = m_CustomProperties.GetProperty("color");
-    if (prop) {
-        return prop->GetValue<Color>();
-    }
-    return defaultColor;
+Color Shape2D::GetColor() const {
+    return GetPropertyValue<Color>("color");
 }
 
 void Shape2D::SetColor(const Color& color) {
@@ -135,13 +134,8 @@ void Shape2D::SetBorderEnabled(bool enabled) {
     SetPropertyValue<bool>("borderEnabled", enabled);
 }
 
-const Color& Shape2D::GetBorderColor() const {
-    static Color defaultColor = Color::Black();
-    const ComponentProperty* prop = m_CustomProperties.GetProperty("borderColor");
-    if (prop) {
-        return prop->GetValue<Color>();
-    }
-    return defaultColor;
+Color Shape2D::GetBorderColor() const {
+    return GetPropertyValue<Color>("borderColor");
 }
 
 void Shape2D::SetBorderColor(const Color& color) {
@@ -188,6 +182,120 @@ void Shape2D::SetUISpace(bool uiSpace) {
     SetPropertyValue<bool>("uiSpace", uiSpace);
 }
 
+const std::string& Shape2D::GetShader() const {
+    // Custom .lsh shaders live in the material override slot.
+    static std::string cachedPath;
+    std::string materialPath = GetPropertyValue<std::string>("materialOverride");
+    if (materialPath.size() >= 4 && materialPath.compare(materialPath.size() - 4, 4, ".lsh") == 0) {
+        cachedPath = materialPath;
+    } else {
+        cachedPath = std::string();
+    }
+    return cachedPath;
+}
+
+void Shape2D::SetShader(const std::string& shaderPath) {
+    std::string resPath = shaderPath;
+    if (!shaderPath.empty() && !(shaderPath.size() >= 6 && shaderPath.substr(0, 6) == "res://")) {
+        auto& assetDb = asset::AssetDatabase::GetInstance();
+        if (assetDb.IsInitialized()) {
+            std::string converted = assetDb.ToResourcePath(shaderPath);
+            if (!converted.empty()) {
+                resPath = converted;
+            }
+        }
+    }
+    SetPropertyValue<std::string>("materialOverride", resPath);
+}
+
+const std::string& Shape2D::GetShaderParameters() const {
+    static std::string cachedParams;
+    cachedParams = GetPropertyValue<std::string>("shaderParameters");
+    return cachedParams;
+}
+
+void Shape2D::SetShaderParameters(const std::string& parametersJson) {
+    SetPropertyValue<std::string>("shaderParameters", parametersJson);
+}
+
+bool Shape2D::RenderFillCustomShader(RenderContext& ctx, const Vec2& position, float rotation) {
+    const std::string& shaderPath = GetShader();
+    if (shaderPath.empty()) {
+        return false;
+    }
+
+    MaterialHandle material = ctx.getOrCreateLshMaterial(shaderPath, 0);
+    if (!material.isValid()) {
+        return false;
+    }
+
+    ShapeType type = GetShapeType();
+    Color fillColor = GetColor();
+    Color borderColor = GetBorderColor();
+    bool borderEnabled = GetBorderEnabled();
+    float borderWidth = borderEnabled ? GetBorderWidth() : 0.0f;
+    bool filled = GetFilled();
+
+    // Margin so the bounding quad comfortably contains the shape, border, and AA edge.
+    const float antiAlias = 2.0f;
+    float margin = borderWidth + antiAlias;
+
+    float radius = 0.0f;
+    int sides = 0;
+    float halfWidth = 0.0f;
+    float halfHeight = 0.0f;
+    Vec2 quadSize;
+
+    switch (type) {
+        case ShapeType::Square: {
+            halfWidth = GetWidth() * 0.5f;
+            halfHeight = GetHeight() * 0.5f;
+            quadSize = Vec2(GetWidth() + 2.0f * margin, GetHeight() + 2.0f * margin);
+            break;
+        }
+        case ShapeType::Triangle:
+            sides = 3;
+            radius = GetRadius();
+            quadSize = Vec2(2.0f * (radius + margin), 2.0f * (radius + margin));
+            break;
+        case ShapeType::Pentagon:
+            sides = 5;
+            radius = GetRadius();
+            quadSize = Vec2(2.0f * (radius + margin), 2.0f * (radius + margin));
+            break;
+        case ShapeType::Hexagon:
+            sides = 6;
+            radius = GetRadius();
+            quadSize = Vec2(2.0f * (radius + margin), 2.0f * (radius + margin));
+            break;
+        case ShapeType::Circle:
+        default:
+            radius = GetRadius();
+            quadSize = Vec2(2.0f * (radius + margin), 2.0f * (radius + margin));
+            break;
+    }
+
+    MaterialPropertyBlock params;
+    m_ShaderParams.BuildBlock(ctx, GetShaderParameters(), params);
+
+    // Shape description provided to the custom shader so it can perform the SDF itself.
+    // u_ShapeType is a float (not int) to match the property-block upload path used by the
+    // other 2D-UI uniforms.
+    params.setFloat("u_ShapeType", static_cast<float>(static_cast<int>(type)));
+    params.setVec4("u_ShapeParams", Vec4(radius, static_cast<float>(sides), halfWidth, halfHeight));
+    params.setColor("u_BorderColor", borderColor);
+    params.setVec4("u_BorderParams", Vec4(borderWidth, borderEnabled ? 1.0f : 0.0f, filled ? 1.0f : 0.0f, 0.0f));
+
+    if (std::abs(rotation) > 0.0001f) {
+        ctx.drawRoundedRectShader(position, quadSize, Vec4(0.0f), fillColor, rotation, material, params);
+    } else {
+        Vec2 topLeft = Vec2(position.x - quadSize.x * 0.5f, position.y - quadSize.y * 0.5f);
+        ctx.drawRoundedRectShader(topLeft, quadSize, Vec4(0.0f), fillColor, 0.0f, material, params);
+    }
+
+    return true;
+}
+
 int Shape2D::ShapeTypeToInt(ShapeType type) const {
     return static_cast<int>(type);
 }
@@ -197,65 +305,51 @@ Shape2D::ShapeType Shape2D::IntToShapeType(int value) const {
     return static_cast<ShapeType>(value);
 }
 
-void Shape2D::RenderCircle(RenderContext& ctx, const Vec2& position, float radius, float rotation) {
-
+void Shape2D::RenderCircle(RenderContext& ctx, const Vec2& position, float radius, float) {
     Color fillColor = GetColor();
+    Color borderColor = GetBorderColor();
+    float borderWidth = GetBorderWidth();
+    bool hasBorder = GetBorderEnabled() && borderWidth > 0.0f;
     Vec3 pos3D(position.x, position.y, 0.0f);
 
-    if (GetFilled()) {
-        ctx.drawCircle(pos3D, radius, fillColor, true);
+    // Draw border first (larger circle behind the fill)
+    if (hasBorder) {
+        float outerRadius = radius + borderWidth * 0.5f;
+        ctx.drawCircle(pos3D, outerRadius, borderColor, true);
     }
 
-    if (GetBorderEnabled()) {
-        Color borderColor = GetBorderColor();
-        float borderWidth = GetBorderWidth();
-
-        float outerRadius = radius + borderWidth * 0.5f;
-        ctx.drawCircle(pos3D, outerRadius, borderColor, false);
-
-        if (GetFilled()) {
-            float innerRadius = radius - borderWidth * 0.5f;
-            if (innerRadius > 0) {
-                ctx.drawCircle(pos3D, innerRadius, borderColor, false);
-            }
-        }
+    // Draw fill on top
+    if (GetFilled()) {
+        ctx.drawCircle(pos3D, radius, fillColor, true);
     }
 }
 
 void Shape2D::RenderSquare(RenderContext& ctx, const Vec2& position, const Vec2& size, float rotation) {
     Color fillColor = GetColor();
+    Color borderColor = GetBorderColor();
+    float borderWidth = GetBorderWidth();
+    bool hasBorder = GetBorderEnabled() && borderWidth > 0.0f;
     Vec4 cornerRadius(0.0f, 0.0f, 0.0f, 0.0f);
 
-    if (GetFilled()) {
-
-        if (std::abs(rotation) > 0.0001f) {
-            ctx.drawRoundedRect(position, size, cornerRadius, fillColor, rotation, 0);
-        } else {
-
-            Vec2 topLeft(position.x - size.x * 0.5f, position.y - size.y * 0.5f);
-            ctx.drawRoundedRect(topLeft, size, cornerRadius, fillColor, 0);
-        }
-    }
-
-    if (GetBorderEnabled()) {
-        Color borderColor = GetBorderColor();
-        float borderWidth = GetBorderWidth();
-
+    // Draw border first (larger rect behind the fill)
+    if (hasBorder) {
         Vec2 borderSize = Vec2(size.x + borderWidth, size.y + borderWidth);
 
         if (std::abs(rotation) > 0.0001f) {
-
             ctx.drawRoundedRect(position, borderSize, cornerRadius, borderColor, rotation, 0);
-
-            if (GetFilled()) {
-                ctx.drawRoundedRect(position, size, cornerRadius, fillColor, rotation, 0);
-            }
         } else {
+            Vec2 topLeft(position.x - borderSize.x * 0.5f, position.y - borderSize.y * 0.5f);
+            ctx.drawRoundedRect(topLeft, borderSize, cornerRadius, borderColor, 0);
+        }
+    }
 
+    // Draw fill on top
+    if (GetFilled()) {
+        if (std::abs(rotation) > 0.0001f) {
+            ctx.drawRoundedRect(position, size, cornerRadius, fillColor, rotation, 0);
+        } else {
             Vec2 topLeft(position.x - size.x * 0.5f, position.y - size.y * 0.5f);
-            Vec2 borderPos = Vec2(topLeft.x - borderWidth * 0.5f, topLeft.y - borderWidth * 0.5f);
-            Vec4 borderWidths(borderWidth, borderWidth, borderWidth, borderWidth);
-            ctx.drawRoundedRectBorder(borderPos, borderSize, cornerRadius, borderWidths, borderColor);
+            ctx.drawRoundedRect(topLeft, size, cornerRadius, fillColor, 0);
         }
     }
 }
@@ -266,110 +360,21 @@ void Shape2D::RenderTriangle(RenderContext& ctx, const Vec2& position, float rad
 
 void Shape2D::RenderPolygon(RenderContext& ctx, const Vec2& position, float radius, int sides, float rotation) {
     Color fillColor = GetColor();
-    IGfxDevice* device = ctx.getDevice();
+    Color borderColor = GetBorderColor();
+    float borderWidth = GetBorderWidth();
+    bool hasBorder = GetBorderEnabled() && borderWidth > 0.0f;
 
-    if (!device) {
-
-        return;
+    // Draw border first (larger polygon behind the fill)
+    if (hasBorder) {
+        float outerRadius = radius + borderWidth * 0.5f;
+        ctx.drawPolygon(position, outerRadius, sides, borderColor, rotation, 0);
     }
 
-    std::vector<Vec2> vertices;
-    float angleStep = (2.0f * static_cast<float>(M_PI)) / sides;
-    float startAngle = -static_cast<float>(M_PI) / 2.0f;
-
-    for (int i = 0; i < sides; ++i) {
-        float angle = startAngle + i * angleStep;
-        float x = radius * std::cos(angle);
-        float y = radius * std::sin(angle);
-        vertices.push_back(Vec2(x, y));
-    }
-
+    // Draw fill on top
     if (GetFilled()) {
-        MeshData meshData;
-
-        Vertex centerVert;
-        centerVert.position = Vec3(0.0f, 0.0f, 0.0f);
-        centerVert.normal = Vec3(0.0f, 0.0f, 1.0f);
-        centerVert.texCoord = Vec2(0.5f, 0.5f);
-        centerVert.color = Vec4(fillColor.r, fillColor.g, fillColor.b, fillColor.a);
-        meshData.vertices.push_back(centerVert);
-
-        for (int i = 0; i < sides; ++i) {
-            Vertex v;
-            v.position = Vec3(vertices[i].x, vertices[i].y, 0.0f);
-            v.normal = Vec3(0.0f, 0.0f, 1.0f);
-            float u = (vertices[i].x / radius + 1.0f) * 0.5f;
-            float vCoord = (vertices[i].y / radius + 1.0f) * 0.5f;
-            v.texCoord = Vec2(u, vCoord);
-            v.color = Vec4(fillColor.r, fillColor.g, fillColor.b, fillColor.a);
-            meshData.vertices.push_back(v);
-        }
-
-        for (int i = 0; i < sides; ++i) {
-            int next = (i + 1) % sides;
-            meshData.indices.push_back(0);
-            meshData.indices.push_back(next + 1);
-            meshData.indices.push_back(i + 1);
-        }
-
-        meshData.calculateBounds();
-
-        MeshHandle mesh = device->createMesh(meshData);
-        if (mesh.isValid()) {
-
-            MaterialHandle material = ctx.getColoredMaterialForSpatialType();
-
-            if (!material.isValid()) {
-
-                material = ctx.getDefaultColoredMaterial();
-            }
-
-            Mat4 transform = Mat4::Translate(Vec3(position.x, position.y, 0.0f));
-            if (std::abs(rotation) > 0.0001f) {
-
-                Mat4 rotMat = Mat4::Rotate(rotation, Vec3(0.0f, 0.0f, 1.0f));
-                transform = transform * rotMat;
-            }
-
-            MaterialPropertyBlock overrides;
-            overrides.setColor("u_Color", fillColor);
-            ctx.drawMesh(mesh, material, transform, overrides);
-
-            device->destroyMesh(mesh);
-        } else {
-
-        }
-    }
-
-    if (GetBorderEnabled()) {
-        Color borderColor = GetBorderColor();
-        float borderWidth = GetBorderWidth();
-
-        std::vector<Vec2> rotatedVertices = vertices;
-        if (std::abs(rotation) > 0.0001f) {
-            float cosR = std::cos(rotation);
-            float sinR = std::sin(rotation);
-            for (auto& v : rotatedVertices) {
-                float rotatedX = v.x * cosR - v.y * sinR;
-                float rotatedY = v.x * sinR + v.y * cosR;
-                v.x = rotatedX;
-                v.y = rotatedY;
-            }
-        }
-
-        for (int i = 0; i < sides; ++i) {
-            int next = (i + 1) % sides;
-            Vec3 start(position.x + rotatedVertices[i].x, position.y + rotatedVertices[i].y, 0.0f);
-            Vec3 end(position.x + rotatedVertices[next].x, position.y + rotatedVertices[next].y, 0.0f);
-
-            ctx.drawLine(start, end, borderColor, borderWidth);
-        }
-
-        for (const auto& vertex : rotatedVertices) {
-            Vec3 vertexPos(position.x + vertex.x, position.y + vertex.y, 0.0f);
-            float cornerRadius = borderWidth * 0.5f;
-            ctx.drawCircle(vertexPos, cornerRadius, borderColor, true);
-        }
+        // Use the SDF-based polygon shader for smooth antialiased edges
+        // The rotation is applied inside the shader for better quality
+        ctx.drawPolygon(position, radius, sides, fillColor, rotation, 0);
     }
 }
 
@@ -381,40 +386,45 @@ void Shape2D::buildDrawCommands(RenderContext& ctx) {
     Node2D* node2D = dynamic_cast<Node2D*>(m_Owner);
     Vec2 position;
     float rotation = 0.0f;
+    Vec2 scale(1.0f, 1.0f);
 
     if (node2D) {
         position = node2D->GetGlobalPosition();
         rotation = node2D->GetGlobalRotation();
+        scale = node2D->GetGlobalScale();
     } else {
         position = Vec2(0.0f, 0.0f);
     }
 
     ShapeType type = GetShapeType();
 
-    static int frameCount = 0;
-    if (frameCount++ % 60 == 0) {
+    // Radius-based shapes can only be uniformly scaled; use the average axis scale.
+    float radiusScale = (std::abs(scale.x) + std::abs(scale.y)) * 0.5f;
 
+    // A custom .lsh shader, when attached and compiled, renders the whole shape (fill + border).
+    if (!GetShader().empty() && RenderFillCustomShader(ctx, position, rotation)) {
+        return;
     }
 
     switch (type) {
         case ShapeType::Circle:
-            RenderCircle(ctx, position, GetRadius(), rotation);
+            RenderCircle(ctx, position, GetRadius() * radiusScale, rotation);
             break;
 
         case ShapeType::Square:
-            RenderSquare(ctx, position, Vec2(GetWidth(), GetHeight()), rotation);
+            RenderSquare(ctx, position, Vec2(GetWidth() * scale.x, GetHeight() * scale.y), rotation);
             break;
 
         case ShapeType::Triangle:
-            RenderTriangle(ctx, position, GetRadius(), rotation);
+            RenderTriangle(ctx, position, GetRadius() * radiusScale, rotation);
             break;
 
         case ShapeType::Pentagon:
-            RenderPolygon(ctx, position, GetRadius(), 5, rotation);
+            RenderPolygon(ctx, position, GetRadius() * radiusScale, 5, rotation);
             break;
 
         case ShapeType::Hexagon:
-            RenderPolygon(ctx, position, GetRadius(), 6, rotation);
+            RenderPolygon(ctx, position, GetRadius() * radiusScale, 6, rotation);
             break;
     }
 }
@@ -435,9 +445,15 @@ AABB Shape2D::getWorldBounds() const {
         position = Vec2(0.0f, 0.0f);
     }
 
+    Vec2 scale(1.0f, 1.0f);
+    if (node2D) {
+        scale = node2D->GetGlobalScale();
+    }
+    float radiusScale = (std::abs(scale.x) + std::abs(scale.y)) * 0.5f;
+
     ShapeType type = GetShapeType();
-    float radius = GetRadius();
-    Vec2 size = Vec2(GetWidth(), GetHeight());
+    float radius = GetRadius() * radiusScale;
+    Vec2 size = Vec2(GetWidth() * scale.x, GetHeight() * scale.y);
 
     if (GetBorderEnabled()) {
         float borderWidth = GetBorderWidth();

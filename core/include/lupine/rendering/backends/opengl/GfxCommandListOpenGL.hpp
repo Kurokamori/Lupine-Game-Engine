@@ -1,4 +1,4 @@
-#pragma onc
+#pragma once
 
 #include "../../gfx/GfxCommandList.hpp"
 #include "OpenGLState.hpp"
@@ -46,6 +46,8 @@ public:
     void setUniformMat4Array(const char* name, const math::Mat4* values, size_t count) override;
     void setUniformColor(const char* name, const Color& value) override;
 
+    void resetMaterialData() override;
+
     void draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) override;
     void drawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) override;
 
@@ -59,6 +61,10 @@ public:
 
 private:
     OpenGLState* m_state;
+
+    /// Uniform location lookup through the per-pipeline cache.
+    /// glGetUniformLocation is a driver round-trip; setUniform* runs per draw.
+    GLint getUniformLocationCached(GLPipeline& pipeline, const char* name);
 
     // Current bindings
     RenderTargetHandle m_currentRenderTarget;

@@ -193,6 +193,7 @@ nlohmann::json ISerializable::SerializeWithMetadata() const {
     nlohmann::json properties = nlohmann::json::object();
     nlohmann::json metadata = nlohmann::json::object();
 
+    int declarationIndex = 0;
     for (const auto& prop : m_Properties) {
         const std::string& propName = prop->GetName();
         properties[propName] = prop->Serialize();
@@ -208,6 +209,8 @@ nlohmann::json ISerializable::SerializeWithMetadata() const {
             basicMeta["type"] = static_cast<int>(ConvertPropertyTypeToValueType(prop->GetType()));
             metadata[propName] = basicMeta;
         }
+
+        metadata[propName]["order"] = declarationIndex++;
     }
 
     json["properties"] = properties;
@@ -383,7 +386,7 @@ bool Serializer::DeserializeFromString(ISerializable& object, const std::string&
         object.Deserialize(json);
         return true;
     } catch (const std::exception& e) {
-
+        LOG_ERROR(LogCategory::Core, "Serializer: failed to deserialize from string: {}", e.what());
         return false;
     }
 }
@@ -397,7 +400,7 @@ bool Serializer::DeserializeFromJson(ISerializable& object, const nlohmann::json
         object.Deserialize(json);
         return true;
     } catch (const std::exception& e) {
-
+        LOG_ERROR(LogCategory::Core, "Serializer: failed to deserialize from JSON: {}", e.what());
         return false;
     }
 }
@@ -413,7 +416,7 @@ bool Serializer::SaveToFile(const ISerializable& object, const std::string& file
 
         return true;
     } catch (const std::exception& e) {
-
+        LOG_ERROR(LogCategory::Core, "Serializer: failed to save '{}': {}", filepath, e.what());
         return false;
     }
 }
@@ -432,7 +435,7 @@ bool Serializer::LoadFromFile(ISerializable& object, const std::string& filepath
         }
         return success;
     } catch (const std::exception& e) {
-
+        LOG_ERROR(LogCategory::Core, "Serializer: failed to load '{}': {}", filepath, e.what());
         return false;
     }
 }
@@ -458,6 +461,15 @@ std::shared_ptr<ISerializable> TypeRegistry::CreateInstance(const std::string& t
 
 bool TypeRegistry::IsTypeRegistered(const std::string& typeName) const {
     return m_Factories.find(typeName) != m_Factories.end();
+}
+
+std::vector<std::string> TypeRegistry::GetRegisteredTypeNames() const {
+    std::vector<std::string> names;
+    names.reserve(m_Factories.size());
+    for (const auto& pair : m_Factories) {
+        names.push_back(pair.first);
+    }
+    return names;
 }
 
 }

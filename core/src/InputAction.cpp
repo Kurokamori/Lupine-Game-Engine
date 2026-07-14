@@ -148,6 +148,8 @@ nlohmann::json InputAction::ToJson() const {
     nlohmann::json j;
     j["name"] = m_Name;
     j["deadzone"] = m_Deadzone;
+    j["context"] = m_Context;
+    j["enabled"] = m_Enabled;
 
     nlohmann::json bindingsArray = nlohmann::json::array();
     for (const auto& binding : m_Bindings) {
@@ -162,6 +164,8 @@ InputAction InputAction::FromJson(const nlohmann::json& json) {
     InputAction action;
     action.m_Name = json.value("name", "");
     action.m_Deadzone = json.value("deadzone", 0.5f);
+    action.m_Context = json.value("context", std::string());
+    action.m_Enabled = json.value("enabled", true);
 
     if (json.contains("bindings")) {
         for (const auto& bindingJson : json["bindings"]) {
@@ -200,6 +204,8 @@ nlohmann::json InputAxis::ToJson() const {
     j["sensitivity"] = m_Sensitivity;
     j["gravity"] = m_Gravity;
     j["snap"] = m_Snap;
+    j["context"] = m_Context;
+    j["enabled"] = m_Enabled;
 
     nlohmann::json bindingsArray = nlohmann::json::array();
     for (const auto& binding : m_Bindings) {
@@ -217,6 +223,8 @@ InputAxis InputAxis::FromJson(const nlohmann::json& json) {
     axis.m_Sensitivity = json.value("sensitivity", 1.0f);
     axis.m_Gravity = json.value("gravity", 3.0f);
     axis.m_Snap = json.value("snap", false);
+    axis.m_Context = json.value("context", std::string());
+    axis.m_Enabled = json.value("enabled", true);
 
     if (json.contains("bindings")) {
         for (const auto& bindingJson : json["bindings"]) {
@@ -350,7 +358,7 @@ bool InputMap::SaveToFile(const std::string& filepath) const {
         return true;
     }
     catch (const std::exception& e) {
-
+        LOG_ERROR(LogCategory::Input, "InputMap: failed to save '{}': {}", filepath, e.what());
         return false;
     }
 }
@@ -370,7 +378,24 @@ bool InputMap::LoadFromFile(const std::string& filepath) {
         return true;
     }
     catch (const std::exception& e) {
+        LOG_ERROR(LogCategory::Input, "InputMap: failed to load '{}': {}", filepath, e.what());
+        return false;
+    }
+}
 
+bool InputMap::LoadFromString(const std::string& jsonString) {
+    try {
+        if (jsonString.empty()) {
+            return false;
+        }
+
+        nlohmann::json j = nlohmann::json::parse(jsonString);
+        Deserialize(j);
+
+        return true;
+    }
+    catch (const std::exception& e) {
+        LOG_ERROR(LogCategory::Input, "InputMap: failed to parse input map JSON: {}", e.what());
         return false;
     }
 }

@@ -263,6 +263,109 @@ LC_API LCResult lc_scene_render(LCSceneHandle scene);
  */
 LC_API LCResult lc_scene_process_input(LCSceneHandle scene, float delta_time);
 
+/* ============================================================================
+ * Runtime Additive (Autoload) Scenes
+ *
+ * These operate on the active runtime SceneManager rather than a particular
+ * scene handle, mirroring the scripting `add_scene()` / `remove_scene()` calls.
+ * An additive scene is loaded and parented under the current scene's root so it
+ * overlays the running scene without replacing it (HUDs, pause menus, persistent
+ * managers). There is no scene handle argument because the active SceneManager is
+ * a process-wide singleton, the same one `lc_quit()` acts on.
+ * ============================================================================ */
+
+/**
+ * @brief Load a scene additively and overlay it on the running scene.
+ *
+ * The scene at @p scene_path is loaded, its root parented under the current
+ * scene's root, scripts/connections/globals wired up, and OnAwake invoked. The
+ * scene keeps running until removed with lc_scene_remove_autoload() or the
+ * current scene is unloaded. C-API equivalent of the scripting `add_scene()`.
+ *
+ * @param scene_path Virtual path to the scene file to overlay (e.g. "res://ui/hud.scene")
+ * @return LC_SUCCESS on success, LC_ERROR_NULL_POINTER if scene_path is NULL,
+ *         LC_ERROR_OPERATION_FAILED if there is no active scene manager or the
+ *         scene failed to load.
+ * @threadsafety Main thread only
+ */
+LC_API LCResult lc_scene_add_autoload(const char* scene_path);
+
+/**
+ * @brief Remove a previously added additive (autoload) scene.
+ *
+ * Detaches and shuts down every overlay scene whose source file path matches
+ * @p scene_path. Removing a path that was never added is a no-op (still returns
+ * LC_SUCCESS). C-API equivalent of the scripting `remove_scene()`.
+ *
+ * @param scene_path Virtual path that was passed to lc_scene_add_autoload()
+ * @return LC_SUCCESS on success, LC_ERROR_NULL_POINTER if scene_path is NULL,
+ *         LC_ERROR_OPERATION_FAILED if there is no active scene manager.
+ * @threadsafety Main thread only
+ */
+LC_API LCResult lc_scene_remove_autoload(const char* scene_path);
+
+/* ============================================================================
+ * Active Scene Control (runtime SceneManager)
+ *
+ * These act on the process-wide runtime SceneManager singleton, mirroring the
+ * scripting `change_scene()` / `reload_scene()` / `get_current_scene()` calls.
+ * ============================================================================ */
+
+/**
+ * @brief Request a deferred change to a different scene.
+ *
+ * The swap is deferred to the host loop rather than performed synchronously, so
+ * it is safe to call from inside script/component callbacks (switching now would
+ * free the scene that owns the running code). C-API equivalent of the scripting
+ * `change_scene()`.
+ *
+ * @param scene_path Virtual path to the scene file to switch to.
+ * @return LC_SUCCESS on success, LC_ERROR_NULL_POINTER if scene_path is NULL,
+ *         LC_ERROR_OPERATION_FAILED if there is no active scene manager.
+ * @threadsafety Main thread only
+ */
+LC_API LCResult lc_scene_change(const char* scene_path);
+
+/**
+ * @brief Reload the current scene from its source file.
+ *
+ * Resolves the current scene's file path and switches to it immediately. No-op
+ * (still LC_SUCCESS) if there is no current scene or it has no file path. C-API
+ * equivalent of the scripting `reload_scene()`.
+ *
+ * @return LC_SUCCESS on success, LC_ERROR_OPERATION_FAILED if there is no active
+ *         scene manager.
+ * @threadsafety Main thread only
+ */
+LC_API LCResult lc_scene_reload(void);
+
+/**
+ * @brief Get a handle to the runtime SceneManager's current scene.
+ *
+ * The returned handle borrows the SceneManager-owned scene; destroying it with
+ * lc_scene_destroy only releases the handle, never the underlying scene.
+ *
+ * @param out_scene Output handle, set to NULL when there is no current scene.
+ * @return LC_SUCCESS on success, LC_ERROR_NULL_POINTER if out_scene is NULL,
+ *         LC_ERROR_OPERATION_FAILED if there is no active scene manager.
+ * @threadsafety Main thread only
+ */
+LC_API LCResult lc_scene_get_current(LCSceneHandle* out_scene);
+
+/**
+ * @brief Copy the current scene's file path into a caller-provided buffer.
+ *
+ * Writes an empty string when there is no current scene or it has no file path.
+ *
+ * @param buffer Destination buffer (NUL-terminated on return).
+ * @param buffer_size Capacity of @p buffer in bytes.
+ * @return LC_SUCCESS on success, LC_ERROR_NULL_POINTER if buffer is NULL,
+ *         LC_ERROR_INVALID_PARAMETER if buffer_size is 0,
+ *         LC_ERROR_OPERATION_FAILED if there is no active scene manager.
+ * @threadsafety Main thread only
+ */
+LC_API LCResult lc_scene_get_current_path(char* buffer, size_t buffer_size);
+
 #ifdef __cplusplus
 }
 #endif

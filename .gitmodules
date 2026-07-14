@@ -1,0 +1,9 @@
+[submodule "vcpkg"]
+	path = vcpkg
+	url = https://github.com/microsoft/vcpkg.git
+[submodule "external/mruby"]
+	path = external/mruby
+	url = https://github.com/mruby/mruby
+[submodule "external/micropython"]
+	path = external/micropython
+	url = https://github.com/micropython/micropython

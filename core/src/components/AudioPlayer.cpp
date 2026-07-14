@@ -79,7 +79,7 @@ void AudioPlayer::OnDestroy() {
     Stop();
 }
 
-void AudioPlayer::OnUpdate(float deltaTime) {
+void AudioPlayer::OnUpdate(float) {
 
     if (m_Is3D && m_PlayingSourceUUID.IsValid()) {
         auto* node = GetOwner();

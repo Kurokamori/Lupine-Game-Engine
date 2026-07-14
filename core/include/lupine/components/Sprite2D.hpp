@@ -67,14 +67,20 @@ public:
      */
     TextureHandle GetTextureHandle() const { return m_TextureHandle; }
 
+    /**
+     * Called when an asset file changes on disk.
+     * Override to properly invalidate cached texture handles.
+     */
+    bool OnAssetFileChanged(const std::string& changedPath, const std::string& resolvedChangedPath) override;
+
     // ===== Property Accessors =====
-    
+
     // Texture path
     const std::string& GetTexturePath() const;
     void SetTexturePath(const std::string& path);
     
     // Modulation color (tint)
-    const math::Color& GetModulate() const;
+    math::Color GetModulate() const;
     void SetModulate(const math::Color& color);
     
     // Size (if Vec2(0,0), uses texture dimensions)
@@ -110,9 +116,19 @@ public:
     bool GetSpriteSheetEnabled() const;
     void SetSpriteSheetEnabled(bool enabled);
 
-    // Sprite size in pixels (for sprite sheet slicing)
+    // Sprite size in pixels (for sprite sheet slicing). Used only when
+    // hframes/vframes are 0 (manual slicing); otherwise the cell size is derived
+    // from the texture and the frame grid.
     const math::Vec2& GetSpriteSize() const;
     void SetSpriteSize(const math::Vec2& size);
+
+    // Frame-grid slicing. When both are > 0 the
+    // cell size is derived automatically from the texture (texture / frames), so
+    // no manual spriteSize is needed and each cell renders at its native size.
+    int GetHFrames() const;
+    void SetHFrames(int columns);
+    int GetVFrames() const;
+    void SetVFrames(int rows);
 
     // Current frame index
     int GetCurrentFrame() const;
@@ -124,6 +140,15 @@ public:
     // Get frames per row/column
     int GetFramesPerRow() const;
     int GetFramesPerColumn() const;
+
+    // Loaded texture dimensions in pixels (0,0 when no texture is loaded), and
+    // the derived per-cell size in sprite-sheet mode (texture when not sheeted).
+    math::Vec2 GetTextureSize() const;
+    math::Vec2 GetCellSize() const;
+
+    // Script-callable geometry helpers: "get_texture_size", "get_cell_size",
+    // "get_frame_count", "get_frames_per_row", "get_frames_per_column".
+    nlohmann::json CallMethod(const std::string& method, const nlohmann::json& args) override;
 
     // ===== IRenderableComponent Interface =====
 

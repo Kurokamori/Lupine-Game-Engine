@@ -1,0 +1,78 @@
+#shader "RoundedRect"
+#description "Rounded rectangle with per-corner radius and texture support"
+
+#begin properties
+    uniform mat4 u_ViewProjection;
+    uniform mat4 u_Model;
+    uniform vec4 u_TintColor = vec4(1.0);
+    uniform bool u_UseTexture = false;
+    uniform vec4 u_CornerRadius = vec4(0.0);
+    uniform vec2 u_Size = vec2(1.0);
+    uniform vec4 u_UVRect = vec4(0.0, 0.0, 1.0, 1.0);
+    uniform sampler2D u_Texture;
+#end properties
+
+#begin vertex
+    #input vec3 a_Position : POSITION 0
+    #input vec3 a_Normal : NORMAL 1
+    #input vec2 a_TexCoord : TEXCOORD0 2
+    #input vec4 a_Color : COLOR 3
+
+    #output vec2 v_TexCoord
+    #output vec4 v_Color
+    #output vec2 v_LocalPos
+
+    void main() {
+        v_TexCoord = a_TexCoord;
+        v_Color = a_Color;
+        v_LocalPos = a_Position.xy;
+        VERTEX_OUTPUT = MUL(u_ViewProjection, MUL(u_Model, vec4(a_Position, 1.0)));
+    }
+#end vertex
+
+#begin fragment
+    #output vec4 FragColor
+
+    float sdRoundedBox(vec2 p, vec2 size, vec4 radius) {
+        vec2 pos = p * size;
+        vec2 halfSize = size * 0.5;
+
+        float r;
+        if (pos.x > 0.0) {
+            r = (pos.y > 0.0) ? radius.z : radius.y;
+        } else {
+            r = (pos.y > 0.0) ? radius.w : radius.x;
+        }
+
+        r = min(r, min(halfSize.x, halfSize.y));
+
+        vec2 q = abs(pos) - halfSize + r;
+        float dist = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+
+        return dist;
+    }
+
+    void main() {
+        float dist = sdRoundedBox(v_LocalPos, u_Size, u_CornerRadius);
+
+        float edgeSoftness = 1.5 / length(u_Size);
+        float alpha = 1.0 - smoothstep(-edgeSoftness, edgeSoftness, dist);
+
+        vec4 color = v_Color * u_TintColor;
+
+        if (u_UseTexture) {
+            vec2 uvMin = u_UVRect.xy;
+            vec2 uvMax = u_UVRect.zw;
+            vec2 remappedUV = uvMin + (v_TexCoord * (uvMax - uvMin));
+            color *= SAMPLE(u_Texture, remappedUV);
+        }
+
+        color.a *= alpha;
+
+        if (color.a < 0.01) {
+            DISCARD;
+        }
+
+        FragColor = color;
+    }
+#end fragment

@@ -46,6 +46,7 @@ public:
     // ISerializable interface
     std::string GetTypeName() const override { return "AnimatedSprite3D"; }
     void DefineProperties() override;
+    void DefineSignals() override;
 
     // Component interface
     void OnUpdate(float deltaTime) override;
@@ -54,6 +55,9 @@ public:
 
     // Property change notification
     void OnPropertyChanged(const std::string& propertyName, const nlohmann::json& newValue) override;
+
+    // Asset hot-reload support
+    bool OnAssetFileChanged(const std::string& changedPath, const std::string& resolvedChangedPath) override;
 
     // IRenderableComponent interface
     void buildDrawCommands(RenderContext& ctx) override;
@@ -70,7 +74,7 @@ public:
     const math::Vec3& GetOffset() const;
     bool GetFlipH() const;
     bool GetFlipV() const;
-    const math::Color& GetModulate() const;
+    math::Color GetModulate() const;
     BillboardMode GetBillboard() const;
     bool GetCastShadows() const;
     bool GetReceiveShadows() const;

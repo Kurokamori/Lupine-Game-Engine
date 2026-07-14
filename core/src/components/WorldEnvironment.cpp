@@ -6,6 +6,7 @@
 #include "lupine/rendering/Mesh.hpp"
 #include "lupine/logger/Logger.hpp"
 #include "lupine/core/PropertyDescriptor.hpp"
+#include <algorithm>
 #include <cstring>
 
 namespace lupine {
@@ -48,6 +49,63 @@ void WorldEnvironment::DefineProperties() {
     DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(ambientLightIntensity, 0.2f, 0.0f, 10.0f, 0.01f, "Ambient Light"));
 
     DefineProperty(PROPERTY_DEFAULT_GROUP(volumetricFogEnabled, Bool, false, "Volumetric Fog"));
+
+    // ===== Post-Processing =====
+    DefineProperty(PROPERTY_DEFAULT_GROUP(postProcessingEnabled, Bool, false, "Post Processing"));
+    DefineProperty(PROPERTY_ENUM_GROUP(tonemapMode, 0, "Post Processing", Linear, Reinhard, ReinhardExtended, ACES, Filmic, AGX));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(exposure, 1.0f, 0.0f, 8.0f, 0.01f, "Post Processing"));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(whitePoint, 4.0f, 0.1f, 16.0f, 0.1f, "Post Processing"));
+    DefineProperty(PROPERTY_ENUM_GROUP(postFlipY, 0, "Advanced", Auto, Off, On));
+
+    // Bloom
+    DefineProperty(PROPERTY_DEFAULT_GROUP(bloomEnabled, Bool, false, "Bloom"));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(bloomThreshold, 1.0f, 0.0f, 10.0f, 0.01f, "Bloom"));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(bloomSoftKnee, 0.5f, 0.0f, 1.0f, 0.01f, "Bloom"));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(bloomIntensity, 0.6f, 0.0f, 5.0f, 0.01f, "Bloom"));
+    DefineProperty(PROPERTY_INT_RANGE_GROUP(bloomIterations, 6, 1, 8, 1, "Bloom"));
+
+    // SSAO
+    DefineProperty(PROPERTY_DEFAULT_GROUP(ssaoEnabled, Bool, false, "SSAO"));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(ssaoRadius, 0.5f, 0.01f, 5.0f, 0.01f, "SSAO"));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(ssaoIntensity, 1.0f, 0.0f, 4.0f, 0.01f, "SSAO"));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(ssaoBias, 0.025f, 0.0f, 0.5f, 0.001f, "SSAO"));
+    DefineProperty(PROPERTY_INT_RANGE_GROUP(ssaoSamples, 24, 1, 64, 1, "SSAO"));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(ssaoPower, 1.5f, 0.1f, 8.0f, 0.1f, "SSAO"));
+
+    // Color grading
+    DefineProperty(PROPERTY_DEFAULT_GROUP(colorGradingEnabled, Bool, false, "Color Grading"));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(contrast, 1.0f, 0.0f, 2.0f, 0.01f, "Color Grading"));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(saturation, 1.0f, 0.0f, 2.0f, 0.01f, "Color Grading"));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(brightness, 0.0f, -1.0f, 1.0f, 0.01f, "Color Grading"));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(temperature, 0.0f, -1.0f, 1.0f, 0.01f, "Color Grading"));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(tint, 0.0f, -1.0f, 1.0f, 0.01f, "Color Grading"));
+    DefineProperty(PROPERTY_DEFAULT_GROUP(colorFilter, Color, math::Color(1.0f, 1.0f, 1.0f, 0.0f), "Color Grading"));
+    DefineProperty(PROPERTY_DEFAULT_GROUP(colorLift, Color, math::Color(0.0f, 0.0f, 0.0f, 1.0f), "Color Grading"));
+    DefineProperty(PROPERTY_DEFAULT_GROUP(colorGamma, Color, math::Color(1.0f, 1.0f, 1.0f, 1.0f), "Color Grading"));
+    DefineProperty(PROPERTY_DEFAULT_GROUP(colorGain, Color, math::Color(1.0f, 1.0f, 1.0f, 1.0f), "Color Grading"));
+
+    // Vignette
+    DefineProperty(PROPERTY_DEFAULT_GROUP(vignetteEnabled, Bool, false, "Vignette"));
+    DefineProperty(PROPERTY_DEFAULT_GROUP(vignetteColor, Color, math::Color(0.0f, 0.0f, 0.0f, 1.0f), "Vignette"));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(vignetteIntensity, 0.4f, 0.0f, 2.0f, 0.01f, "Vignette"));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(vignetteSmoothness, 0.5f, 0.0f, 1.0f, 0.01f, "Vignette"));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(vignetteRoundness, 1.0f, 0.0f, 1.0f, 0.01f, "Vignette"));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(vignetteCenterX, 0.5f, 0.0f, 1.0f, 0.01f, "Vignette"));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(vignetteCenterY, 0.5f, 0.0f, 1.0f, 0.01f, "Vignette"));
+
+    // Chromatic aberration
+    DefineProperty(PROPERTY_DEFAULT_GROUP(chromaticAberrationEnabled, Bool, false, "Chromatic Aberration"));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(chromaticAberrationAmount, 0.004f, 0.0f, 0.05f, 0.0005f, "Chromatic Aberration"));
+
+    // Film grain
+    DefineProperty(PROPERTY_DEFAULT_GROUP(filmGrainEnabled, Bool, false, "Film Grain"));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(filmGrainIntensity, 0.08f, 0.0f, 1.0f, 0.01f, "Film Grain"));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(filmGrainSize, 1.0f, 0.5f, 8.0f, 0.1f, "Film Grain"));
+
+    // Overlay
+    DefineProperty(PROPERTY_FILE_GROUP(overlayTexture, std::string(""), "*.png,*.jpg,*.jpeg,*.tga", "Overlay"));
+    DefineProperty(PROPERTY_ENUM_GROUP(overlayBlendMode, 0, "Overlay", Normal, Additive, Multiply, Screen, Overlay, SoftLight));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(overlayOpacity, 1.0f, 0.0f, 1.0f, 0.01f, "Overlay"));
 }
 
 void WorldEnvironment::OnAwake() {
@@ -77,7 +135,7 @@ void WorldEnvironment::Deserialize(const nlohmann::json& json) {
     m_SkyboxNeedsUpdate = true;
 }
 
-void WorldEnvironment::OnPropertyChanged(const std::string& propertyName, const nlohmann::json& newValue) {
+void WorldEnvironment::OnPropertyChanged(const std::string& propertyName, const nlohmann::json&) {
 
     if (propertyName.find("skybox") != std::string::npos ||
         propertyName.find("cubemap") != std::string::npos ||
@@ -85,6 +143,73 @@ void WorldEnvironment::OnPropertyChanged(const std::string& propertyName, const 
         m_SkyboxNeedsUpdate = true;
         LoadSkyboxTextures();
     }
+
+    if (propertyName == "overlayTexture") {
+        m_PostOverlayNeedsUpdate = true;
+        LoadOverlayTexture();
+    }
+}
+
+void WorldEnvironment::EnsurePostProcessResourcesCreated(IGfxDevice* device) {
+    if (!device) {
+        return;
+    }
+
+    const std::string path = GetOverlayTexturePath();
+    if (path.empty()) {
+        if (m_PostOverlayTexture.isValid()) {
+            device->destroyTexture(m_PostOverlayTexture);
+            m_PostOverlayTexture = TextureHandle();
+        }
+        m_PostOverlayAsset.Reset();
+        m_PostOverlayLoadedPath.clear();
+        m_PostOverlayNeedsUpdate = false;
+        return;
+    }
+
+    if (m_PostOverlayNeedsUpdate || m_PostOverlayLoadedPath != path) {
+        if (!m_PostOverlayAsset.IsValid() || m_PostOverlayLoadedPath != path) {
+            LoadOverlayTexture();
+        }
+        UploadOverlayTexture(device);
+        m_PostOverlayNeedsUpdate = false;
+    }
+}
+
+void WorldEnvironment::LoadOverlayTexture() {
+    const std::string path = GetOverlayTexturePath();
+    if (path.empty()) {
+        m_PostOverlayAsset.Reset();
+        return;
+    }
+    // Overlay art is sampled in display space (after tonemapping), so load it linearly
+    // to avoid an extra gamma decode.
+    m_PostOverlayAsset = asset::AssetRef<asset::ImageAsset>(new asset::ImageAsset());
+    bool loaded = m_PostOverlayAsset->LoadFromFile(path, true, asset::ImageColorSpace::Linear);
+    if (!loaded) {
+        m_PostOverlayAsset.Reset();
+    }
+}
+
+void WorldEnvironment::UploadOverlayTexture(IGfxDevice* device) {
+    if (!device || !m_PostOverlayAsset.IsValid() || !m_PostOverlayAsset->IsLoaded()) {
+        return;
+    }
+
+    if (m_PostOverlayTexture.isValid()) {
+        device->destroyTexture(m_PostOverlayTexture);
+        m_PostOverlayTexture = TextureHandle();
+    }
+
+    TextureDesc desc;
+    desc.type = TextureType::Texture2D;
+    desc.width = m_PostOverlayAsset->GetWidth();
+    desc.height = m_PostOverlayAsset->GetHeight();
+    desc.format = TextureFormat::RGBA8_UNORM;
+    desc.usage = TextureUsage::Sampled;
+    desc.initialData = m_PostOverlayAsset->GetData();
+    m_PostOverlayTexture = device->createTexture(desc);
+    m_PostOverlayLoadedPath = GetOverlayTexturePath();
 }
 
 void WorldEnvironment::EnsureSkyboxResourcesCreated(IGfxDevice* device) {
@@ -302,20 +427,36 @@ void WorldEnvironment::CreateSkyboxMaterial(IGfxDevice* device) {
         return;
     }
 
-    const char* vertexShaderSource = DefaultShaders::Skybox_Vertex();
-    const char* fragmentShaderSource = DefaultShaders::Skybox_Fragment();
+    // Get the current graphics backend
+    GraphicsBackend backend = device->getBackend();
+
+    // Use backend-agnostic shader loading
+    DefaultShaders::ShaderDataPair shaderData;
+    if (!DefaultShaders::getShaderData("Skybox", backend, &shaderData)) {
+        LOG_ERROR(LogCategory::Render, "WorldEnvironment: Failed to get Skybox shader data");
+        return;
+    }
+
+    // Debug: Log shader data info
+
+    // Verify shader source looks valid (should start with # for GLSL)
+    if (shaderData.vertex.data && shaderData.vertex.size > 0 && !shaderData.vertex.isPrecompiled) {
+        const char* src = static_cast<const char*>(shaderData.vertex.data);
+        std::string preview(src, std::min(size_t(50), shaderData.vertex.size));
+        
+    }
 
     ShaderDesc vertexShaderDesc;
     vertexShaderDesc.stage = ShaderStage::Vertex;
-    vertexShaderDesc.bytecode = vertexShaderSource;
-    vertexShaderDesc.bytecodeSize = std::strlen(vertexShaderSource);
-    vertexShaderDesc.entryPoint = "main";
+    vertexShaderDesc.bytecode = shaderData.vertex.data;
+    vertexShaderDesc.bytecodeSize = shaderData.vertex.size;
+    vertexShaderDesc.entryPoint = DefaultShaders::getVertexEntryPoint(backend);
 
     ShaderDesc fragmentShaderDesc;
     fragmentShaderDesc.stage = ShaderStage::Fragment;
-    fragmentShaderDesc.bytecode = fragmentShaderSource;
-    fragmentShaderDesc.bytecodeSize = std::strlen(fragmentShaderSource);
-    fragmentShaderDesc.entryPoint = "main";
+    fragmentShaderDesc.bytecode = shaderData.fragment.data;
+    fragmentShaderDesc.bytecodeSize = shaderData.fragment.size;
+    fragmentShaderDesc.entryPoint = DefaultShaders::getFragmentEntryPoint(backend);
 
     ShaderHandle vertexShader = device->createShader(vertexShaderDesc);
     ShaderHandle fragmentShader = device->createShader(fragmentShaderDesc);

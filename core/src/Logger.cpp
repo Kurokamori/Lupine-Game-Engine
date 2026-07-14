@@ -47,6 +47,8 @@ namespace lupine {
             spdlog::set_default_logger(s_Logger);
 
         } catch (const spdlog::spdlog_ex& ex) {
+            // The logger is what failed, so report through stderr directly.
+            std::cerr << "[Lupine] Logger initialization failed: " << ex.what() << std::endl;
         }
     }
 

@@ -1,10 +1,15 @@
 #include "lupine/components/Image2D.hpp"
 #include "lupine/core/Node.hpp"
+#include "lupine/ui/ThemeManager.hpp"
+#include "lupine/ui/Theme.hpp"
 #include "lupine/rendering/RenderContext.hpp"
 #include "lupine/rendering/RenderWorld.hpp"
 #include "lupine/rendering/DrawCommand.hpp"
 #include "lupine/rendering/gfx/IGfxDevice.hpp"
+#include "lupine/rendering/TextureUpload.hpp"
 #include "lupine/rendering/gfx/GfxDescriptors.hpp"
+#include "lupine/asset/AssetDatabase.hpp"
+#include "lupine/asset/ImageCache.hpp"
 #include "lupine/logger/Logger.hpp"
 
 namespace lupine {
@@ -14,7 +19,7 @@ using namespace core;
 using namespace math;
 
 Image2D::Image2D()
-    : Component("Image2D")
+    : UIControl("Image2D")
     , m_TextureHandle()
     , m_TextureNeedsUpload(false)
     , m_CornerRadius(0.0f, true)
@@ -23,7 +28,7 @@ Image2D::Image2D()
 }
 
 Image2D::Image2D(const std::string& name)
-    : Component(name)
+    : UIControl(name)
     , m_TextureHandle()
     , m_TextureNeedsUpload(false)
     , m_CornerRadius(0.0f, true)
@@ -37,21 +42,24 @@ Image2D::~Image2D() {
 
 void Image2D::DefineProperties() {
 
-    DefineProperty(PROPERTY_FILE_GROUP(texturePath, std::string(""), "*.png,*.jpg,*.jpeg,*.bmp,*.tga", "Texture"));
-    DefineProperty(PROPERTY_FILE_GROUP(materialOverride, std::string(""), "*.mat,*.material", "Texture"));
-    DefineProperty(PROPERTY_DEFAULT_GROUP(color, Color, Color::White(), "Texture"));
+    DefineUIControlProperties(0.0f, 0.0f, "uiSpace", "Size");
 
-    DefineProperty(PROPERTY_DEFAULT_GROUP(anchorMin, Vec2, Vec2(0.0f, 0.0f), "Layout"));
-    DefineProperty(PROPERTY_DEFAULT_GROUP(anchorMax, Vec2, Vec2(1.0f, 1.0f), "Layout"));
-    DefineProperty(PROPERTY_DEFAULT_GROUP(offsetMin, Vec2, Vec2(0.0f, 0.0f), "Layout"));
-    DefineProperty(PROPERTY_DEFAULT_GROUP(offsetMax, Vec2, Vec2(0.0f, 0.0f), "Layout"));
-    DefineProperty(PROPERTY_DEFAULT_GROUP(uiSpace, Bool, true, "Layout"));
+    DefineProperty(PROPERTY_FILE_GROUP(texturePath, std::string(""), "*.png,*.jpg,*.jpeg,*.bmp,*.tga", "Texture"));
+    DefineProperty(PROPERTY_FILE_GROUP(materialOverride, std::string(""), "*.lsh,*.mat,*.material", "Texture"));
+    DefineProperty(PROPERTY_DEFAULT_GROUP(shaderParameters, String, std::string(""), "Texture"));
+    DefineProperty(PROPERTY_DEFAULT_GROUP(color, Color, Color::White(), "Texture"));
 
     DefineProperty(PROPERTY_DEFAULT_GROUP(preserveAspect, Bool, true, "Appearance"));
     DefineProperty(PROPERTY_ENUM_GROUP(aspectMode, 0, "Appearance", Fit, Letterbox, Fill, Stretch));
     DefineProperty(PROPERTY_DEFAULT_GROUP(flipH, Bool, false, "Appearance"));
     DefineProperty(PROPERTY_DEFAULT_GROUP(flipV, Bool, false, "Appearance"));
     DefineProperty(PROPERTY_ENUM_GROUP(blendMode, 0, "Appearance", Alpha, Additive, Multiply, Opaque, Overlay));
+    DefineProperty(PROPERTY_ENUM_GROUP(stretchMode, 0, "Appearance", Stretch, KeepCentered, NineSlice));
+
+    DefineProperty(PROPERTY_DEFAULT_GROUP(nineSliceMargins, Vec4, Vec4(8.0f, 8.0f, 8.0f, 8.0f), "NineSlice"));
+    DefineProperty(PROPERTY_ENUM_GROUP(nineSliceAxisH, 0, "NineSlice", Stretch, Tile));
+    DefineProperty(PROPERTY_ENUM_GROUP(nineSliceAxisV, 0, "NineSlice", Stretch, Tile));
+    DefineProperty(PROPERTY_DEFAULT_GROUP(nineSliceDrawCenter, Bool, true, "NineSlice"));
 
     DefineProperty(PROPERTY_DEFAULT_GROUP(cornerRadius, Vec4, Vec4(0.0f, 0.0f, 0.0f, 0.0f), "Style"));
     DefineProperty(PROPERTY_DEFAULT_GROUP(cornerRadiusLinked, Bool, true, "Style"));
@@ -61,6 +69,41 @@ void Image2D::DefineProperties() {
     DefineProperty(PROPERTY_DEFAULT_GROUP(borderWidthLinked, Bool, true, "Style"));
 
     DefineProperty(PROPERTY_ENUM_GROUP(mouseBehaviour, 0, "Input", Ignore, PropagateUp, Stop));
+}
+
+void Image2D::OnPropertyChanged(const std::string& propertyName, const nlohmann::json& newValue) {
+    UIControl::OnPropertyChanged(propertyName, newValue);
+
+    if (propertyName == "texturePath") {
+        std::string newPath = newValue.get<std::string>();
+
+        // Destroy old texture handle
+        m_TextureHandle = TextureHandle();
+        m_TextureAsset.Reset();
+        m_CurrentTexturePath.clear();
+
+        if (!newPath.empty()) {
+            // Load the texture immediately, via the shared decode cache so a
+            // preloaded (warmed) image is a cache hit instead of a re-decode.
+            m_TextureAsset = asset::ImageCache::GetInstance().GetOrLoad(newPath);
+            bool loaded = m_TextureAsset.IsValid() && m_TextureAsset->IsLoaded();
+
+            if (loaded) {
+                m_CurrentTexturePath = newPath;
+                m_TextureNeedsUpload = true;
+
+                // Set width/height from texture if not already set
+                if (GetWidth() <= 0.0f && m_TextureAsset->GetWidth() > 0) {
+                    SetPropertyValue<float>("width", static_cast<float>(m_TextureAsset->GetWidth()));
+                }
+                if (GetHeight() <= 0.0f && m_TextureAsset->GetHeight() > 0) {
+                    SetPropertyValue<float>("height", static_cast<float>(m_TextureAsset->GetHeight()));
+                }
+            } else {
+                m_TextureAsset.Reset();
+            }
+        }
+    }
 }
 
 void Image2D::OnAwake() {
@@ -93,37 +136,11 @@ void Image2D::OnRender() {
 }
 
 bool Image2D::OnGizmoScale(float scaleDelta, int axis, bool is3D) {
-    if (!is3D) {
-
-        Vec2 offsetMin = GetOffsetMin();
-        Vec2 offsetMax = GetOffsetMax();
-
-        Vec2 currentSize = offsetMax - offsetMin;
-
-        if (currentSize.x <= 0.0f || currentSize.y <= 0.0f) {
-            currentSize = CalculateSize();
-
-            offsetMin = Vec2(0.0f, 0.0f);
-            offsetMax = currentSize;
-        }
-
-        if (axis == 0) {
-
-            currentSize.x = std::max(0.1f, currentSize.x + scaleDelta * currentSize.x);
-        } else if (axis == 1) {
-
-            currentSize.y = std::max(0.1f, currentSize.y + scaleDelta * currentSize.y);
-        } else if (axis == -1) {
-
-            currentSize.x = std::max(0.1f, currentSize.x + scaleDelta * currentSize.x);
-            currentSize.y = std::max(0.1f, currentSize.y + scaleDelta * currentSize.y);
-        }
-
-        SetOffsetMax(offsetMin + currentSize);
-
-        return true;
-    }
-    return false;
+    // Resizing is delegated to the base, which writes whichever property actually drives
+    // the axis: width/height when point-anchored, the offsets when anchor-stretched (where
+    // width/height are never read at all), and nothing when a container owns the rect.
+    const bool handled = UIControl::OnGizmoScale(scaleDelta, axis, is3D);
+    return handled;
 }
 
 bool Image2D::LoadTexture(const std::string& filepath) {
@@ -132,9 +149,9 @@ bool Image2D::LoadTexture(const std::string& filepath) {
         return false;
     }
 
-    m_TextureAsset = asset::AssetRef<asset::ImageAsset>(new asset::ImageAsset());
+    m_TextureAsset = asset::ImageCache::GetInstance().GetOrLoad(filepath);
 
-    bool loaded = m_TextureAsset->LoadFromFile(filepath, true, asset::ImageColorSpace::sRGB);
+    bool loaded = m_TextureAsset.IsValid() && m_TextureAsset->IsLoaded();
 
     if (!loaded) {
 
@@ -146,6 +163,14 @@ bool Image2D::LoadTexture(const std::string& filepath) {
 
     SetTexturePath(filepath);
 
+    // Initialize width/height from texture if not already set
+    if (GetWidth() <= 0.0f && m_TextureAsset->GetWidth() > 0) {
+        SetWidth(static_cast<float>(m_TextureAsset->GetWidth()));
+    }
+    if (GetHeight() <= 0.0f && m_TextureAsset->GetHeight() > 0) {
+        SetHeight(static_cast<float>(m_TextureAsset->GetHeight()));
+    }
+
     return true;
 }
 
@@ -155,6 +180,14 @@ void Image2D::SetTexture(const asset::AssetRef<asset::ImageAsset>& texture) {
 
     if (texture.IsValid()) {
         SetTexturePath(texture->GetPath());
+
+        // Initialize width/height from texture if not already set
+        if (GetWidth() <= 0.0f && texture->GetWidth() > 0) {
+            SetWidth(static_cast<float>(texture->GetWidth()));
+        }
+        if (GetHeight() <= 0.0f && texture->GetHeight() > 0) {
+            SetHeight(static_cast<float>(texture->GetHeight()));
+        }
     }
 }
 
@@ -174,7 +207,18 @@ const std::string& Image2D::GetTexturePath() const {
 }
 
 void Image2D::SetTexturePath(const std::string& path) {
-    SetPropertyValue<std::string>("texturePath", path);
+    // Convert to res:// path if possible
+    std::string resPath = path;
+    if (!path.empty() && !(path.size() >= 6 && path.substr(0, 6) == "res://")) {
+        auto& assetDb = asset::AssetDatabase::GetInstance();
+        if (assetDb.IsInitialized()) {
+            std::string converted = assetDb.ToResourcePath(path);
+            if (!converted.empty()) {
+                resPath = converted;
+            }
+        }
+    }
+    SetPropertyValue<std::string>("texturePath", resPath);
 }
 
 const std::string& Image2D::GetMaterialOverride() const {
@@ -187,77 +231,57 @@ void Image2D::SetMaterialOverride(const std::string& materialPath) {
     SetPropertyValue<std::string>("materialOverride", materialPath);
 }
 
-const Color& Image2D::GetColor() const {
-    const ComponentProperty* prop = m_CustomProperties.GetProperty("color");
-    if (prop) {
-        return prop->GetValue<Color>();
+const std::string& Image2D::GetShader() const {
+    // Custom .lsh shaders live in the material override slot.
+    static std::string cachedPath;
+    std::string materialPath = GetPropertyValue<std::string>("materialOverride");
+    if (materialPath.size() >= 4 && materialPath.compare(materialPath.size() - 4, 4, ".lsh") == 0) {
+        cachedPath = materialPath;
+    } else {
+        cachedPath = std::string();
     }
-    static Color defaultColor = Color::White();
-    return defaultColor;
+    return cachedPath;
+}
+
+void Image2D::SetShader(const std::string& shaderPath) {
+    std::string resPath = shaderPath;
+    if (!shaderPath.empty() && !(shaderPath.size() >= 6 && shaderPath.substr(0, 6) == "res://")) {
+        auto& assetDb = asset::AssetDatabase::GetInstance();
+        if (assetDb.IsInitialized()) {
+            std::string converted = assetDb.ToResourcePath(shaderPath);
+            if (!converted.empty()) {
+                resPath = converted;
+            }
+        }
+    }
+    SetPropertyValue<std::string>("materialOverride", resPath);
+}
+
+const std::string& Image2D::GetShaderParameters() const {
+    static std::string cachedParams;
+    cachedParams = GetPropertyValue<std::string>("shaderParameters");
+    return cachedParams;
+}
+
+void Image2D::SetShaderParameters(const std::string& parametersJson) {
+    SetPropertyValue<std::string>("shaderParameters", parametersJson);
+}
+
+const std::vector<UIControl::ThemeBinding>& Image2D::GetThemeBindings() const {
+    static const std::vector<ThemeBinding> kBindings = {
+        { "color",        "modulate",      ThemeBinding::Kind::Color },
+        { "borderColor",  "border_color",  ThemeBinding::Kind::Color },
+        { "cornerRadius", "corner_radius", ThemeBinding::Kind::Constant }
+    };
+    return kBindings;
+}
+
+Color Image2D::GetColor() const {
+    return ResolveThemedColor("color", "modulate");
 }
 
 void Image2D::SetColor(const Color& color) {
-    SetPropertyValue<Color>("color", color);
-}
-
-const Vec2& Image2D::GetAnchorMin() const {
-    static Vec2 cachedAnchor;
-    const ComponentProperty* prop = m_CustomProperties.GetProperty("anchorMin");
-    if (prop) {
-        cachedAnchor = prop->GetValue<Vec2>();
-        return cachedAnchor;
-    }
-    static Vec2 defaultAnchor(0.0f, 0.0f);
-    return defaultAnchor;
-}
-
-void Image2D::SetAnchorMin(const Vec2& anchor) {
-    SetPropertyValue<Vec2>("anchorMin", anchor);
-}
-
-const Vec2& Image2D::GetAnchorMax() const {
-    static Vec2 cachedAnchor;
-    const ComponentProperty* prop = m_CustomProperties.GetProperty("anchorMax");
-    if (prop) {
-        cachedAnchor = prop->GetValue<Vec2>();
-        return cachedAnchor;
-    }
-    static Vec2 defaultAnchor(1.0f, 1.0f);
-    return defaultAnchor;
-}
-
-void Image2D::SetAnchorMax(const Vec2& anchor) {
-    SetPropertyValue<Vec2>("anchorMax", anchor);
-}
-
-const Vec2& Image2D::GetOffsetMin() const {
-    static Vec2 cachedOffset;
-    const ComponentProperty* prop = m_CustomProperties.GetProperty("offsetMin");
-    if (prop) {
-        cachedOffset = prop->GetValue<Vec2>();
-        return cachedOffset;
-    }
-    static Vec2 defaultOffset(0.0f, 0.0f);
-    return defaultOffset;
-}
-
-void Image2D::SetOffsetMin(const Vec2& offset) {
-    SetPropertyValue<Vec2>("offsetMin", offset);
-}
-
-const Vec2& Image2D::GetOffsetMax() const {
-    static Vec2 cachedOffset;
-    const ComponentProperty* prop = m_CustomProperties.GetProperty("offsetMax");
-    if (prop) {
-        cachedOffset = prop->GetValue<Vec2>();
-        return cachedOffset;
-    }
-    static Vec2 defaultOffset(0.0f, 0.0f);
-    return defaultOffset;
-}
-
-void Image2D::SetOffsetMax(const Vec2& offset) {
-    SetPropertyValue<Vec2>("offsetMax", offset);
+    SetThemedProperty<Color>("color", color);
 }
 
 bool Image2D::GetPreserveAspect() const {
@@ -300,6 +324,46 @@ void Image2D::SetBlendMode(BlendMode mode) {
     SetPropertyValue<int>("blendMode", BlendModeToInt(mode));
 }
 
+UIImageStretchMode Image2D::GetStretchMode() const {
+    return UIImageStretchModeFromInt(GetPropertyValue<int>("stretchMode"));
+}
+
+void Image2D::SetStretchMode(UIImageStretchMode mode) {
+    SetPropertyValue<int>("stretchMode", static_cast<int>(mode));
+}
+
+Vec4 Image2D::GetNineSliceMargins() const {
+    return GetPropertyValue<Vec4>("nineSliceMargins");
+}
+
+void Image2D::SetNineSliceMargins(const Vec4& margins) {
+    SetPropertyValue<Vec4>("nineSliceMargins", margins);
+}
+
+UINineSliceAxisMode Image2D::GetNineSliceAxisHorizontal() const {
+    return UINineSliceAxisModeFromInt(GetPropertyValue<int>("nineSliceAxisH"));
+}
+
+void Image2D::SetNineSliceAxisHorizontal(UINineSliceAxisMode mode) {
+    SetPropertyValue<int>("nineSliceAxisH", static_cast<int>(mode));
+}
+
+UINineSliceAxisMode Image2D::GetNineSliceAxisVertical() const {
+    return UINineSliceAxisModeFromInt(GetPropertyValue<int>("nineSliceAxisV"));
+}
+
+void Image2D::SetNineSliceAxisVertical(UINineSliceAxisMode mode) {
+    SetPropertyValue<int>("nineSliceAxisV", static_cast<int>(mode));
+}
+
+bool Image2D::GetNineSliceDrawCenter() const {
+    return GetPropertyValue<bool>("nineSliceDrawCenter");
+}
+
+void Image2D::SetNineSliceDrawCenter(bool drawCenter) {
+    SetPropertyValue<bool>("nineSliceDrawCenter", drawCenter);
+}
+
 MouseBehaviour Image2D::GetMouseBehaviour() const {
     return IntToMouseBehaviour(GetPropertyValue<int>("mouseBehaviour"));
 }
@@ -314,18 +378,18 @@ const core::LinkedProperty4& Image2D::GetCornerRadius() const {
 
 void Image2D::SetCornerRadius(const core::LinkedProperty4& radius) {
     m_CornerRadius = radius;
-    SetPropertyValue<Vec4>("cornerRadius", radius.AsVec4());
+    SetThemedProperty<Vec4>("cornerRadius", radius.AsVec4());
     SetPropertyValue<bool>("cornerRadiusLinked", radius.IsLinked());
 }
 
 void Image2D::SetCornerRadiusAll(float radius) {
     m_CornerRadius.SetAll(radius);
-    SetPropertyValue<Vec4>("cornerRadius", m_CornerRadius.AsVec4());
+    SetThemedProperty<Vec4>("cornerRadius", m_CornerRadius.AsVec4());
 }
 
 void Image2D::SetCornerRadiusIndividual(size_t index, float radius) {
     m_CornerRadius.Set(index, radius);
-    SetPropertyValue<Vec4>("cornerRadius", m_CornerRadius.AsVec4());
+    SetThemedProperty<Vec4>("cornerRadius", m_CornerRadius.AsVec4());
 }
 
 bool Image2D::IsCornerRadiusLinked() const {
@@ -335,7 +399,7 @@ bool Image2D::IsCornerRadiusLinked() const {
 void Image2D::SetCornerRadiusLinked(bool linked) {
     m_CornerRadius.SetLinked(linked);
     SetPropertyValue<bool>("cornerRadiusLinked", linked);
-    SetPropertyValue<Vec4>("cornerRadius", m_CornerRadius.AsVec4());
+    SetThemedProperty<Vec4>("cornerRadius", m_CornerRadius.AsVec4());
 }
 
 bool Image2D::GetBorderEnabled() const {
@@ -346,17 +410,12 @@ void Image2D::SetBorderEnabled(bool enabled) {
     SetPropertyValue<bool>("borderEnabled", enabled);
 }
 
-const Color& Image2D::GetBorderColor() const {
-    const ComponentProperty* prop = m_CustomProperties.GetProperty("borderColor");
-    if (prop) {
-        return prop->GetValue<Color>();
-    }
-    static Color defaultColor = Color::Black();
-    return defaultColor;
+Color Image2D::GetBorderColor() const {
+    return ResolveThemedColor("borderColor", "border_color");
 }
 
 void Image2D::SetBorderColor(const Color& color) {
-    SetPropertyValue<Color>("borderColor", color);
+    SetThemedProperty<Color>("borderColor", color);
 }
 
 const core::LinkedProperty4& Image2D::GetBorderWidth() const {
@@ -389,12 +448,18 @@ void Image2D::SetBorderWidthLinked(bool linked) {
     SetPropertyValue<Vec4>("borderWidth", m_BorderWidth.AsVec4());
 }
 
-bool Image2D::GetUISpace() const {
-    return GetPropertyValue<bool>("uiSpace");
-}
-
-void Image2D::SetUISpace(bool uiSpace) {
-    SetPropertyValue<bool>("uiSpace", uiSpace);
+Vec2 Image2D::GetContentMinSize() const {
+    Vec2 result(0.0f, 0.0f);
+    if (m_TextureAsset.IsValid()) {
+        // Width/height of 0 means "use the texture dimension" on that axis.
+        if (GetWidth() <= 0.0f) {
+            result.x = static_cast<float>(m_TextureAsset->GetWidth());
+        }
+        if (GetHeight() <= 0.0f) {
+            result.y = static_cast<float>(m_TextureAsset->GetHeight());
+        }
+    }
+    return result;
 }
 
 Vec2 Image2D::CalculatePosition() const {
@@ -412,19 +477,22 @@ Vec2 Image2D::CalculatePosition() const {
 }
 
 Vec2 Image2D::CalculateSize() const {
+    float w = GetWidth();
+    float h = GetHeight();
 
-    Vec2 anchorMin = GetAnchorMin();
-    Vec2 anchorMax = GetAnchorMax();
-    Vec2 offsetMin = GetOffsetMin();
-    Vec2 offsetMax = GetOffsetMax();
-
-    if (m_TextureAsset.IsValid()) {
-        float width = static_cast<float>(m_TextureAsset->GetWidth());
-        float height = static_cast<float>(m_TextureAsset->GetHeight());
-        return Vec2(width, height);
+    // If width/height are 0, use texture dimensions
+    if (w <= 0.0f && m_TextureAsset.IsValid()) {
+        w = static_cast<float>(m_TextureAsset->GetWidth());
+    }
+    if (h <= 0.0f && m_TextureAsset.IsValid()) {
+        h = static_cast<float>(m_TextureAsset->GetHeight());
     }
 
-    return Vec2(100.0f, 100.0f);
+    // Default to 100x100 if still zero
+    if (w <= 0.0f) w = 100.0f;
+    if (h <= 0.0f) h = 100.0f;
+
+    return Vec2(w, h);
 }
 
 void Image2D::CalculateUVCoordinates(Vec2& uvMin, Vec2& uvMax) const {
@@ -441,7 +509,7 @@ void Image2D::CalculateUVCoordinates(Vec2& uvMin, Vec2& uvMax) const {
     }
 }
 
-void Image2D::ApplyAspectRatio(Vec2& position, Vec2& size) const {
+void Image2D::ApplyAspectRatio(Vec2&, Vec2& size) const {
     if (!GetPreserveAspect() || !m_TextureAsset.IsValid()) {
         return;
     }
@@ -461,51 +529,64 @@ void Image2D::ApplyAspectRatio(Vec2& position, Vec2& size) const {
     switch (mode) {
         case AspectMode::Fit:
         case AspectMode::Letterbox:
-
+            // Show entire image, may have letterboxing
             if (texAspect > rectAspect) {
-
-                float newHeight = size.x / texAspect;
-                float offset = (size.y - newHeight) * 0.5f;
-                position.y += offset;
-                size.y = newHeight;
+                // Texture is wider - fit to width, reduce height
+                size.y = size.x / texAspect;
             } else {
-
-                float newWidth = size.y * texAspect;
-                float offset = (size.x - newWidth) * 0.5f;
-                position.x += offset;
-                size.x = newWidth;
+                // Texture is taller - fit to height, reduce width
+                size.x = size.y * texAspect;
             }
+            // Center stays the same since we're center-based
             break;
 
         case AspectMode::Fill:
-
+            // Fill rect, may crop image
             if (texAspect > rectAspect) {
-
-                float newWidth = size.y * texAspect;
-                float offset = (size.x - newWidth) * 0.5f;
-                position.x += offset;
-                size.x = newWidth;
+                // Texture is wider - fill height, expand width
+                size.x = size.y * texAspect;
             } else {
-
-                float newHeight = size.x / texAspect;
-                float offset = (size.y - newHeight) * 0.5f;
-                position.y += offset;
-                size.y = newHeight;
+                // Texture is taller - fill width, expand height
+                size.y = size.x / texAspect;
             }
+            // Center stays the same since we're center-based
             break;
 
         case AspectMode::Stretch:
-
+            // Ignore aspect ratio, use size as-is
             break;
     }
 }
 
-void Image2D::RenderImage(RenderContext& ctx, const Vec2& position, const Vec2& size, float rotation) {
+void Image2D::RenderImage(RenderContext& ctx, const Vec2& center, const Vec2& size, float rotation) {
     if (!m_TextureHandle.isValid()) {
         return;
     }
 
     Color tint = GetColor();
+
+    // KeepCentered and NineSlice route through the shared UI image painter.
+    // Stretch keeps the legacy textured rounded-rect path so flip, per-blend-mode
+    // and aspect-ratio behavior are preserved unchanged.
+    UIImageStretchMode stretchMode = GetStretchMode();
+    if (stretchMode != UIImageStretchMode::Stretch && m_TextureAsset.IsValid()) {
+        UINineSlice nineSlice;
+        if (stretchMode == UIImageStretchMode::NineSlice) {
+            Vec4 margins = GetNineSliceMargins();
+            nineSlice.marginLeft = margins.x;
+            nineSlice.marginTop = margins.y;
+            nineSlice.marginRight = margins.z;
+            nineSlice.marginBottom = margins.w;
+            nineSlice.axisHorizontal = GetNineSliceAxisHorizontal();
+            nineSlice.axisVertical = GetNineSliceAxisVertical();
+            nineSlice.drawCenter = GetNineSliceDrawCenter();
+        }
+
+        DrawUIImage(ctx, center, size, rotation, m_TextureHandle,
+                    m_TextureAsset->GetWidth(), m_TextureAsset->GetHeight(),
+                    tint, m_CornerRadius.AsVec4(), stretchMode, nineSlice);
+        return;
+    }
 
     Vec2 uvMin, uvMax;
     CalculateUVCoordinates(uvMin, uvMax);
@@ -514,15 +595,16 @@ void Image2D::RenderImage(RenderContext& ctx, const Vec2& position, const Vec2& 
     int blendMode = static_cast<int>(GetBlendMode());
 
     if (std::abs(rotation) > 0.0001f) {
-
-        Vec2 center = Vec2(position.x + size.x * 0.5f, position.y + size.y * 0.5f);
+        // Rotated: pass center directly
         ctx.drawRoundedRect(center, size, cornerRadius, tint, m_TextureHandle, rotation, uvMin, uvMax, blendMode);
     } else {
-        ctx.drawRoundedRect(position, size, cornerRadius, tint, m_TextureHandle, uvMin, uvMax, blendMode);
+        // Non-rotated: calculate top-left from center
+        Vec2 topLeft = Vec2(center.x - size.x * 0.5f, center.y - size.y * 0.5f);
+        ctx.drawRoundedRect(topLeft, size, cornerRadius, tint, m_TextureHandle, uvMin, uvMax, blendMode);
     }
 }
 
-void Image2D::RenderBorder(RenderContext& ctx, const Vec2& position, const Vec2& size, float rotation) {
+void Image2D::RenderBorder(RenderContext& ctx, const Vec2& center, const Vec2& size, float rotation) {
     if (!GetBorderEnabled()) {
         return;
     }
@@ -551,13 +633,18 @@ void Image2D::RenderBorder(RenderContext& ctx, const Vec2& position, const Vec2&
 
     Vec4 borderWidthVec = Vec4(borderTop, borderRight, borderBottom, borderLeft);
 
-    if (std::abs(rotation) > 0.0001f) {
+    // Account for asymmetric border offset from center
+    float borderOffsetX = (borderRight - borderLeft) * 0.5f;
+    float borderOffsetY = (borderBottom - borderTop) * 0.5f;
+    Vec2 borderCenter = Vec2(center.x + borderOffsetX, center.y + borderOffsetY);
 
-        Vec2 center = Vec2(position.x + size.x * 0.5f, position.y + size.y * 0.5f);
-        ctx.drawRoundedRectBorder(center, outerSize, outerRadius, borderWidthVec, borderColor, rotation);
+    if (std::abs(rotation) > 0.0001f) {
+        // Rotated: pass center directly
+        ctx.drawRoundedRectBorder(borderCenter, outerSize, outerRadius, borderWidthVec, borderColor, rotation);
     } else {
-        Vec2 outerPosition = Vec2(position.x - borderLeft, position.y - borderTop);
-        ctx.drawRoundedRectBorder(outerPosition, outerSize, outerRadius, borderWidthVec, borderColor);
+        // Non-rotated: calculate top-left from center
+        Vec2 outerTopLeft = Vec2(borderCenter.x - outerSize.x * 0.5f, borderCenter.y - outerSize.y * 0.5f);
+        ctx.drawRoundedRectBorder(outerTopLeft, outerSize, outerRadius, borderWidthVec, borderColor);
     }
 }
 
@@ -598,6 +685,19 @@ void Image2D::buildDrawCommands(RenderContext& ctx) {
     m_CornerRadius.FromVec4(cornerRadiusVec);
     m_CornerRadius.SetLinked(cornerRadiusLinked);
 
+    // A theme may supply a uniform corner radius. Applied only when the theme
+    // defines it and the property is not a local override (preserving per-corner
+    // values otherwise).
+    if (!IsThemeOverridden("cornerRadius")) {
+        const ui::ThemeAsset* theme = GetEffectiveTheme();
+        ui::ThemeManager& tm = ui::ThemeManager::GetInstance();
+        if (tm.HasConstant(theme, GetThemeTypeName(), GetThemeTypeVariation(), "corner_radius")) {
+            float r = tm.ResolveConstant(theme, GetThemeTypeName(), GetThemeTypeVariation(), "corner_radius", 0.0f);
+            m_CornerRadius.FromVec4(Vec4(r, r, r, r));
+            m_CornerRadius.SetLinked(true);
+        }
+    }
+
     Vec4 borderWidthVec = GetPropertyValue<Vec4>("borderWidth");
     bool borderWidthLinked = GetPropertyValue<bool>("borderWidthLinked");
     m_BorderWidth.FromVec4(borderWidthVec);
@@ -617,14 +717,19 @@ void Image2D::buildDrawCommands(RenderContext& ctx) {
         m_TextureAsset.Reset();
 
         if (!currentPath.empty()) {
-            m_TextureAsset = asset::AssetRef<asset::ImageAsset>(new asset::ImageAsset());
-            bool loaded = m_TextureAsset->LoadFromFile(currentPath, true, asset::ImageColorSpace::sRGB);
+            m_TextureAsset = asset::ImageCache::GetInstance().GetOrLoad(currentPath);
+            bool loaded = m_TextureAsset.IsValid() && m_TextureAsset->IsLoaded();
 
             if (!loaded) {
-
                 m_TextureAsset.Reset();
             } else {
-
+                // Initialize width/height from texture if not already set
+                if (GetWidth() <= 0.0f && m_TextureAsset->GetWidth() > 0) {
+                    SetWidth(static_cast<float>(m_TextureAsset->GetWidth()));
+                }
+                if (GetHeight() <= 0.0f && m_TextureAsset->GetHeight() > 0) {
+                    SetHeight(static_cast<float>(m_TextureAsset->GetHeight()));
+                }
             }
         }
 
@@ -632,28 +737,24 @@ void Image2D::buildDrawCommands(RenderContext& ctx) {
     }
 
     if (!m_TextureHandle.isValid() && m_TextureAsset.IsValid() && m_TextureAsset->IsLoaded()) {
-        if (m_TextureAsset->GetWidth() == 0 || m_TextureAsset->GetHeight() == 0 ||
-            m_TextureAsset->GetData() == nullptr) {
+        // Only create the texture if the asset has valid data
+        if (m_TextureAsset->GetWidth() > 0 && m_TextureAsset->GetHeight() > 0 &&
+            m_TextureAsset->GetData() != nullptr) {
 
-            return;
-        }
-
-        TextureDesc desc;
-        desc.width = m_TextureAsset->GetWidth();
-        desc.height = m_TextureAsset->GetHeight();
-        desc.format = TextureFormat::RGBA8_SRGB;
-        desc.usage = TextureUsage::Sampled;
-        desc.initialData = m_TextureAsset->GetData();
-
-        IGfxDevice* device = ctx.getDevice();
-        if (device) {
-            m_TextureHandle = device->createTexture(desc);
-
+            IGfxDevice* device = ctx.getDevice();
+            if (device) {
+                m_TextureHandle = lupine::CreateTexture2DFromImage(device, *m_TextureAsset, TextureFormat::RGBA8_UNORM);
+            }
         }
     }
 
-    Vec2 position = CalculatePosition();
-    Vec2 size = CalculateSize();
+    const Rect __rect = GetResolvedRect();
+    Vec2 position = __rect.GetCenter();
+    Vec2 size = __rect.size;
+    if (size.x <= 0.0f || size.y <= 0.0f) {
+        // Auto-size from the texture when width/height are 0 (point-anchor case).
+        size = CalculateSize();
+    }
 
     ApplyAspectRatio(position, size);
 
@@ -665,7 +766,51 @@ void Image2D::buildDrawCommands(RenderContext& ctx) {
 
     RenderBorder(ctx, position, size, rotation);
 
+    // A custom .lsh shader, when attached and compiled, renders the image.
+    if (!GetShader().empty() && RenderImageCustomShader(ctx, position, size, rotation)) {
+        return;
+    }
+
     RenderImage(ctx, position, size, rotation);
+}
+
+bool Image2D::RenderImageCustomShader(RenderContext& ctx, const Vec2& center, const Vec2& size, float rotation) {
+    const std::string& shaderPath = GetShader();
+    if (shaderPath.empty()) {
+        return false;
+    }
+
+    int blendMode = static_cast<int>(GetBlendMode());
+    MaterialHandle material = ctx.getOrCreateLshMaterial(shaderPath, blendMode);
+    if (!material.isValid()) {
+        return false;
+    }
+
+    Color tint = GetColor();
+    Vec4 cornerRadius = m_CornerRadius.AsVec4();
+
+    Vec2 uvMin, uvMax;
+    CalculateUVCoordinates(uvMin, uvMax);
+
+    MaterialPropertyBlock params;
+    m_ShaderParams.BuildBlock(ctx, GetShaderParameters(), params);
+
+    // Expose the image to the custom shader as u_Texture (overrides the standard defaults).
+    bool hasTexture = m_TextureHandle.isValid();
+    params.setBool("u_UseTexture", hasTexture);
+    if (hasTexture) {
+        params.setTexture("u_Texture", m_TextureHandle);
+    }
+    params.setVec4("u_UVRect", Vec4(uvMin.x, uvMin.y, uvMax.x, uvMax.y));
+
+    if (std::abs(rotation) > 0.0001f) {
+        ctx.drawRoundedRectShader(center, size, cornerRadius, tint, rotation, material, params);
+    } else {
+        Vec2 topLeft = Vec2(center.x - size.x * 0.5f, center.y - size.y * 0.5f);
+        ctx.drawRoundedRectShader(topLeft, size, cornerRadius, tint, 0.0f, material, params);
+    }
+
+    return true;
 }
 
 AABB Image2D::getWorldBounds() const {
@@ -673,8 +818,8 @@ AABB Image2D::getWorldBounds() const {
         return AABB();
     }
 
-    Vec2 position = CalculatePosition();
-    Vec2 size = CalculateSize();
+    Vec2 center = CalculatePosition();
+    Vec2 size = GetBoundsSize();
 
     float maxBorder = 0.0f;
     if (GetBorderEnabled()) {
@@ -686,8 +831,10 @@ AABB Image2D::getWorldBounds() const {
         }
     }
 
-    Vec2 min = position - Vec2(maxBorder, maxBorder);
-    Vec2 max = position + size + Vec2(maxBorder, maxBorder);
+    // Calculate bounds from center
+    Vec2 halfSize = size * 0.5f;
+    Vec2 min = center - halfSize - Vec2(maxBorder, maxBorder);
+    Vec2 max = center + halfSize + Vec2(maxBorder, maxBorder);
 
     return AABB(Vec3(min.x, min.y, -0.1f), Vec3(max.x, max.y, 0.1f));
 }
@@ -703,8 +850,39 @@ RenderLayer Image2D::getRenderLayer() const {
 }
 
 SpatialType Image2D::getSpatialType() const {
+    return GetUISpatialType();
+}
 
-    return SpatialType::World2D;
+bool Image2D::OnAssetFileChanged(const std::string& changedPath, const std::string& resolvedChangedPath) {
+    std::string currentPath = GetTexturePath();
+    if (currentPath.empty()) {
+        return false;
+    }
+
+    // Resolve our path for comparison
+    std::string resolvedCurrentPath;
+    auto& assetDb = asset::AssetDatabase::GetInstance();
+    if (assetDb.IsInitialized()) {
+        resolvedCurrentPath = assetDb.ResolveAsset(currentPath);
+    }
+
+    // Check if this is our texture
+    bool matches = (currentPath == changedPath) ||
+                   (!resolvedCurrentPath.empty() && !resolvedChangedPath.empty() &&
+                    resolvedCurrentPath == resolvedChangedPath);
+
+    if (matches) {
+
+        // Invalidate instance state - force reload on next render
+        m_TextureHandle = TextureHandle();
+        m_TextureAsset.Reset();
+        m_CurrentTexturePath.clear();
+        m_TextureNeedsUpload = true;
+
+        return true;
+    }
+
+    return false;
 }
 
 }

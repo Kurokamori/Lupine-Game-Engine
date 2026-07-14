@@ -9,7 +9,7 @@
 #ifndef LUPINE_CAPI_MATH_H
 #define LUPINE_CAPI_MATH_H
 
-#include "core/lc_core.h"
+#include "../core/lc_core.h"
 #include <stddef.h>
 #include <stdbool.h>
 #include <math.h>
@@ -76,6 +76,18 @@ LC_API LCVec2 lc_vec2_rotate(LCVec2 v, float angle);
 
 LC_API float lc_vec2_angle(LCVec2 a, LCVec2 b);
 LC_API bool lc_vec2_equals(LCVec2 a, LCVec2 b);
+
+/* ============================================================================
+ * Rect - 2D Rectangle (top-left position + size)
+ * ============================================================================ */
+
+/**
+ * @brief 2D rectangle with a top-left position and a size (POD type, pass by value)
+ */
+typedef struct LCRect {
+    LCVec2 position; /**< Top-left corner */
+    LCVec2 size;     /**< Width and height */
+} LCRect;
 
 /* ============================================================================
  * Vec3 - 3D Vector
@@ -276,6 +288,55 @@ LC_API unsigned int lc_color_to_hex(LCColor c);
 LC_API void lc_color_to_bytes(LCColor c, unsigned char* r, unsigned char* g, unsigned char* b, unsigned char* a);
 LC_API LCVec3 lc_color_to_hsv(LCColor c);
 
+/* String / normalized color helpers (mirror the scripting color API) */
+
+/**
+ * @brief Parse a hex color string into an LCColor
+ * @param hex Hex string: "#RGB", "#RGBA", "#RRGGBB" or "#RRGGBBAA" (leading '#' optional)
+ * @return Parsed color; opaque black on a malformed string
+ */
+LC_API LCColor lc_color_from_hex_string(const char* hex);
+
+/**
+ * @brief Format an LCColor as a "#RRGGBBAA" hex string
+ * @param color Color to format
+ * @param out_buffer Output buffer (at least 10 bytes for "#RRGGBBAA" + NUL)
+ * @param buffer_size Size of the output buffer
+ * @return LC_SUCCESS on success, error code otherwise
+ */
+LC_API LCResult lc_color_to_hex_string(LCColor color, char* out_buffer, size_t buffer_size);
+
+/**
+ * @brief Build a color from normalized HSV components
+ * @param h Hue in [0, 1]
+ * @param s Saturation in [0, 1]
+ * @param v Value in [0, 1]
+ * @param a Alpha in [0, 1]
+ * @return Resulting RGBA color
+ */
+LC_API LCColor lc_color_from_hsv01(float h, float s, float v, float a);
+
+/* ============================================================================
+ * Gradient / Curve Sampling
+ * ============================================================================ */
+
+/**
+ * @brief Sample a gradient (described by a JSON string) at parameter t
+ * @param gradient_json Gradient JSON string (as produced by a Gradient property)
+ * @param t Sample position, clamped to [0, 1]
+ * @return Sampled color (white for an empty/invalid gradient)
+ */
+LC_API LCColor lc_sample_gradient(const char* gradient_json, float t);
+
+/**
+ * @brief Sample a curve (described by a JSON string) at parameter t
+ * @param curve_json Curve JSON string (as produced by a Curve property)
+ * @param t Sample position, clamped to [0, 1]
+ * @param empty_default Value returned when the curve is empty/invalid
+ * @return Sampled value
+ */
+LC_API float lc_sample_curve(const char* curve_json, float t, float empty_default);
+
 /* ============================================================================
  * Transform
  * ============================================================================ */
@@ -327,6 +388,35 @@ LC_API float lc_lerp_angle(float a, float b, float t);
 /* Comparison */
 LC_API bool lc_equals(float a, float b);
 LC_API bool lc_is_zero(float value);
+
+/* ============================================================================
+ * Random
+ * ============================================================================ */
+
+/* Shared deterministic generator: lc_random_seed() reseeds every lc_random_* helper. */
+LC_API float lc_random_float(void);
+LC_API bool lc_random_bool(void);
+LC_API int lc_random_sign(void);
+LC_API void lc_random_seed(int seed);
+LC_API float lc_random_range(float min, float max);
+LC_API int lc_random_range_int(int min, int max);
+
+/* ============================================================================
+ * Range / Interpolation Helpers
+ * ============================================================================ */
+
+LC_API float lc_wrap(float value, float min, float max);
+LC_API int lc_wrap_int(int value, int min, int max);
+LC_API float lc_ping_pong(float value, float length);
+LC_API float lc_snapped(float value, float step);
+LC_API bool lc_is_equal_approx(float a, float b);
+LC_API float lc_ease(float t, float curve);
+LC_API float lc_pos_mod(float a, float b);
+LC_API int lc_pos_mod_int(int a, int b);
+LC_API float lc_move_toward(float from, float to, float delta);
+LC_API float lc_smoothstep(float from, float to, float t);
+LC_API float lc_inverse_lerp(float from, float to, float value);
+LC_API float lc_remap(float value, float from_min, float from_max, float to_min, float to_max);
 
 #ifdef __cplusplus
 }

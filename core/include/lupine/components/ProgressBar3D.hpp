@@ -53,6 +53,9 @@ public:
     // Editor gizmo hooks
     bool OnGizmoScale(float scaleDelta, int axis, bool is3D) override;
 
+    // Asset hot-reload support
+    bool OnAssetFileChanged(const std::string& changedPath, const std::string& resolvedChangedPath) override;
+
     // ===== Value Properties =====
     
     float GetMinValue() const;
@@ -114,7 +117,7 @@ public:
     const std::string& GetBackgroundTexturePath() const;
     void SetBackgroundTexturePath(const std::string& path);
 
-    const math::Color& GetBackgroundColor() const;
+    math::Color GetBackgroundColor() const;
     void SetBackgroundColor(const math::Color& color);
 
     // ===== Fill Texture =====
@@ -122,7 +125,7 @@ public:
     const std::string& GetFillTexturePath() const;
     void SetFillTexturePath(const std::string& path);
 
-    const math::Color& GetFillColor() const;
+    math::Color GetFillColor() const;
     void SetFillColor(const math::Color& color);
 
     // ===== Border Texture =====
@@ -130,7 +133,7 @@ public:
     const std::string& GetBorderTexturePath() const;
     void SetBorderTexturePath(const std::string& path);
 
-    const math::Color& GetBorderColor() const;
+    math::Color GetBorderColor() const;
     void SetBorderColor(const math::Color& color);
 
     // ===== Value Display =====
@@ -144,7 +147,7 @@ public:
     float GetValueFontSize() const;
     void SetValueFontSize(float size);
 
-    const math::Color& GetValueColor() const;
+    math::Color GetValueColor() const;
     void SetValueColor(const math::Color& color);
 
     // ===== Corner Radius Properties =====

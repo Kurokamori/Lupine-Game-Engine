@@ -35,11 +35,13 @@ public:
     // ISerializable interface
     std::string GetTypeName() const override { return "StaticBody2DComponent"; }
     void DefineProperties() override;
+    void DefineSignals() override;
 
     // Lifecycle hooks
     void OnAwake() override;
     void OnReady() override;
     void OnDestroy() override;
+    void OnPhysicsWorldRebuild(PhysicsWorldRebuildPhase phase) override;
     void OnPhysicsProcess(float deltaTime) override;
 
     // ===== Property Accessors =====
@@ -57,10 +59,11 @@ public:
     // Get the underlying physics body
     physics2d::RigidBody2D* GetPhysicsBody() const { return m_PhysicsBody; }
     
-    // Manually set position (teleport)
+    // Manually set position (teleport). World space, like the physics body itself; the owning
+    // node's local transform is derived from it.
     void SetPosition(const math::Vec2& position);
-    
-    // Manually set rotation (teleport)
+
+    // Manually set rotation (teleport). World space, as above.
     void SetRotation(float angle);
 
 private:
@@ -83,6 +86,12 @@ private:
     
     // Synchronize transform from physics body to Node2D
     void SyncTransformFromPhysics();
+
+    // Wire physics-world collision callbacks to the body_entered/body_exited signals.
+    void RegisterCollisionCallbacks();
+    void OnCollisionEnterInternal(const physics2d::CollisionInfo& info);
+    void OnCollisionExitInternal(const physics2d::CollisionInfo& info);
+    nlohmann::json ResolveOtherBodyNodeArg(const core::UUID& otherBodyId) const;
 };
 
 } // namespace components

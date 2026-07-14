@@ -1,4 +1,5 @@
 #include "lupine/input/InputDevice.hpp"
+#include "lupine/input/InputManager.hpp"
 #include <cstring>
 #include <algorithm>
 
@@ -11,12 +12,34 @@ KeyboardDevice::KeyboardDevice() {
 }
 
 void KeyboardDevice::Update() {
+    // Begin-of-frame: snapshot previous key state. Typed text is NOT cleared here:
+    // InputManager::Update captures and clears it after the event pump, so clearing it
+    // at frame start would race the platform thread under the async runtime and drop
+    // characters.
     std::memcpy(m_PreviousKeyState, m_CurrentKeyState, sizeof(m_CurrentKeyState));
 }
 
 void KeyboardDevice::Reset() {
     std::memset(m_CurrentKeyState, 0, sizeof(m_CurrentKeyState));
     std::memset(m_PreviousKeyState, 0, sizeof(m_PreviousKeyState));
+    std::lock_guard<std::mutex> lock(m_TextMutex);
+    m_TextInput.clear();
+}
+
+void KeyboardDevice::AddTextInput(uint32_t codepoint) {
+    std::lock_guard<std::mutex> lock(m_TextMutex);
+    m_TextInput.push_back(codepoint);
+}
+
+void KeyboardDevice::ClearTextInput() {
+    std::lock_guard<std::mutex> lock(m_TextMutex);
+    m_TextInput.clear();
+}
+
+void KeyboardDevice::DrainTextInput(std::vector<uint32_t>& out) {
+    std::lock_guard<std::mutex> lock(m_TextMutex);
+    out = m_TextInput;
+    m_TextInput.clear();
 }
 
 void KeyboardDevice::SetKeyState(KeyCode key, bool pressed) {
@@ -49,10 +72,18 @@ MouseDevice::MouseDevice() {
 }
 
 void MouseDevice::Update() {
+    // Begin-of-frame: snapshot previous button state. The scroll delta and position
+    // delta are intentionally NOT touched here: InputManager::Update captures and
+    // clears the scroll delta, and FinalizeFrame() computes the position delta, both
+    // after the new state has been polled. Clearing the scroll here would race the
+    // platform thread under the async runtime and drop wheel input.
     std::memcpy(m_PreviousButtonState, m_CurrentButtonState, sizeof(m_CurrentButtonState));
-    m_PreviousPosition = m_Position;
+}
+
+void MouseDevice::FinalizeFrame() {
+    // Compute movement since the previous finalized frame, then advance the baseline.
     m_Delta = m_Position - m_PreviousPosition;
-    m_ScrollDelta = glm::vec2(0.0f);
+    m_PreviousPosition = m_Position;
 }
 
 void MouseDevice::Reset() {
@@ -104,6 +135,9 @@ GamepadDevice::GamepadDevice(uint32_t deviceID)
 }
 
 std::string GamepadDevice::GetDeviceName() const {
+    if (!m_Name.empty()) {
+        return m_Name;
+    }
     return "Gamepad " + std::to_string(m_DeviceID);
 }
 
@@ -161,7 +195,9 @@ float GamepadDevice::GetAxisValue(GamepadAxis axis) const {
 }
 
 void GamepadDevice::SetVibration(float leftMotor, float rightMotor) {
-
+    // Rumble is platform-specific; route through the InputManager's installed
+    // vibration provider (no-op if the platform layer has not installed one).
+    InputManager::Get().SetGamepadVibration(m_DeviceID, leftMotor, rightMotor, 0);
 }
 
 float GamepadDevice::ApplyDeadzone(float value) const {
@@ -172,6 +208,154 @@ float GamepadDevice::ApplyDeadzone(float value) const {
     float sign = value > 0.0f ? 1.0f : -1.0f;
     float absValue = std::abs(value);
     return sign * ((absValue - m_Deadzone) / (1.0f - m_Deadzone));
+}
+
+// ============================================================================
+// TouchDevice implementation
+// ============================================================================
+
+TouchDevice::TouchDevice() {
+    // Initialize all touch points
+    for (size_t i = 0; i < MAX_TOUCH_POINTS; ++i) {
+        m_TouchPoints[i] = TouchPoint();
+    }
+}
+
+void TouchDevice::Update() {
+    // Clear just started/ended flags for next frame
+    for (size_t i = 0; i < MAX_TOUCH_POINTS; ++i) {
+        m_TouchPoints[i].justStarted = false;
+        m_TouchPoints[i].justEnded = false;
+        m_TouchPoints[i].delta = glm::vec2(0.0f);
+    }
+}
+
+void TouchDevice::Reset() {
+    for (size_t i = 0; i < MAX_TOUCH_POINTS; ++i) {
+        m_TouchPoints[i] = TouchPoint();
+    }
+}
+
+void TouchDevice::BeginTouch(uint32_t id, const glm::vec2& position, float pressure) {
+    TouchPoint* touch = FindTouchByID(id);
+    if (!touch) {
+        touch = FindFreeTouchSlot();
+    }
+
+    if (touch) {
+        touch->id = id;
+        touch->position = position;
+        touch->startPosition = position;
+        touch->delta = glm::vec2(0.0f);
+        touch->pressure = pressure;
+        touch->active = true;
+        touch->justStarted = true;
+        touch->justEnded = false;
+    }
+}
+
+void TouchDevice::UpdateTouch(uint32_t id, const glm::vec2& position, float pressure) {
+    TouchPoint* touch = FindTouchByID(id);
+    if (touch && touch->active) {
+        touch->delta = position - touch->position;
+        touch->position = position;
+        touch->pressure = pressure;
+    }
+}
+
+void TouchDevice::EndTouch(uint32_t id) {
+    TouchPoint* touch = FindTouchByID(id);
+    if (touch) {
+        touch->active = false;
+        touch->justEnded = true;
+    }
+}
+
+void TouchDevice::CancelTouch(uint32_t id) {
+    TouchPoint* touch = FindTouchByID(id);
+    if (touch) {
+        touch->active = false;
+        touch->justEnded = true;
+    }
+}
+
+size_t TouchDevice::GetActiveTouchCount() const {
+    size_t count = 0;
+    for (size_t i = 0; i < MAX_TOUCH_POINTS; ++i) {
+        if (m_TouchPoints[i].active) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+const TouchPoint* TouchDevice::GetTouch(size_t index) const {
+    size_t currentIndex = 0;
+    for (size_t i = 0; i < MAX_TOUCH_POINTS; ++i) {
+        if (m_TouchPoints[i].active) {
+            if (currentIndex == index) {
+                return &m_TouchPoints[i];
+            }
+            ++currentIndex;
+        }
+    }
+    return nullptr;
+}
+
+const TouchPoint* TouchDevice::GetTouchByID(uint32_t id) const {
+    for (size_t i = 0; i < MAX_TOUCH_POINTS; ++i) {
+        if (m_TouchPoints[i].id == id && m_TouchPoints[i].active) {
+            return &m_TouchPoints[i];
+        }
+    }
+    return nullptr;
+}
+
+glm::vec2 TouchDevice::GetPrimaryTouchPosition() const {
+    const TouchPoint* primary = GetTouch(0);
+    return primary ? primary->position : glm::vec2(0.0f);
+}
+
+bool TouchDevice::HasPrimaryTouch() const {
+    return GetTouch(0) != nullptr;
+}
+
+bool TouchDevice::IsPrimaryTouchJustStarted() const {
+    // Look for any touch that just started (could be first touch)
+    for (size_t i = 0; i < MAX_TOUCH_POINTS; ++i) {
+        if (m_TouchPoints[i].justStarted) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool TouchDevice::IsPrimaryTouchJustEnded() const {
+    // Look for any touch that just ended
+    for (size_t i = 0; i < MAX_TOUCH_POINTS; ++i) {
+        if (m_TouchPoints[i].justEnded) {
+            return true;
+        }
+    }
+    return false;
+}
+
+TouchPoint* TouchDevice::FindTouchByID(uint32_t id) {
+    for (size_t i = 0; i < MAX_TOUCH_POINTS; ++i) {
+        if (m_TouchPoints[i].id == id) {
+            return &m_TouchPoints[i];
+        }
+    }
+    return nullptr;
+}
+
+TouchPoint* TouchDevice::FindFreeTouchSlot() {
+    for (size_t i = 0; i < MAX_TOUCH_POINTS; ++i) {
+        if (!m_TouchPoints[i].active && !m_TouchPoints[i].justEnded) {
+            return &m_TouchPoints[i];
+        }
+    }
+    return nullptr;
 }
 
 }

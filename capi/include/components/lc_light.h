@@ -13,9 +13,6 @@
 #include "core/lc_node.h"
 #include "math/lc_math.h"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 /* ============================================================================
  * Component Handle Type
@@ -446,8 +443,5 @@ LC_API LCResult lc_component_destroy(LCComponentHandle component);
  */
 LC_API LCResult lc_node_add_component(LCNodeHandle node, LCComponentHandle component);
 
-#ifdef __cplusplus
-}
-#endif
 
 #endif /* LUPINE_CAPI_LIGHT_H */

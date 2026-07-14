@@ -8,6 +8,8 @@ from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLab
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QPoint, QEvent
 from PyQt6.QtGui import QPalette, QColor, QMouseEvent, QWheelEvent, QAction
 
+from editor.native_render_widget import NativeRenderWidget
+
 
 class ViewportWidget(QWidget):
     """
@@ -21,11 +23,24 @@ class ViewportWidget(QWidget):
     node_selected = pyqtSignal(object)  # selected node (or None for clear selection)
     gizmo_drag_ended = pyqtSignal()  # emitted when gizmo drag operation completes
     polygon_vertex_added = pyqtSignal()  # emitted when a polygon vertex is added
+    line_point_added = pyqtSignal()  # emitted when a line point is added
+    curve3d_point_added = pyqtSignal()  # emitted when a Curve3D/Path3D point is added
 
-    def __init__(self, scene_name: str = "Untitled", parent=None):
+    def __init__(self, scene_name: str = "Untitled", parent=None,
+                 toolbar_mode: str = "full", force_2d: bool = False):
         super().__init__(parent)
         self.scene_name = scene_name
-        self.is_2d_mode = False
+        # toolbar_mode: "full" = the standard scene-editing toolbar; "minimal" = a
+        # slim bar exposing only the gizmo move/scale/rotate/all toggle plus an
+        # area host dialogs can inject their own buttons into (used by the UI Theme
+        # preview). force_2d starts the viewport in 2D so panning/zooming and the
+        # camera use the 2D paths immediately.
+        self.toolbar_mode = toolbar_mode
+        self._force_2d = bool(force_2d)
+        self.is_2d_mode = bool(force_2d)
+
+        # Layout that host dialogs insert custom toolbar widgets into (minimal mode).
+        self.toolbar_extra_layout = None
 
         # Rendering state
         self.editor_bridge = None
@@ -46,6 +61,23 @@ class ViewportWidget(QWidget):
         # Polygon creation mode
         self.polygon_creation_mode = False
         self.active_collision_component = None
+        # Generic polygon target (e.g. NavigationRegion2D 'outline',
+        # NavigationObstacle2D 'vertices'). When set, polygon clicks append to
+        # this FloatArray property instead of the collision-vertex API.
+        self.active_polygon_component = None
+        self.active_polygon_property = None
+
+        # Line creation mode
+        self.line_creation_mode = False
+        self.active_line_component = None
+
+        # Bezier handle dragging
+        self.bezier_handle_dragging = False
+        self.dragging_control_point_id = -1
+        self.bezier_edit_component = None
+        self.curve3d_creation_mode = False
+        self.active_curve3d_component = None
+        self.curve3d_edit_component = None
 
         # Set black background for native rendering
         palette = self.palette()
@@ -53,12 +85,12 @@ class ViewportWidget(QWidget):
         self.setAutoFillBackground(True)
         self.setPalette(palette)
 
-        # Native rendering area
-        self.render_widget = QWidget(self)
-        self.render_widget.setAutoFillBackground(True)
-        render_palette = self.render_widget.palette()
-        render_palette.setColor(QPalette.ColorRole.Window, QColor(0, 0, 0))
-        self.render_widget.setPalette(render_palette)
+        # Native rendering area. The engine renders into this widget's native
+        # window handle with its own graphics API, so it must be a NativeRenderWidget
+        # (Qt never paints/erases it). A plain background-filled QWidget here flashes
+        # to black for one Qt frame on every resize/update() before the engine
+        # redraws, which is the viewport flicker.
+        self.render_widget = NativeRenderWidget(self)
 
         # Enable mouse tracking for the render widget
         self.render_widget.setMouseTracking(True)
@@ -84,7 +116,10 @@ class ViewportWidget(QWidget):
         layout.setSpacing(0)
         
         # Toolbar
-        toolbar = self._create_toolbar()
+        if self.toolbar_mode == "minimal":
+            toolbar = self._create_minimal_toolbar()
+        else:
+            toolbar = self._create_toolbar()
         layout.addWidget(toolbar)
         
         # Render area
@@ -202,6 +237,17 @@ class ViewportWidget(QWidget):
         self._apply_toggle_style(self.camera_bounds_btn, True, colors)
         toolbar_layout.addWidget(self.camera_bounds_btn)
 
+        # Preview the active scene camera's stacked CameraEffect components in this
+        # viewport (off by default; the editor still navigates with its free camera).
+        self.preview_fx_btn = QPushButton("Preview FX")
+        self.preview_fx_btn.setCheckable(True)
+        self.preview_fx_btn.setChecked(False)
+        self.preview_fx_btn.setFixedSize(90, 28)
+        self.preview_fx_btn.setToolTip("Preview the active scene camera's stacked effects in the editor view")
+        self.preview_fx_btn.clicked.connect(self._toggle_camera_effects_preview)
+        self._apply_toggle_style(self.preview_fx_btn, False, colors)
+        toolbar_layout.addWidget(self.preview_fx_btn)
+
         # Separator
         self._add_separator(toolbar_layout, colors)
 
@@ -218,34 +264,7 @@ class ViewportWidget(QWidget):
         self._add_separator(toolbar_layout, colors)
 
         # === Group 4: Gizmo Type Selection ===
-        self.gizmo_all_btn = QPushButton("All")
-        self.gizmo_all_btn.setCheckable(True)
-        self.gizmo_all_btn.setChecked(True)
-        self.gizmo_all_btn.setFixedSize(45, 28)
-        self.gizmo_all_btn.clicked.connect(lambda: self._set_gizmo_type("all"))
-        self._apply_toggle_style(self.gizmo_all_btn, True, colors)
-        toolbar_layout.addWidget(self.gizmo_all_btn)
-
-        self.gizmo_scale_btn = QPushButton("Scale")
-        self.gizmo_scale_btn.setCheckable(True)
-        self.gizmo_scale_btn.setFixedSize(55, 28)
-        self.gizmo_scale_btn.clicked.connect(lambda: self._set_gizmo_type("scale"))
-        self._apply_toggle_style(self.gizmo_scale_btn, False, colors)
-        toolbar_layout.addWidget(self.gizmo_scale_btn)
-
-        self.gizmo_move_btn = QPushButton("Move")
-        self.gizmo_move_btn.setCheckable(True)
-        self.gizmo_move_btn.setFixedSize(55, 28)
-        self.gizmo_move_btn.clicked.connect(lambda: self._set_gizmo_type("move"))
-        self._apply_toggle_style(self.gizmo_move_btn, False, colors)
-        toolbar_layout.addWidget(self.gizmo_move_btn)
-
-        self.gizmo_rotate_btn = QPushButton("Rotate")
-        self.gizmo_rotate_btn.setCheckable(True)
-        self.gizmo_rotate_btn.setFixedSize(60, 28)
-        self.gizmo_rotate_btn.clicked.connect(lambda: self._set_gizmo_type("rotate"))
-        self._apply_toggle_style(self.gizmo_rotate_btn, False, colors)
-        toolbar_layout.addWidget(self.gizmo_rotate_btn)
+        self._build_gizmo_type_buttons(toolbar_layout, colors)
 
         # Separator
         self._add_separator(toolbar_layout, colors)
@@ -321,6 +340,80 @@ class ViewportWidget(QWidget):
         QTimer.singleShot(100, self._update_scroll_arrows)
 
         return toolbar
+
+    def _build_gizmo_type_buttons(self, layout, colors):
+        """Create the All/Scale/Move/Rotate gizmo-type toggle group into `layout`.
+
+        Shared by the full and minimal toolbars so both expose an identical,
+        single source of truth for the gizmo-type controls.
+        """
+        self.gizmo_all_btn = QPushButton("All")
+        self.gizmo_all_btn.setCheckable(True)
+        self.gizmo_all_btn.setChecked(True)
+        self.gizmo_all_btn.setFixedSize(45, 28)
+        self.gizmo_all_btn.clicked.connect(lambda: self._set_gizmo_type("all"))
+        self._apply_toggle_style(self.gizmo_all_btn, True, colors)
+        layout.addWidget(self.gizmo_all_btn)
+
+        self.gizmo_scale_btn = QPushButton("Scale")
+        self.gizmo_scale_btn.setCheckable(True)
+        self.gizmo_scale_btn.setFixedSize(55, 28)
+        self.gizmo_scale_btn.clicked.connect(lambda: self._set_gizmo_type("scale"))
+        self._apply_toggle_style(self.gizmo_scale_btn, False, colors)
+        layout.addWidget(self.gizmo_scale_btn)
+
+        self.gizmo_move_btn = QPushButton("Move")
+        self.gizmo_move_btn.setCheckable(True)
+        self.gizmo_move_btn.setFixedSize(55, 28)
+        self.gizmo_move_btn.clicked.connect(lambda: self._set_gizmo_type("move"))
+        self._apply_toggle_style(self.gizmo_move_btn, False, colors)
+        layout.addWidget(self.gizmo_move_btn)
+
+        self.gizmo_rotate_btn = QPushButton("Rotate")
+        self.gizmo_rotate_btn.setCheckable(True)
+        self.gizmo_rotate_btn.setFixedSize(60, 28)
+        self.gizmo_rotate_btn.clicked.connect(lambda: self._set_gizmo_type("rotate"))
+        self._apply_toggle_style(self.gizmo_rotate_btn, False, colors)
+        layout.addWidget(self.gizmo_rotate_btn)
+
+    def _create_minimal_toolbar(self) -> QWidget:
+        """Create a slim toolbar with only the gizmo-type toggle plus a host area.
+
+        Used by embedded previews (e.g. the UI Theme editor) that want gizmo-based
+        positioning without the full scene-editing controls. Host dialogs add their
+        own buttons via `add_toolbar_widget`.
+        """
+        from editor.theme import get_theme_manager
+        theme = get_theme_manager().get_current_theme()
+        colors = theme.colors
+
+        toolbar = QWidget()
+        toolbar.setFixedHeight(40)
+        main_layout = QHBoxLayout()
+        main_layout.setContentsMargins(4, 4, 4, 4)
+        main_layout.setSpacing(8)
+
+        # Host-injected widgets (Add Control, Remove Selected, ...) sit on the left.
+        self.toolbar_extra_layout = QHBoxLayout()
+        self.toolbar_extra_layout.setContentsMargins(0, 0, 0, 0)
+        self.toolbar_extra_layout.setSpacing(6)
+        main_layout.addLayout(self.toolbar_extra_layout)
+
+        main_layout.addStretch()
+
+        # The only retained transform control: the gizmo move/scale/rotate/all toggle.
+        self._build_gizmo_type_buttons(main_layout, colors)
+
+        toolbar.setLayout(main_layout)
+        return toolbar
+
+    def add_toolbar_widget(self, widget):
+        """Insert a custom widget into the minimal toolbar's host area.
+
+        No-op when the viewport is not using the minimal toolbar.
+        """
+        if self.toolbar_extra_layout is not None:
+            self.toolbar_extra_layout.addWidget(widget)
 
     def _add_separator(self, layout, colors):
         """Add a visual separator to the toolbar"""
@@ -464,6 +557,13 @@ class ViewportWidget(QWidget):
         self._update_button_style(self.camera_bounds_btn, enabled)
         if self.editor_bridge and self.view_id:
             self.editor_bridge.set_view_camera_preview_enabled(self.view_id, enabled)
+
+    def _toggle_camera_effects_preview(self):
+        """Toggle previewing the scene camera's stacked effects in this viewport"""
+        enabled = self.preview_fx_btn.isChecked()
+        self._update_button_style(self.preview_fx_btn, enabled)
+        if self.editor_bridge and self.view_id:
+            self.editor_bridge.set_view_camera_effects_preview(self.view_id, enabled)
 
     def _toggle_collision_shapes(self):
         """Toggle collision shapes visibility"""
@@ -621,9 +721,11 @@ class ViewportWidget(QWidget):
         print(f"[ViewportWidget] Created render view: view_id={self.view_id}, scene={self.scene}")
 
         if self.view_id:
-            # Set initial view mode (3D by default)
+            # Set initial view mode (3D by default; 2D when forced so pan/zoom and
+            # the camera use the 2D paths from the first frame).
             import lupine_engine as le
-            self.editor_bridge.set_view_mode(self.view_id, le.ViewMode.View3D)
+            initial_mode = le.ViewMode.View2D if self._force_2d else le.ViewMode.View3D
+            self.editor_bridge.set_view_mode(self.view_id, initial_mode)
 
             # Associate scene with view
             if self.scene:
@@ -656,6 +758,7 @@ class ViewportWidget(QWidget):
         if self.editor_bridge and self.view_id:
             try:
                 self.editor_bridge.render_view(self.view_id)
+                self.render_widget.notify_rendered()
             except Exception as e:
                 print(f"Error rendering frame: {e}")
                 import traceback
@@ -707,9 +810,23 @@ class ViewportWidget(QWidget):
         width, height = self.get_viewport_size()
         self.viewport_resized.emit(width, height)
 
-        # Resize render view
+        # Resize render view, then render one frame synchronously so the resized
+        # swapchain is presented immediately. Without this the newly-exposed area
+        # would show undefined contents until the next render-timer tick (~16ms),
+        # which reads as a flicker while dragging the splitter/window edge.
         if self.editor_bridge and self.view_id:
             self.editor_bridge.resize_render_view(self.view_id, width, height)
+            self._render_frame()
+
+    def request_render(self):
+        """Render one frame immediately into the native surface.
+
+        Used by callers (e.g. the animation timeline scrubber) that need the
+        viewport to reflect an engine-side change right away. Prefer this over
+        QWidget.update(): update() schedules a Qt repaint of the surface, and the
+        engine owns that surface, so a Qt repaint only risks a background fill.
+        """
+        self._render_frame()
 
     def eventFilter(self, obj, event):
         """Filter events from render_widget to capture mouse input"""
@@ -743,6 +860,57 @@ class ViewportWidget(QWidget):
                 self._add_polygon_vertex(event.pos())
                 return
 
+            # Check if we're in line creation mode
+            if self.line_creation_mode and self.is_2d_mode:
+                print(f"[ViewportWidget] Line creation mode click, active_line_component={self.active_line_component}")
+                self._add_line_point(event.pos())
+                return
+
+            # Check if we're clicking on a Bezier control point
+            if self.bezier_edit_component and self.editor_bridge and self.view_id and self.is_2d_mode:
+                dpr = self.render_widget.devicePixelRatio()
+                screen_x = event.pos().x() * dpr
+                screen_y = event.pos().y() * dpr
+
+                # Convert screen to world position
+                world_pos = self.editor_bridge.screen_to_world_2d(self.view_id, float(screen_x), float(screen_y))
+
+                # Hit test control points - use correct API based on component type
+                comp_type = self.bezier_edit_component.get_type_name()
+                if comp_type == "Line2D":
+                    control_point_id = self.editor_bridge.hit_test_line2d_control_point(
+                        self.bezier_edit_component, world_pos['x'], world_pos['y'], 15.0
+                    )
+                else:  # Curve2D or Path2D
+                    control_point_id = self.editor_bridge.hit_test_curve2d_control_point(
+                        self.bezier_edit_component, world_pos['x'], world_pos['y'], 15.0
+                    )
+
+                if control_point_id >= 0:
+                    self.bezier_handle_dragging = True
+                    self.dragging_control_point_id = control_point_id
+                    self.render_widget.setCursor(Qt.CursorShape.ClosedHandCursor)
+                    return
+
+            # 3D curve creation mode (Curve3D / Path3D)
+            if self.curve3d_creation_mode and not self.is_2d_mode:
+                self._add_curve3d_point(event.pos())
+                return
+
+            # 3D curve control-point dragging (anchors + selected point's bezier handles)
+            if self.curve3d_edit_component and self.editor_bridge and self.view_id and not self.is_2d_mode:
+                dpr = self.render_widget.devicePixelRatio()
+                screen_x = event.pos().x() * dpr
+                screen_y = event.pos().y() * dpr
+                control_point_id = self.editor_bridge.hit_test_curve3d_control_point(
+                    self.curve3d_edit_component, self.view_id, float(screen_x), float(screen_y), 14.0
+                )
+                if control_point_id >= 0:
+                    self.bezier_handle_dragging = True
+                    self.dragging_control_point_id = control_point_id
+                    self.render_widget.setCursor(Qt.CursorShape.ClosedHandCursor)
+                    return
+
             # First check if we're clicking on a gizmo
             if self.editor_bridge and self.view_id:
                 dpr = self.render_widget.devicePixelRatio()
@@ -774,6 +942,15 @@ class ViewportWidget(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             self.left_mouse_down = False
 
+            # End Bezier handle drag if active
+            if self.bezier_handle_dragging:
+                self.bezier_handle_dragging = False
+                self.dragging_control_point_id = -1
+                self.render_widget.setCursor(Qt.CursorShape.ArrowCursor)
+                # Emit gizmo drag ended signal to refresh inspector
+                self.gizmo_drag_ended.emit()
+                return
+
             # End gizmo drag if active
             if self.gizmo_dragging and self.editor_bridge and self.view_id:
                 self.editor_bridge.end_gizmo_drag(self.view_id)
@@ -797,12 +974,57 @@ class ViewportWidget(QWidget):
         delta_x = current_pos.x() - self.last_mouse_pos.x()
         delta_y = current_pos.y() - self.last_mouse_pos.y()
 
-        # Handle gizmo dragging first (highest priority)
+        # Handle 3D curve control-point dragging (highest priority)
+        if (self.bezier_handle_dragging and self.left_mouse_down and
+                self.curve3d_edit_component and not self.is_2d_mode):
+            dpr = self.render_widget.devicePixelRatio()
+            screen_x = current_pos.x() * dpr
+            screen_y = current_pos.y() * dpr
+            self.editor_bridge.move_curve3d_control_point(
+                self.curve3d_edit_component,
+                self.dragging_control_point_id,
+                self.view_id,
+                float(screen_x),
+                float(screen_y)
+            )
+            self.last_mouse_pos = current_pos
+            return
+
+        # Handle Bezier handle dragging (highest priority)
+        if self.bezier_handle_dragging and self.left_mouse_down and self.bezier_edit_component:
+            dpr = self.render_widget.devicePixelRatio()
+            screen_x = current_pos.x() * dpr
+            screen_y = current_pos.y() * dpr
+
+            # Convert screen to world position
+            world_pos = self.editor_bridge.screen_to_world_2d(self.view_id, float(screen_x), float(screen_y))
+
+            # Move the control point - use correct API based on component type
+            comp_type = self.bezier_edit_component.get_type_name()
+            if comp_type == "Line2D":
+                self.editor_bridge.move_line2d_control_point(
+                    self.bezier_edit_component,
+                    self.dragging_control_point_id,
+                    world_pos['x'],
+                    world_pos['y']
+                )
+            else:  # Curve2D or Path2D
+                self.editor_bridge.move_curve2d_control_point(
+                    self.bezier_edit_component,
+                    self.dragging_control_point_id,
+                    world_pos['x'],
+                    world_pos['y']
+                )
+            self.last_mouse_pos = current_pos
+            return
+
+        # Handle gizmo dragging
         if self.gizmo_dragging and self.left_mouse_down:
             dpr = self.render_widget.devicePixelRatio()
             screen_x = current_pos.x() * dpr
             screen_y = current_pos.y() * dpr
-            self.editor_bridge.update_gizmo_drag(self.view_id, float(screen_x), float(screen_y))
+            keep_aspect = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            self.editor_bridge.update_gizmo_drag(self.view_id, float(screen_x), float(screen_y), keep_aspect)
             return
 
         if self.middle_mouse_down:
@@ -872,9 +1094,38 @@ class ViewportWidget(QWidget):
             import traceback
             traceback.print_exc()
 
+    def set_polygon_property_mode(self, enabled, type_name, property_name):
+        """Enable/disable click-to-draw for a component that stores a flat
+        FloatArray polygon (x0,y0,x1,y1,...) in `property_name`. Reuses the same
+        viewport machinery as collision polygon editing but writes through the
+        generic component-property API (so it works for NavigationRegion2D's
+        'outline', NavigationObstacle2D's 'vertices', etc.)."""
+        self.polygon_creation_mode = enabled
+        # The generic polygon path and the collision path are mutually exclusive.
+        self.active_collision_component = None
+
+        if enabled:
+            self.active_polygon_property = property_name
+            self.active_polygon_component = None
+            if self.selected_nodes and self.editor_bridge:
+                node = self.selected_nodes[0]
+                try:
+                    for component in self.editor_bridge.get_components(node):
+                        if component.get_type_name() == type_name:
+                            self.active_polygon_component = component
+                            break
+                except Exception as e:
+                    print(f"Error getting {type_name} component: {e}")
+        else:
+            self.active_polygon_component = None
+            self.active_polygon_property = None
+
     def set_polygon_creation_mode(self, enabled):
         """Enable or disable polygon creation mode"""
         self.polygon_creation_mode = enabled
+        # The collision path and the generic polygon path are mutually exclusive.
+        self.active_polygon_component = None
+        self.active_polygon_property = None
 
         if enabled:
             # Get the selected node's CollisionBody2D component
@@ -899,9 +1150,27 @@ class ViewportWidget(QWidget):
         else:
             self.active_collision_component = None
 
+    def _append_polygon_property_vertex(self, component, property_name, x, y):
+        """Append a vertex to a component's flat FloatArray polygon property via
+        the generic property API (triggers OnPropertyChanged so the component
+        re-bakes, and is undoable)."""
+        import json
+        try:
+            raw = self.editor_bridge.get_component_property(component, property_name)
+            verts = json.loads(raw) if raw else []
+            if not isinstance(verts, list):
+                verts = []
+        except Exception:
+            verts = []
+        verts.append(float(x))
+        verts.append(float(y))
+        self.editor_bridge.set_component_property(component, property_name, json.dumps(verts))
+
     def _add_polygon_vertex(self, screen_pos):
         """Add a vertex to the polygon being created"""
-        if not self.editor_bridge or not self.view_id or not self.active_collision_component:
+        if not self.editor_bridge or not self.view_id:
+            return
+        if not self.active_collision_component and not self.active_polygon_component:
             return
 
         try:
@@ -951,11 +1220,19 @@ class ViewportWidget(QWidget):
                 print(f"  - Local position: ({local_x:.2f}, {local_y:.2f})")
 
                 # Add vertex in local space
-                self.editor_bridge.add_collision_vertex(self.active_collision_component, local_x, local_y)
+                if self.active_polygon_component and self.active_polygon_property:
+                    self._append_polygon_property_vertex(
+                        self.active_polygon_component, self.active_polygon_property, local_x, local_y)
+                else:
+                    self.editor_bridge.add_collision_vertex(self.active_collision_component, local_x, local_y)
                 print(f"Added polygon vertex at local ({local_x:.2f}, {local_y:.2f})")
             else:
                 # Fallback: add in world space (shouldn't happen)
-                self.editor_bridge.add_collision_vertex(self.active_collision_component, world_pos['x'], world_pos['y'])
+                if self.active_polygon_component and self.active_polygon_property:
+                    self._append_polygon_property_vertex(
+                        self.active_polygon_component, self.active_polygon_property, world_pos['x'], world_pos['y'])
+                else:
+                    self.editor_bridge.add_collision_vertex(self.active_collision_component, world_pos['x'], world_pos['y'])
                 print(f"Added polygon vertex at world ({world_pos['x']:.2f}, {world_pos['y']:.2f})")
 
             # Emit signal to notify widget to refresh
@@ -963,6 +1240,160 @@ class ViewportWidget(QWidget):
 
         except Exception as e:
             print(f"Error adding polygon vertex: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def set_line_creation_mode(self, enabled):
+        """Enable or disable line creation mode (also works for Curve2D and Path2D)"""
+        print(f"[ViewportWidget] set_line_creation_mode called with enabled={enabled}")
+        self.line_creation_mode = enabled
+
+        if enabled:
+            # Get the selected node's Line2D, Curve2D, or Path2D component
+            if self.selected_nodes:
+                node = self.selected_nodes[0]
+                print(f"[ViewportWidget] Looking for Line2D/Curve2D/Path2D on node '{node.get_name()}'")
+                # Find Line2D, Curve2D, or Path2D on the node
+                if self.editor_bridge:
+                    try:
+                        components = self.editor_bridge.get_components(node)
+                        print(f"[ViewportWidget] Found {len(components)} components on node")
+                        for component in components:
+                            type_name = component.get_type_name()
+                            print(f"[ViewportWidget] Component: {type_name}")
+                            if type_name in ("Line2D", "Curve2D", "Path2D"):
+                                self.active_line_component = component
+                                print(f"[ViewportWidget] Found {type_name} component on node '{node.get_name()}'")
+                                break
+                        else:
+                            print(f"[ViewportWidget] No Line2D/Curve2D/Path2D component found on node '{node.get_name()}'")
+                            self.active_line_component = None
+                    except Exception as e:
+                        print(f"Error getting Line2D/Curve2D/Path2D component: {e}")
+                        import traceback
+                        traceback.print_exc()
+            else:
+                print(f"[ViewportWidget] No selected nodes!")
+        else:
+            self.active_line_component = None
+
+    def set_bezier_edit_component(self, component):
+        """Set the component for Bezier control point editing in viewport"""
+        self.bezier_edit_component = component
+
+    def _add_line_point(self, screen_pos):
+        """Add a point to the line/curve being created"""
+        if not self.editor_bridge or not self.view_id or not self.active_line_component:
+            return
+
+        try:
+            # Convert screen position to world position
+            dpr = self.render_widget.devicePixelRatio()
+            screen_x = screen_pos.x() * dpr
+            screen_y = screen_pos.y() * dpr
+
+            # Get world position from screen position (2D only)
+            world_pos = self.editor_bridge.screen_to_world_2d(self.view_id, float(screen_x), float(screen_y))
+
+            # Get component type to use correct API
+            comp_type = self.active_line_component.get_type_name()
+
+            # Convert world position to local position (relative to the node)
+            if self.selected_nodes:
+                node = self.selected_nodes[0]
+                # Get node's global position using EditorBridge
+                node_pos = self.editor_bridge.get_node_global_position(node)
+                rotation = self.editor_bridge.get_node_global_rotation(node)
+
+                # Convert world position to local position (subtract node position)
+                local_x = world_pos['x'] - node_pos['x']
+                local_y = world_pos['y'] - node_pos['y']
+
+                # Also need to account for node rotation if any
+                if abs(rotation) > 0.0001:
+                    # Rotate the local position back by the node's rotation
+                    import math
+                    cos_r = math.cos(-rotation)
+                    sin_r = math.sin(-rotation)
+                    rotated_x = local_x * cos_r - local_y * sin_r
+                    rotated_y = local_x * sin_r + local_y * cos_r
+                    local_x = rotated_x
+                    local_y = rotated_y
+
+                # Add point in local space using correct API
+                if comp_type == "Line2D":
+                    self.editor_bridge.add_line2d_point(self.active_line_component, local_x, local_y)
+                else:  # Curve2D or Path2D
+                    self.editor_bridge.add_curve2d_point(self.active_line_component, local_x, local_y)
+                print(f"Added {comp_type} point at local ({local_x:.2f}, {local_y:.2f})")
+            else:
+                # Fallback: add in world space (shouldn't happen)
+                if comp_type == "Line2D":
+                    self.editor_bridge.add_line2d_point(self.active_line_component, world_pos['x'], world_pos['y'])
+                else:  # Curve2D or Path2D
+                    self.editor_bridge.add_curve2d_point(self.active_line_component, world_pos['x'], world_pos['y'])
+                print(f"Added {comp_type} point at world ({world_pos['x']:.2f}, {world_pos['y']:.2f})")
+
+            # Emit signal to notify widget to refresh
+            self.line_point_added.emit()
+
+        except Exception as e:
+            print(f"Error adding line/curve point: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def set_curve3d_creation_mode(self, enabled):
+        """Enable or disable Curve3D/Path3D point creation in the 3D viewport"""
+        self.curve3d_creation_mode = enabled
+        if enabled and self.selected_nodes and self.editor_bridge:
+            node = self.selected_nodes[0]
+            try:
+                for component in self.editor_bridge.get_components(node):
+                    if component.get_type_name() in ("Curve3D", "Path3D"):
+                        self.active_curve3d_component = component
+                        break
+                else:
+                    self.active_curve3d_component = None
+            except Exception as e:
+                print(f"Error getting Curve3D/Path3D component: {e}")
+                self.active_curve3d_component = None
+        elif not enabled:
+            self.active_curve3d_component = None
+
+    def set_curve3d_edit_component(self, component):
+        """Set the active Curve3D/Path3D component for viewport handle editing"""
+        self.curve3d_edit_component = component
+
+    def _add_curve3d_point(self, screen_pos):
+        """Add a point to the Curve3D/Path3D being created, on a plane at the node's height"""
+        if not self.editor_bridge or not self.view_id or not self.active_curve3d_component:
+            return
+
+        try:
+            dpr = self.render_widget.devicePixelRatio()
+            screen_x = screen_pos.x() * dpr
+            screen_y = screen_pos.y() * dpr
+
+            # Project the click onto a horizontal plane at the owning node's height.
+            node_pos = {'x': 0.0, 'y': 0.0, 'z': 0.0}
+            if self.selected_nodes:
+                node_pos = self.editor_bridge.get_node_global_position(self.selected_nodes[0])
+
+            world_pos = self.editor_bridge.screen_to_world_3d(
+                self.view_id, float(screen_x), float(screen_y), float(node_pos.get('y', 0.0))
+            )
+
+            # Convert to the node's local space (position offset; assumes the
+            # path host is unrotated/unscaled, the editor-created default).
+            local_x = world_pos['x'] - node_pos.get('x', 0.0)
+            local_y = world_pos['y'] - node_pos.get('y', 0.0)
+            local_z = world_pos['z'] - node_pos.get('z', 0.0)
+
+            self.editor_bridge.add_curve3d_point(self.active_curve3d_component, local_x, local_y, local_z)
+            self.curve3d_point_added.emit()
+
+        except Exception as e:
+            print(f"Error adding Curve3D/Path3D point: {e}")
             import traceback
             traceback.print_exc()
 

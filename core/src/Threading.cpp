@@ -34,19 +34,6 @@ LockGuard::~LockGuard() {
     m_Mutex.Unlock();
 }
 
-void ConditionVariable::Wait(Mutex& mutex) {
-    std::unique_lock<std::mutex> lock(mutex.GetNativeMutex(), std::adopt_lock);
-    m_CondVar.wait(lock);
-    lock.release();
-}
-
-bool ConditionVariable::WaitFor(Mutex& mutex, int64_t timeoutMs) {
-    std::unique_lock<std::mutex> lock(mutex.GetNativeMutex(), std::adopt_lock);
-    auto result = m_CondVar.wait_for(lock, std::chrono::milliseconds(timeoutMs));
-    lock.release();
-    return result == std::cv_status::no_timeout;
-}
-
 void ConditionVariable::NotifyOne() {
     m_CondVar.notify_one();
 }
@@ -238,9 +225,9 @@ void ThreadPool::WorkerThread(size_t index) {
             try {
                 task();
             } catch (const std::exception& e) {
-
+                LOG_ERROR(LogCategory::Core, "ThreadPool: worker {} task threw: {}", index, e.what());
             } catch (...) {
-
+                LOG_ERROR(LogCategory::Core, "ThreadPool: worker {} task threw an unknown exception", index);
             }
             --m_ActiveTasks;
         }
@@ -254,9 +241,9 @@ ReadWriteLock::ReadWriteLock() : m_ReaderCount(0), m_WriterActive(false), m_Wait
 void ReadWriteLock::LockRead() {
     LockGuard lock(m_Mutex);
 
-    while (m_WriterActive || m_WaitingWriters > 0) {
-        m_ReadCondition.Wait(m_Mutex);
-    }
+    m_ReadCondition.Wait(m_Mutex, [this]() -> bool {
+        return !m_WriterActive.load() && m_WaitingWriters.load() == 0;
+    });
 
     ++m_ReaderCount;
 }
@@ -274,9 +261,9 @@ void ReadWriteLock::LockWrite() {
     LockGuard lock(m_Mutex);
     ++m_WaitingWriters;
 
-    while (m_ReaderCount > 0 || m_WriterActive) {
-        m_WriteCondition.Wait(m_Mutex);
-    }
+    m_WriteCondition.Wait(m_Mutex, [this]() -> bool {
+        return m_ReaderCount.load() == 0 && !m_WriterActive.load();
+    });
 
     --m_WaitingWriters;
     m_WriterActive = true;

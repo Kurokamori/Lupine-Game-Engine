@@ -2464,15 +2464,14 @@ class ScribblerTool(EditorPanel):
 
         file_menu.addSeparator()
 
-        # Save
+        # Save (Ctrl+S handled centrally by the main editor via handle_save to
+        # avoid an ambiguous shortcut overload with the editor's save action)
         save_action = QAction("Save", self)
-        save_action.setShortcut(QKeySequence.StandardKey.Save)
         save_action.triggered.connect(self._save_file)
         file_menu.addAction(save_action)
 
         # Save As
         save_as_action = QAction("Save As...", self)
-        save_as_action.setShortcut(QKeySequence("Ctrl+Shift+S"))
         save_as_action.triggered.connect(self._save_as_file)
         file_menu.addAction(save_as_action)
 
@@ -2945,6 +2944,16 @@ class ScribblerTool(EditorPanel):
                 self._load_image_file(file_path)
             else:
                 QMessageBox.warning(self, "Error", "Unsupported file format")
+
+    def handle_save(self) -> bool:
+        """Save the current canvas when Ctrl+S is pressed with this tool focused"""
+        self._save_file()
+        return True
+
+    def handle_save_as(self) -> bool:
+        """Save the current canvas to a new path when Ctrl+Shift+S is pressed"""
+        self._save_as_file()
+        return True
 
     def _save_file(self):
         """Save current file"""

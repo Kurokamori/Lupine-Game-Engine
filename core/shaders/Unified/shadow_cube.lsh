@@ -1,0 +1,45 @@
+#shader "ShadowCube"
+#description "Point light shadow cube map with linear depth"
+
+#begin properties
+    uniform mat4 u_ViewProjection;
+    uniform mat4 u_Model;
+    uniform sampler2D u_AlbedoTexture;
+    uniform int u_HasAlbedoTexture = 0;
+    uniform float u_AlphaCutoff = 0.0;
+    uniform vec3 u_LightPos = vec3(0.0);
+    uniform float u_LightRange = 10.0;
+#end properties
+
+#begin vertex
+    #input vec3 a_Position : POSITION 0
+    #input vec2 a_TexCoord : TEXCOORD0 1
+
+    #output vec2 v_TexCoord
+    #output vec3 v_WorldPos
+
+    void main() {
+        v_TexCoord = a_TexCoord;
+        vec4 worldPos = MUL(u_Model, vec4(a_Position, 1.0));
+        v_WorldPos = worldPos.xyz;
+        VERTEX_OUTPUT = MUL(u_ViewProjection, worldPos);
+    }
+#end vertex
+
+#begin fragment
+    #output float fragDepth
+
+    void main() {
+        if (u_HasAlbedoTexture == 1) {
+            float alpha = SAMPLE(u_AlbedoTexture, v_TexCoord).a;
+            if (alpha < u_AlphaCutoff) {
+                DISCARD;
+            }
+        }
+
+        float lightDistance = length(v_WorldPos - u_LightPos);
+        float linearDepth = lightDistance / u_LightRange;
+        linearDepth = clamp(linearDepth, 0.0, 1.0);
+        fragDepth = linearDepth;
+    }
+#end fragment

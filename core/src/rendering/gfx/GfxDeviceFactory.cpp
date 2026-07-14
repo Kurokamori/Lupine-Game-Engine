@@ -1,10 +1,22 @@
 #include "lupine/rendering/gfx/GfxDeviceFactory.hpp"
+#ifndef __EMSCRIPTEN__
 #include "lupine/rendering/backends/GfxDeviceOpenGL.hpp"
-#include "lupine/rendering/backends/GfxDeviceVulkan.hpp"
+#endif
+#ifdef LUPINE_HAS_VULKAN
+#include "lupine/rendering/backends/vulkan/GfxDeviceVulkan.hpp"
+#endif
+#ifndef __EMSCRIPTEN__
 #include "lupine/rendering/backends/GfxDeviceMetal.hpp"
+#endif
+#ifdef __EMSCRIPTEN__
 #include "lupine/rendering/backends/GfxDeviceWebGL.hpp"
+#endif
+#ifdef LUPINE_HAS_DIRECTX11
 #include "lupine/rendering/backends/GfxDeviceDX11.hpp"
+#endif
+#ifdef LUPINE_HAS_DIRECTX12
 #include "lupine/rendering/backends/GfxDeviceDX12.hpp"
+#endif
 #include "lupine/logger/Logger.hpp"
 
 #if defined(_WIN32)
@@ -18,27 +30,53 @@ namespace lupine {
 std::unique_ptr<IGfxDevice> GfxDeviceFactory::create(GraphicsBackend backend) {
     switch (backend) {
         case GraphicsBackend::OpenGL:
+#ifndef __EMSCRIPTEN__
             return std::make_unique<GfxDeviceOpenGL>();
+#else
+            LOG_ERROR(LogCategory::Render, "OpenGL not available in WebAssembly builds, use WebGL");
+            return nullptr;
+#endif
 
         case GraphicsBackend::Vulkan:
+#ifdef LUPINE_HAS_VULKAN
+            return std::make_unique<GfxDeviceVulkan>();
 
+            #else
+            
             return nullptr;
+#endif
 
         case GraphicsBackend::Metal:
-
+#ifdef LUPINE_HAS_METAL
+            return std::make_unique<GfxDeviceMetal>();
+#else
+            LOG_ERROR(LogCategory::Render, "Metal support not enabled in this build");
             return nullptr;
+#endif
 
         case GraphicsBackend::WebGL:
-
+#ifdef __EMSCRIPTEN__
+            return std::make_unique<GfxDeviceWebGL>();
+#else
+            LOG_ERROR(LogCategory::Render, "WebGL is only available in Emscripten builds");
             return nullptr;
+#endif
 
         case GraphicsBackend::DirectX11:
-
+#ifdef LUPINE_HAS_DIRECTX11
+            return std::make_unique<GfxDeviceDX11>();
+#else
+            LOG_ERROR(LogCategory::Render, "DirectX 11 support not enabled in this build");
             return nullptr;
+#endif
 
         case GraphicsBackend::DirectX12:
-
+#ifdef LUPINE_HAS_DIRECTX12
+            return std::make_unique<GfxDeviceDX12>();
+#else
+            LOG_ERROR(LogCategory::Render, "DirectX 12 support not enabled in this build");
             return nullptr;
+#endif
 
         default:
 
@@ -133,13 +171,33 @@ bool GfxDeviceFactory::isBackendAvailable(GraphicsBackend backend) {
             return false;
 #endif
 
-        case GraphicsBackend::DirectX11:
-        case GraphicsBackend::DirectX12:
-#if defined(_WIN32)
-            return false;
+        case GraphicsBackend::DirectX11: {
+#if defined(_WIN32) && defined(LUPINE_HAS_DIRECTX11)
+            // Check if D3D11 is available by attempting to load the DLL
+            HMODULE d3d11Lib = LoadLibraryA("d3d11.dll");
+            if (!d3d11Lib) {
+                return false;
+            }
+            FreeLibrary(d3d11Lib);
+            return true;
 #else
             return false;
 #endif
+        }
+
+        case GraphicsBackend::DirectX12: {
+#if defined(_WIN32) && defined(LUPINE_HAS_DIRECTX12)
+            // Check if D3D12 is available by attempting to load the DLL
+            HMODULE d3d12Lib = LoadLibraryA("d3d12.dll");
+            if (!d3d12Lib) {
+                return false;
+            }
+            FreeLibrary(d3d12Lib);
+            return true;
+#else
+            return false;
+#endif
+        }
 
         default:
             return false;

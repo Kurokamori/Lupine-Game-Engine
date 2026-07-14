@@ -2,11 +2,17 @@
 
 #include "lupine/core/Core.hpp"
 #include "lupine/math/Math.hpp"
+#include "lupine/math/Rect.hpp"
+#include "lupine/rendering/ResourceHandles.hpp"
+#include "lupine/asset/ImageAsset.hpp"
 #include <nlohmann/json.hpp>
 #include <string>
 #include <memory>
 
 namespace lupine {
+
+class RenderContext;
+
 namespace components {
 
 /**
@@ -53,6 +59,20 @@ public:
      * Load from .style file
      */
     static std::shared_ptr<StyleBox> LoadFromFile(const std::string& filepath);
+
+    /**
+     * Construct an empty StyleBox of the named concrete type
+     * ("StyleBoxFlat", "StyleBoxTexture", "StyleBoxLine", "StyleBoxEmpty").
+     * Returns nullptr for an unknown type name.
+     */
+    static std::shared_ptr<StyleBox> CreateByTypeName(const std::string& typeName);
+
+    /**
+     * Construct a concrete StyleBox from a serialized JSON document (reads its
+     * "type" field, builds the matching subclass, then Deserialize()s it).
+     * Returns nullptr if the type is missing/unknown.
+     */
+    static std::shared_ptr<StyleBox> CreateFromJson(const nlohmann::json& json);
 
     // ===== Content Margins (Padding) =====
     
@@ -283,6 +303,198 @@ private:
 
     // Material override
     std::string m_CustomShaderPath;
+};
+
+/**
+ * StyleBoxTexture - A 9-patch textured style box
+ *
+ * Equivalent to Godot's StyleBoxTexture. Draws a texture stretched as a 9-patch:
+ * the four corners stay fixed-size, the four edges stretch/tile along one axis,
+ * and the center fills the remaining area (optionally hidden via draw_center).
+ *
+ * Supports:
+ * - A source texture (res:// or physical path) and an optional source region
+ * - Per-side texture margins (the 9-patch slice insets, in texture pixels)
+ * - Per-side expand margins (grows the drawn box beyond the control rect)
+ * - A modulate color applied to the whole texture
+ * - Per-axis stretch mode (stretch / tile / tile-fit) for edges + center
+ */
+class StyleBoxTexture : public StyleBox {
+public:
+    enum class AxisStretchMode {
+        Stretch,  // Stretch the slice to fill the span
+        Tile,     // Repeat the slice at its native size
+        TileFit   // Repeat the slice, scaled so a whole number of tiles fit
+    };
+
+    StyleBoxTexture();
+    virtual ~StyleBoxTexture() = default;
+
+    std::string GetTypeName() const override { return "StyleBoxTexture"; }
+    std::shared_ptr<StyleBox> Clone() const override;
+    nlohmann::json Serialize() const override;
+    void Deserialize(const nlohmann::json& json) override;
+
+    // ===== Texture =====
+
+    const std::string& GetTexturePath() const { return m_TexturePath; }
+    void SetTexturePath(const std::string& path) { m_TexturePath = path; }
+
+    // Source region within the texture, in pixels. A zero-size region means
+    // "use the whole texture".
+    const math::Rect& GetRegionRect() const { return m_RegionRect; }
+    void SetRegionRect(const math::Rect& rect) { m_RegionRect = rect; }
+
+    const math::Color& GetModulateColor() const { return m_ModulateColor; }
+    void SetModulateColor(const math::Color& color) { m_ModulateColor = color; }
+
+    bool GetDrawCenter() const { return m_DrawCenter; }
+    void SetDrawCenter(bool draw) { m_DrawCenter = draw; }
+
+    // ===== Texture (9-patch) Margins =====
+
+    float GetTextureMarginLeft() const { return m_TextureMarginLeft; }
+    void SetTextureMarginLeft(float margin) { m_TextureMarginLeft = margin; }
+
+    float GetTextureMarginRight() const { return m_TextureMarginRight; }
+    void SetTextureMarginRight(float margin) { m_TextureMarginRight = margin; }
+
+    float GetTextureMarginTop() const { return m_TextureMarginTop; }
+    void SetTextureMarginTop(float margin) { m_TextureMarginTop = margin; }
+
+    float GetTextureMarginBottom() const { return m_TextureMarginBottom; }
+    void SetTextureMarginBottom(float margin) { m_TextureMarginBottom = margin; }
+
+    void SetTextureMarginAll(float margin) {
+        m_TextureMarginLeft = margin;
+        m_TextureMarginRight = margin;
+        m_TextureMarginTop = margin;
+        m_TextureMarginBottom = margin;
+    }
+
+    // ===== Expand Margins =====
+
+    float GetExpandMarginLeft() const { return m_ExpandMarginLeft; }
+    void SetExpandMarginLeft(float margin) { m_ExpandMarginLeft = margin; }
+
+    float GetExpandMarginRight() const { return m_ExpandMarginRight; }
+    void SetExpandMarginRight(float margin) { m_ExpandMarginRight = margin; }
+
+    float GetExpandMarginTop() const { return m_ExpandMarginTop; }
+    void SetExpandMarginTop(float margin) { m_ExpandMarginTop = margin; }
+
+    float GetExpandMarginBottom() const { return m_ExpandMarginBottom; }
+    void SetExpandMarginBottom(float margin) { m_ExpandMarginBottom = margin; }
+
+    void SetExpandMarginAll(float margin) {
+        m_ExpandMarginLeft = margin;
+        m_ExpandMarginRight = margin;
+        m_ExpandMarginTop = margin;
+        m_ExpandMarginBottom = margin;
+    }
+
+    // ===== Axis Stretch =====
+
+    AxisStretchMode GetAxisStretchHorizontal() const { return m_AxisStretchHorizontal; }
+    void SetAxisStretchHorizontal(AxisStretchMode mode) { m_AxisStretchHorizontal = mode; }
+
+    AxisStretchMode GetAxisStretchVertical() const { return m_AxisStretchVertical; }
+    void SetAxisStretchVertical(AxisStretchMode mode) { m_AxisStretchVertical = mode; }
+
+    static const char* AxisStretchModeToString(AxisStretchMode mode);
+    static AxisStretchMode AxisStretchModeFromString(const std::string& s);
+
+    // Lazily load the source image and upload it to the GPU, returning a valid
+    // texture handle (or an invalid handle if there is no texture / load fails).
+    // The result is cached and re-used across frames; it is invalidated when the
+    // texture path changes. Implemented in the StyleBox renderer translation unit.
+    TextureHandle EnsureGPUTexture(RenderContext& ctx) const;
+
+    int GetSourceTextureWidth() const;
+    int GetSourceTextureHeight() const;
+
+private:
+    std::string m_TexturePath;
+    math::Rect m_RegionRect = math::Rect(0.0f, 0.0f, 0.0f, 0.0f);
+    math::Color m_ModulateColor = math::Color::White();
+    bool m_DrawCenter = true;
+
+    float m_TextureMarginLeft = 0.0f;
+    float m_TextureMarginRight = 0.0f;
+    float m_TextureMarginTop = 0.0f;
+    float m_TextureMarginBottom = 0.0f;
+
+    float m_ExpandMarginLeft = 0.0f;
+    float m_ExpandMarginRight = 0.0f;
+    float m_ExpandMarginTop = 0.0f;
+    float m_ExpandMarginBottom = 0.0f;
+
+    AxisStretchMode m_AxisStretchHorizontal = AxisStretchMode::Stretch;
+    AxisStretchMode m_AxisStretchVertical = AxisStretchMode::Stretch;
+
+    // GPU texture cache (not serialized, not cloned). Populated on demand by
+    // EnsureGPUTexture() and keyed by m_UploadedPath so a path change re-uploads.
+    mutable asset::AssetRef<asset::ImageAsset> m_TextureAsset;
+    mutable TextureHandle m_TextureHandle;
+    mutable std::string m_UploadedPath;
+};
+
+/**
+ * StyleBoxLine - A single straight line style box
+ *
+ * Equivalent to Godot's StyleBoxLine. Draws one line spanning the control rect,
+ * either horizontally (through the vertical center) or vertically (through the
+ * horizontal center). Used for separators.
+ */
+class StyleBoxLine : public StyleBox {
+public:
+    StyleBoxLine();
+    virtual ~StyleBoxLine() = default;
+
+    std::string GetTypeName() const override { return "StyleBoxLine"; }
+    std::shared_ptr<StyleBox> Clone() const override;
+    nlohmann::json Serialize() const override;
+    void Deserialize(const nlohmann::json& json) override;
+
+    const math::Color& GetColor() const { return m_Color; }
+    void SetColor(const math::Color& color) { m_Color = color; }
+
+    // Extends the line past its endpoints (in pixels) at the start/end.
+    float GetGrowBegin() const { return m_GrowBegin; }
+    void SetGrowBegin(float grow) { m_GrowBegin = grow; }
+
+    float GetGrowEnd() const { return m_GrowEnd; }
+    void SetGrowEnd(float grow) { m_GrowEnd = grow; }
+
+    float GetThickness() const { return m_Thickness; }
+    void SetThickness(float thickness) { m_Thickness = thickness; }
+
+    bool GetVertical() const { return m_Vertical; }
+    void SetVertical(bool vertical) { m_Vertical = vertical; }
+
+private:
+    math::Color m_Color = math::Color::Black();
+    float m_GrowBegin = 1.0f;
+    float m_GrowEnd = 1.0f;
+    float m_Thickness = 1.0f;
+    bool m_Vertical = false;
+};
+
+/**
+ * StyleBoxEmpty - A style box that draws nothing
+ *
+ * Equivalent to Godot's StyleBoxEmpty. Contributes only its content margins
+ * (padding), drawing no background. Used to clear a default style.
+ */
+class StyleBoxEmpty : public StyleBox {
+public:
+    StyleBoxEmpty() = default;
+    virtual ~StyleBoxEmpty() = default;
+
+    std::string GetTypeName() const override { return "StyleBoxEmpty"; }
+    std::shared_ptr<StyleBox> Clone() const override;
+    nlohmann::json Serialize() const override { return StyleBox::Serialize(); }
+    void Deserialize(const nlohmann::json& json) override { StyleBox::Deserialize(json); }
 };
 
 } // namespace components

@@ -13,6 +13,22 @@ struct GizmoHitResult {
     GizmoAxis hitAxis = GizmoAxis::None;
     GizmoType hitOperation = GizmoType::Translation;  // Which operation (for "All" mode)
     float distance = 0.0f;  // Distance to hit point (for sorting)
+
+    // For 2D scale-rectangle handles: the local-space direction of the grabbed
+    // handle, e.g. (+1,+1) for the top-right corner, (-1, 0) for the left edge.
+    // A zero vector denotes a non-directional handle (uniform centre scale).
+    math::Vec2 handleDir = math::Vec2(0.0f, 0.0f);
+};
+
+/**
+ * A single coloured line segment emitted by the shared 2D gizmo geometry
+ * builder. Backends render these through their own gizmo-category line
+ * primitive so the visuals stay identical across graphics APIs.
+ */
+struct GizmoSegment {
+    math::Vec3 start;
+    math::Vec3 end;
+    math::Color color;
 };
 
 /**
@@ -42,8 +58,25 @@ public:
         const math::Mat4& projMatrix,
         float viewportWidth,
         float viewportHeight,
-        float rotation2D = 0.0f
+        float rotation2D = 0.0f,
+        const math::Vec2& halfExtents = math::Vec2(0.0f, 0.0f)
     );
+
+    /**
+     * Build the shared line-segment geometry for a 2D gizmo. Backends iterate the
+     * returned segments and submit them through their own gizmo-category line
+     * primitive, so the gizmo looks identical on every graphics backend.
+     */
+    static std::vector<GizmoSegment> BuildGizmo2DGeometry(const DebugGizmo& gizmo);
+
+    /**
+     * Recover the oriented half-extents of a rotated rectangle from its
+     * axis-aligned world bounding box. Given the world AABB half-size and the
+     * rectangle's rotation, this solves for the local half-extents (a, b) such
+     * that rotating a rectangle of those extents by `rotation` reproduces the
+     * AABB. Falls back to the AABB half-size near degenerate (±45°) angles.
+     */
+    static math::Vec2 SolveOrientedHalfExtents2D(const math::Vec2& aabbHalfSize, float rotation);
 
     /**
      * Test if a 3D ray hits a 3D gizmo

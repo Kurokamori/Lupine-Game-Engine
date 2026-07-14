@@ -148,6 +148,11 @@ struct DebugGizmo {
     GizmoAxis highlightAxis = GizmoAxis::None; // Which axis is hovered/selected
     float rotation2D = 0.0f;  // Rotation angle for 2D gizmos (in radians)
     Quat rotation3D = Quat::Identity();  // Rotation for 3D gizmos
+
+    // Oriented half-extents (in world units) of the selection's local bounding
+    // rectangle, used by the 2D scale gizmo to draw the manipulation rectangle.
+    // When zero, the scale gizmo falls back to a square derived from `size`.
+    Vec2 halfExtents = Vec2(0.0f, 0.0f);
 };
 
 /**

@@ -75,6 +75,12 @@ public:
     uint32_t GetMipLevels() const { return static_cast<uint32_t>(m_MipLevels.size()); }
     const MipLevel& GetMipLevel(uint32_t level) const;
     const std::vector<MipLevel>& GetAllMipLevels() const { return m_MipLevels; }
+
+    // Generate the full mipmap chain in place if it has not been generated yet
+    // (i.e. the image was loaded without mips). No-op when a chain already exists
+    // or the base level is 1x1. Used by the renderer to give 2D content textures a
+    // mip chain for smooth minification when the window is below the design size.
+    void EnsureMipmaps();
     
     // Raw data access (base level)
     const uint8_t* GetData() const;
@@ -88,7 +94,9 @@ public:
     
 private:
     void GenerateMipmaps();
+    void DilateAlphaBorders();
     void DeterminFormat();
+    void RefreshTrackedBytes();   // sum all mip levels and report to the profiler
     
     uint32_t m_Width{0};
     uint32_t m_Height{0};

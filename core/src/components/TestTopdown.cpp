@@ -56,7 +56,7 @@ void TestTopdown::OnReady() {
     }
 }
 
-void TestTopdown::OnInput(float deltaTime) {
+void TestTopdown::OnInput(float) {
     if (!m_Owner || !m_CharacterController) return;
 
     InputManager& input = InputManager::Get();
@@ -79,7 +79,7 @@ void TestTopdown::OnInput(float deltaTime) {
     m_CharacterController->SetVelocity(velocity);
 }
 
-void TestTopdown::OnPhysicsProcess(float deltaTime) {
+void TestTopdown::OnPhysicsProcess(float) {
 
 }
 

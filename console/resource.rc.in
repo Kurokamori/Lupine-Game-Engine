@@ -1,0 +1,7 @@
+// Lupine Console Icon Resource
+// This file is auto-generated from resource.rc.in
+// To customize the icon, set LUPINE_CONSOLE_ICON_PATH in CMake:
+//   cmake -DLUPINE_CONSOLE_ICON_PATH="path/to/your/icon.ico" ..
+
+// Icon with ID 1 is the main application icon
+1 ICON "@LUPINE_CONSOLE_ICON_PATH@"

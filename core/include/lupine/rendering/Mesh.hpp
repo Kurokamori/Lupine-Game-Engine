@@ -28,7 +28,7 @@ struct alignas(4) Vertex {
 
     // Skinning data (up to 4 bone influences per vertex)
     // Using Vec4 for alignment - x,y,z,w map to bone indices 0,1,2,3
-    Vec4 boneIDs = Vec4(-1.0f, -1.0f, -1.0f, -1.0f);     // offset 60, size 16
+    Vec4 boneIDs = Vec4(0.0f, 0.0f, 0.0f, 0.0f);          // offset 60, size 16 (0 not -1: DX12 root CBVs page-fault on index -1)
     Vec4 boneWeights = Vec4(0.0f, 0.0f, 0.0f, 0.0f);     // offset 76, size 16
     // Total: 92 bytes with 4-byte alignment
 };

@@ -10,11 +10,9 @@
 #define LUPINE_CAPI_PHYSICS2D_H
 
 #include "core/lc_core.h"
+#include "core/lc_node.h"
 #include "math/lc_math.h"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 /* ============================================================================
  * RigidBody2D Functions
@@ -426,8 +424,5 @@ LC_API LCResult lc_kinematic_body2d_move_by(LCComponentHandle component, LCVec2 
  */
 LC_API LCResult lc_kinematic_body2d_rotate_by(LCComponentHandle component, float delta_angle);
 
-#ifdef __cplusplus
-}
-#endif
 
 #endif /* LUPINE_CAPI_PHYSICS2D_H */

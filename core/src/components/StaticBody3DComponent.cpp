@@ -53,7 +53,29 @@ void StaticBody3DComponent::OnDestroy() {
     DestroyPhysicsBody();
 }
 
-void StaticBody3DComponent::OnPhysicsProcess(float deltaTime) {
+void StaticBody3DComponent::OnPhysicsWorldRebuild(PhysicsWorldRebuildPhase phase) {
+    // See Component::PhysicsWorldRebuildPhase. A static body owns no velocity, so there is
+    // nothing to save - it just needs its body back in the fresh world.
+    switch (phase) {
+        case PhysicsWorldRebuildPhase::SaveState:
+            break;
+
+        case PhysicsWorldRebuildPhase::RecreateBodies:
+            // The body died with the world: drop the stale handles without touching them.
+            m_PhysicsBody = nullptr;
+            m_BodyCreated = false;
+            CreatePhysicsBody();
+            break;
+
+        case PhysicsWorldRebuildPhase::AttachColliders:
+            if (m_PhysicsBody) {
+                SyncTransformToPhysics();
+            }
+            break;
+    }
+}
+
+void StaticBody3DComponent::OnPhysicsProcess(float) {
     if (!m_PhysicsBody) return;
 
     Vec3 linearVel = GetConstantLinearVelocity();
@@ -129,6 +151,8 @@ void StaticBody3DComponent::CreatePhysicsBody() {
 
         return;
     }
+
+    physicsWorld->SetBodyNode(m_PhysicsBodyId, m_Owner);
 
     m_BodyCreated = true;
 

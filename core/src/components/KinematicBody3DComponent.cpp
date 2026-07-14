@@ -52,7 +52,35 @@ void KinematicBody3DComponent::OnDestroy() {
     DestroyPhysicsBody();
 }
 
-void KinematicBody3DComponent::OnPhysicsProcess(float deltaTime) {
+void KinematicBody3DComponent::OnPhysicsWorldRebuild(PhysicsWorldRebuildPhase phase) {
+    // See Component::PhysicsWorldRebuildPhase: only reached by a component that outlives a
+    // scene swap, i.e. one inside an add_scene overlay.
+    switch (phase) {
+        case PhysicsWorldRebuildPhase::SaveState:
+            // The body holds the authoritative velocity; m_LinearVelocity is only the seed
+            // CreatePhysicsBody re-applies. Capture it before the body dies.
+            if (m_PhysicsBody) {
+                m_LinearVelocity = m_PhysicsBody->GetLinearVelocity();
+                m_AngularVelocity = m_PhysicsBody->GetAngularVelocity();
+            }
+            break;
+
+        case PhysicsWorldRebuildPhase::RecreateBodies:
+            // The body died with the world: drop the stale handles without touching them.
+            m_PhysicsBody = nullptr;
+            m_BodyCreated = false;
+            CreatePhysicsBody();
+            break;
+
+        case PhysicsWorldRebuildPhase::AttachColliders:
+            if (m_PhysicsBody) {
+                SyncTransformToPhysics();
+            }
+            break;
+    }
+}
+
+void KinematicBody3DComponent::OnPhysicsProcess(float) {
     if (!m_PhysicsBody) return;
 
     SyncTransformFromPhysics();
@@ -80,10 +108,11 @@ Vec3 KinematicBody3DComponent::GetLinearVelocity() const {
     if (m_PhysicsBody) {
         return m_PhysicsBody->GetLinearVelocity();
     }
-    return Vec3::Zero();
+    return m_LinearVelocity;
 }
 
 void KinematicBody3DComponent::SetLinearVelocity(const Vec3& velocity) {
+    m_LinearVelocity = velocity;
     if (m_PhysicsBody) {
         m_PhysicsBody->SetLinearVelocity(velocity);
     }
@@ -93,10 +122,11 @@ Vec3 KinematicBody3DComponent::GetAngularVelocity() const {
     if (m_PhysicsBody) {
         return m_PhysicsBody->GetAngularVelocity();
     }
-    return Vec3::Zero();
+    return m_AngularVelocity;
 }
 
 void KinematicBody3DComponent::SetAngularVelocity(const Vec3& omega) {
+    m_AngularVelocity = omega;
     if (m_PhysicsBody) {
         m_PhysicsBody->SetAngularVelocity(omega);
     }
@@ -138,6 +168,11 @@ void KinematicBody3DComponent::CreatePhysicsBody() {
 
         return;
     }
+
+    physicsWorld->SetBodyNode(m_PhysicsBodyId, m_Owner);
+
+    m_PhysicsBody->SetLinearVelocity(m_LinearVelocity);
+    m_PhysicsBody->SetAngularVelocity(m_AngularVelocity);
 
     UpdateGravityScale();
 

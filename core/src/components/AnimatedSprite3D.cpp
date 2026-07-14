@@ -1,6 +1,8 @@
 #include "lupine/components/AnimatedSprite3D.hpp"
+#include "lupine/asset/AssetDatabase.hpp"
 #include "lupine/logger/Logger.hpp"
 #include "lupine/rendering/RenderWorld.hpp"
+#include "lupine/rendering/TextureUpload.hpp"
 #include "lupine/core/Node.hpp"
 #include "lupine/math/AABB.hpp"
 
@@ -81,15 +83,12 @@ bool AnimatedSprite3D::GetFlipV() const {
     return GetPropertyValue<bool>("flipV");
 }
 
-const Color& AnimatedSprite3D::GetModulate() const {
-    static Color cachedColor;
+Color AnimatedSprite3D::GetModulate() const {
     const core::ComponentProperty* prop = m_CustomProperties.GetProperty("modulate");
     if (prop) {
-        cachedColor = prop->GetValue<Color>();
-        return cachedColor;
+        return prop->GetValue<Color>();
     }
-    static Color defaultColor = Color::White();
-    return defaultColor;
+    return Color::White();
 }
 
 BillboardMode AnimatedSprite3D::GetBillboard() const {
@@ -109,7 +108,18 @@ bool AnimatedSprite3D::GetDoubleSided() const {
 }
 
 void AnimatedSprite3D::SetAnimationFilePath(const std::string& filepath) {
-    SetPropertyValue<std::string>("animationFilePath", filepath);
+    // Convert to res:// path if possible
+    std::string resPath = filepath;
+    if (!filepath.empty() && !(filepath.size() >= 6 && filepath.substr(0, 6) == "res://")) {
+        auto& assetDb = asset::AssetDatabase::GetInstance();
+        if (assetDb.IsInitialized()) {
+            std::string converted = assetDb.ToResourcePath(filepath);
+            if (!converted.empty()) {
+                resPath = converted;
+            }
+        }
+    }
+    SetPropertyValue<std::string>("animationFilePath", resPath);
 
     m_TextureUploaded = false;
     m_TextureHandle = TextureHandle();
@@ -368,6 +378,7 @@ void AnimatedSprite3D::SetFrame(int frameIndex) {
     if (on_frame_changed) {
         on_frame_changed(m_CurrentFrameIndex);
     }
+    Emit("frame_changed", { m_CurrentFrameIndex });
 }
 
 void AnimatedSprite3D::UpdateAnimation(float deltaTime) {
@@ -428,6 +439,7 @@ void AnimatedSprite3D::AdvanceFrame() {
             if (on_animation_finished) {
                 on_animation_finished();
             }
+            Emit("animation_finished");
         }
     }
 
@@ -438,7 +450,15 @@ void AnimatedSprite3D::AdvanceFrame() {
         if (on_frame_changed) {
             on_frame_changed(m_CurrentFrameIndex);
         }
+        Emit("frame_changed", { m_CurrentFrameIndex });
     }
+}
+
+void AnimatedSprite3D::DefineSignals() {
+    RegisterSignal({"animation_finished", {}, "Emitted when a non-looping animation completes."});
+    RegisterSignal({"frame_changed",
+                    {{"frame", core::PropertyValueType::Int}},
+                    "Emitted when the current animation frame changes."});
 }
 
 void AnimatedSprite3D::UpdateCurrentFrameTexture() {
@@ -476,16 +496,9 @@ void AnimatedSprite3D::UploadTexture(RenderContext& ctx) {
         }
     }
 
-    TextureDesc desc;
-    desc.width = m_CurrentFrameTexture->GetWidth();
-    desc.height = m_CurrentFrameTexture->GetHeight();
-    desc.format = TextureFormat::RGBA8_SRGB;
-    desc.usage = TextureUsage::Sampled;
-    desc.initialData = m_CurrentFrameTexture->GetData();
-
     IGfxDevice* device = ctx.getDevice();
     if (device) {
-        m_TextureHandle = device->createTexture(desc);
+        m_TextureHandle = lupine::CreateTexture2DFromImage(device, *m_CurrentFrameTexture, TextureFormat::RGBA8_SRGB);
     }
 
     m_TextureUploaded = true;
@@ -687,6 +700,39 @@ AABB AnimatedSprite3D::getWorldBounds() const {
         globalPos - halfSize,
         globalPos + halfSize
     );
+}
+
+bool AnimatedSprite3D::OnAssetFileChanged(const std::string& changedPath, const std::string& resolvedChangedPath) {
+    std::string currentPath = GetAnimationFilePath();
+    if (currentPath.empty()) {
+        return false;
+    }
+
+    // Resolve our path for comparison
+    std::string resolvedCurrentPath;
+    auto& assetDb = AssetDatabase::GetInstance();
+    if (assetDb.IsInitialized()) {
+        resolvedCurrentPath = assetDb.ResolveAsset(currentPath);
+    }
+
+    // Check if this is our animation file
+    bool matches = (currentPath == changedPath) ||
+                   (!resolvedCurrentPath.empty() && !resolvedChangedPath.empty() &&
+                    resolvedCurrentPath == resolvedChangedPath);
+
+    if (matches) {
+
+        // Invalidate instance state - force reload on next update
+        m_TextureHandle = TextureHandle();
+        m_CurrentFrameTexture.Reset();
+        m_AnimationAsset.Reset();
+        m_CurrentClip = nullptr;
+        m_TextureUploaded = false;
+
+        return true;
+    }
+
+    return false;
 }
 
 }

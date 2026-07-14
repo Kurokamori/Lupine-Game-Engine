@@ -1,10 +1,11 @@
 #pragma once
 
 #include "lupine/core/Component.hpp"
+#include "lupine/core/LinkedProperty.hpp"
+#include "lupine/components/UIControl.hpp"
 #include "lupine/rendering/RenderWorld.hpp"
-#include "lupine/rendering/StyleBox.hpp"
+#include "lupine/components/StyleBox.hpp"
 #include "lupine/math/Math.hpp"
-#include "lupine/math/LinkedValue.hpp"
 #include <memory>
 #include <vector>
 
@@ -31,7 +32,7 @@ namespace components {
  *       void CalculateLayout() override { ... }
  *   };
  */
-class Container : public core::Component, public IRenderableComponent {
+class Container : public UIControl, public IRenderableComponent {
 public:
     enum class SizeMode {
         Fixed,          // Use explicit width/height
@@ -45,6 +46,46 @@ public:
         Vertical
     };
 
+    /**
+     * How a child is placed along a container's cross axis when the child's own size
+     * flags express no preference. Expressed in canvas terms: Begin is the LOW edge of
+     * the axis (left on X, bottom on Y) and End is the HIGH edge (right on X, top on Y).
+     */
+    enum class CrossAxisAlign {
+        Begin,
+        Center,
+        End,
+        Fill
+    };
+
+    /**
+     * How free space along a box container's MAIN axis is distributed when nothing expanded
+     * to consume it. The first four are the classic alignments; the last three are the
+     * distributed-spacing modes (flexbox's space-between / space-around / space-evenly),
+     * which no container offered at all.
+     *
+     * Expressed in READING order: Begin is the top of a VBox and the left of an HBox.
+     */
+    enum class MainAxisDistribution {
+        Begin = 0,
+        Center = 1,
+        End = 2,
+        Fill = 3,
+        SpaceBetween = 4,   // no space at the ends; equal gaps between children
+        SpaceAround = 5,    // each child gets equal space around it, so the end gaps are half
+        SpaceEvenly = 6     // the end gaps and the inter-child gaps are all equal
+    };
+
+    /**
+     * Resolve `freeSpace` into a leading offset and an extra gap to add between children.
+     *
+     * Free space is only ever positive when nothing expanded (an expanding child consumes it
+     * all), and negative free space -- children overflowing -- yields no offset and no gap
+     * rather than pulling them on top of each other.
+     */
+    static void DistributeFreeSpace(MainAxisDistribution mode, float freeSpace, size_t childCount,
+                                    float& outLeading, float& outExtraGap);
+
     Container();
     explicit Container(const std::string& name);
     virtual ~Container();
@@ -52,11 +93,16 @@ public:
     // ISerializable interface
     std::string GetTypeName() const override { return "Container"; }
     void DefineProperties() override;
+    const std::vector<ThemeBinding>& GetThemeBindings() const override;
 
     // Lifecycle hooks
     void OnAwake() override;
     void OnReady() override;
     void OnUpdate(float deltaTime) override;
+    void OnPropertyChanged(const std::string& propertyName, const nlohmann::json& newValue) override;
+
+    // Resolve our own rect, then arrange our children into it.
+    void PerformLayout() override;
 
     // Editor integration
     bool OnGizmoScale(float scaleDelta, int axis, bool is3D) override;
@@ -69,24 +115,42 @@ public:
     RenderLayer getRenderLayer() const override;
     SpatialType getSpatialType() const override;
 
+    // UIControl overrides: a Container is a control that arranges its children.
+    bool IsLayoutContainer() const override { return true; }
+    // Re-run our own layout and propagate up the container chain: a descendant's
+    // content size changing (e.g. a Label whose font finished loading) can change
+    // this container's content size, which in turn affects an outer container (a
+    // ScrollContainer's scroll range). Terminates at the first non-container ancestor.
+    void OnChildLayoutChanged() override { InvalidateLayout(); InvalidateParentContainerLayout(); }
+
+    // Clipping: when "clipChildren" is enabled the render traversal scissors all
+    // descendants to the container's content rect.
+    bool ClipsDescendants() const override { return GetClipChildren(); }
+    math::Rect GetClipRect() const override { return GetContentRect(); }
+    // The minimum size reported to a parent container is the size needed to fit children.
+    math::Vec2 GetContentMinSize() const override;
+
     // ========================================
     // Size Management
     // ========================================
 
-    float GetWidth() const;
+    float GetWidth() const override;
     void SetWidth(float width);
 
-    float GetHeight() const;
+    float GetHeight() const override;
     void SetHeight(float height);
 
-    math::Vec2 GetSize() const;
+    math::Vec2 GetSize() const override;
     void SetSize(const math::Vec2& size);
 
-    math::Vec2 GetMinSize() const;
-    void SetMinSize(const math::Vec2& minSize);
-
-    math::Vec2 GetMaxSize() const;
-    void SetMaxSize(const math::Vec2& maxSize);
+    // Min/max size constraints. These deliberately do NOT redeclare the (virtual)
+    // UIControl::GetMinSize()/GetMaxSize(): a container used to carry its own
+    // minSize/maxSize properties that shadowed the base ones, so the same object
+    // reported different limits through a Container* than through a UIControl*, and the
+    // anchor solver (which reads the base) silently ignored them. There is now one
+    // storage -- customMinSize/customMaxSize on UIControl -- and these setters write it.
+    void SetMinSize(const math::Vec2& minSize) { SetCustomMinSize(minSize); InvalidateLayout(); }
+    void SetMaxSize(const math::Vec2& maxSize) { SetCustomMaxSize(maxSize); InvalidateLayout(); }
 
     SizeMode GetHorizontalSizeMode() const;
     void SetHorizontalSizeMode(SizeMode mode);
@@ -138,7 +202,7 @@ public:
     // Visual Appearance
     // ========================================
 
-    const math::Color& GetBackgroundColor() const;
+    math::Color GetBackgroundColor() const;
     void SetBackgroundColor(const math::Color& color);
 
     float GetOpacity() const;
@@ -165,7 +229,7 @@ public:
     float GetBorderWidthBottom() const;
     void SetBorderWidthBottom(float width);
 
-    const math::Color& GetBorderColor() const;
+    math::Color GetBorderColor() const;
     void SetBorderColor(const math::Color& color);
 
     bool GetCornerRadiusLinked() const;
@@ -197,6 +261,20 @@ public:
     void InvalidateLayout();
     void ForceLayoutUpdate();
 
+    /**
+     * Run CalculateLayout() until the arrangement stops re-dirtying itself (bounded).
+     * An InvalidateLayout() raised from inside CalculateLayout() is honored rather than
+     * being cleared away underneath it.
+     */
+    void RunLayout();
+
+    /**
+     * True for properties that only change how the container paints and can never move
+     * or resize anything. Layout is not re-run for these, so e.g. a background-colour
+     * tween no longer re-lays-out the whole subtree every frame.
+     */
+    static bool IsPurelyVisualProperty(const std::string& propertyName);
+
     // ========================================
     // Rendering Properties
     // ========================================
@@ -207,8 +285,7 @@ public:
     int GetSortingOrder() const;
     void SetSortingOrder(int order);
 
-    bool GetUseUISpace() const;
-    void SetUseUISpace(bool useUISpace);
+    // GetUseUISpace/SetUseUISpace are provided by the UIControl base class.
 
     // ========================================
     // Child Management
@@ -264,6 +341,147 @@ protected:
     virtual void OnLayoutInvalidated();
 
     // ========================================
+    // Shared measure / arrange helpers
+    // ========================================
+
+    /**
+     * MEASURE: the intrinsic size a child wants, independent of any rect this container
+     * previously assigned it. For a UIControl child this is GetDesiredSize() (authored
+     * width/height floored to its content minimum); for a plain node it falls back to
+     * scanning components for width/height or size properties.
+     *
+     * This is the single implementation for the whole container family. It used to be
+     * copy-pasted into nine containers, eight of which scanned components and returned
+     * the FIRST one carrying width/height -- so a Label with width=0 (auto-size from
+     * text) measured as zero, and a node carrying both a Panel and a Label measured
+     * whichever component happened to be added first.
+     */
+    math::Vec2 GetChildSize(core::Node* child) const;
+
+    /**
+     * A child's OUTER margin, as (top, right, bottom, left) -- space this container reserves
+     * around it, over and above its size. Only a container child can carry one (`margin` is a
+     * Container property); everything else reports zero.
+     *
+     * GetChildSize() adds it to the child's measurement and SetChildRect() insets the arranged
+     * slot by it, which is what makes `margin` mean something. It used to affect NOTHING:
+     * GetOuterRect() had no callers in core, and the only code that read the margin was
+     * getWorldBounds(), which inflated the editor's selection box by it -- so `margin = 20`
+     * produced no visual change but made the selection rectangle 40px bigger than the panel
+     * and picked up clicks outside it.
+     */
+    math::Vec4 GetChildMargin(core::Node* child) const;
+
+    /**
+     * MEASURE (height-for-width): the height the child needs when constrained to
+     * `availableWidth`. Falls back to GetChildSize(child).y for controls whose height
+     * does not depend on their width.
+     */
+    float GetChildHeightForWidth(core::Node* child, float availableWidth) const;
+
+    /**
+     * ARRANGE: give the child its final global rect. This is the ONLY way a container
+     * may place a child.
+     *
+     * It routes through UIControl::SetRect(), which stores the rect as the child's
+     * resolved rect and moves the owning Node2D -- but deliberately does not touch the
+     * child's authored width/height properties. Containers used to write the arranged
+     * size back into those properties, which made children ratchet larger every frame
+     * (they could grow but never shrink) and serialized transient layout output into the
+     * saved scene, destroying the authored design-time size.
+     *
+     * Children with no UIControl fall back to positioning the Node2D and, only then,
+     * writing size properties -- they have nowhere else to store a resolved size.
+     */
+    void SetChildRect(core::Node* child, const math::Rect& globalRect) const;
+
+    // ========================================
+    // Per-child size-flag helpers (generic expand/fill support)
+    // ========================================
+
+    /**
+     * True if the child wants to expand along the given axis (vertical=true for the
+     * vertical axis). Honors UIControl size flags (SizeFlagBits::Expand) and the
+     * legacy Spacer "expand" property.
+     */
+    bool ChildWantsExpand(core::Node* child, bool vertical) const;
+
+    /**
+     * True if the child wants to fill the container's cross axis (UIControl
+     * SizeFlagBits::Fill on the given axis).
+     */
+    bool ChildWantsFill(core::Node* child, bool vertical) const;
+
+    /**
+     * Stretch ratio of a child for distributing expand space (UIControl
+     * sizeFlagsStretchRatio); returns 1.0 when the child has no UIControl.
+     */
+    float ChildStretchRatio(core::Node* child) const;
+
+    /**
+     * Distribute `availableMain` along a box container's MAIN axis and return each
+     * child's final extent, parallel to `children`.
+     *
+     * Matches Godot's BoxContainer model:
+     *  - non-expanding children keep their desired extent;
+     *  - expanding children share a pool made of (their own desired extents + all the
+     *    free space) split by stretch ratio -- NOT merely the leftover. Two children with
+     *    a desired 100 and ratios 1:3 in a 400px box therefore end up 100/300, where
+     *    splitting only the leftover would give 150/250;
+     *  - a child whose ratio share falls below its minimum, or rises above its maximum, is
+     *    pinned there and dropped from the pool, and the remainder is redistributed among
+     *    the rest (iterated to a fixed point).
+     *
+     * The returned extents are pure output -- callers must arrange with SetChildRect and
+     * must never write them back into the children's width/height properties.
+     */
+    std::vector<float> DistributeMainAxis(const std::vector<core::Node*>& children,
+                                          bool vertical,
+                                          float availableMain,
+                                          float separation) const;
+
+    /**
+     * Nine-way alignment of a `childSize` box inside `area`, returning the child's global
+     * rect. Expressed in canvas (Y-up) terms, so Top really is the top edge.
+     *
+     * Shared by every container that offers a nine-way child alignment. Each used to
+     * open-code it against `area.position.y` as though that were the top edge, so TopLeft
+     * landed bottom-left and all six Top/Bottom cases came out swapped.
+     */
+    static math::Rect AlignRectIn(const math::Rect& area, const math::Vec2& childSize,
+                                  CrossAxisAlign horizontal, CrossAxisAlign vertical);
+
+    /**
+     * The size a child should be given inside `available` when a container auto-fits it:
+     * the whole area, or the largest aspect-preserving box that fits when
+     * `maintainAspectRatio` is set. Returns the child's desired size unchanged when
+     * auto-fitting is off.
+     */
+    math::Vec2 FitChildSize(core::Node* child, const math::Vec2& available,
+                            bool autoFit, bool maintainAspectRatio) const;
+
+    /**
+     * Place a child along the container's CROSS axis (the axis the container does not
+     * stack along), honoring that child's per-child size flags on that axis:
+     *
+     *   Fill        -> take the whole extent
+     *   ShrinkBegin -> keep the desired extent, sit at the low edge  (left / bottom)
+     *   ShrinkCenter-> keep the desired extent, centered
+     *   ShrinkEnd   -> keep the desired extent, sit at the high edge (right / top)
+     *
+     * `axisBegin`/`axisExtent` describe the available span in MINIMUM-corner terms (so on
+     * the vertical axis `axisBegin` is the BOTTOM edge). `fallback` is the container-wide
+     * alignment used when the child expresses no opinion via its flags.
+     *
+     * Fill is honored per child here, which is what makes sizeFlagsHorizontal/Vertical
+     * mean something in every container rather than only in HBox/VBox.
+     */
+    void PlaceChildOnCrossAxis(core::Node* child, bool vertical,
+                               float axisBegin, float axisExtent, float desiredExtent,
+                               CrossAxisAlign fallback,
+                               float& outBegin, float& outExtent) const;
+
+    // ========================================
     // Internal Rendering Methods
     // ========================================
 
@@ -280,24 +498,83 @@ protected:
     math::Vec2 CalculateFinalSize() const;
 
     /**
-     * Apply size constraints (min/max)
+     * Apply size constraints (min/max) from customMinSize/customMaxSize, where a
+     * maximum of 0 on an axis means "unbounded" and the minimum always wins.
      */
     math::Vec2 ApplySizeConstraints(const math::Vec2& size) const;
 
     /**
-     * Calculate total size of all children (for FitChildren mode)
+     * The size needed to contain every visible child, for SizeMode::FitChildren.
+     *
+     * Derived from each child's INTRINSIC size (GetChildSize) laid out by this
+     * container's own rules, never from the global positions this container wrote on a
+     * previous pass -- deriving it from placed positions is a feedback loop, and the old
+     * implementation additionally hardcoded every child to 1x1 pixel.
+     *
+     * The base implementation returns the union of the children's desired sizes (correct
+     * for overlay-style containers such as Stack/Center). Stacking containers override
+     * GetMinimumSize(), which is what FitChildren actually consumes for them.
      */
-    math::Vec2 CalculateChildrenBounds() const;
+    virtual math::Vec2 CalculateChildrenBounds() const;
 
     /**
-     * Check if a point is within container bounds (for mouse interaction)
-     */
-    bool IsPointInside(const math::Vec2& point) const;
-
-    /**
-     * Sync internal state from properties
+     * Sync internal state from properties. Runs on every layout pass, and ends by calling
+     * SyncDerivedProperties() so the derived container's own cache is refreshed too.
      */
     void SyncFromProperties();
+
+    /**
+     * Re-read the DERIVED container's cached properties (alignment enums, spacing, ...)
+     * from the property registry.
+     *
+     * Every derived container used to cache these in members written only from OnAwake()
+     * and OnPropertyChanged(). The editor never calls OnAwake(), so a scene saved with
+     * e.g. Wrap.spacingX = 20 reopened and laid out with the CONSTRUCTOR default of 0
+     * until the property was nudged. Overriding this hook -- which SyncFromProperties()
+     * calls on every pass -- is the fix, and it is also the only place these members need
+     * to be read now: OnAwake() and OnPropertyChanged() just delegate here.
+     *
+     * Implementations should use the SyncCached* helpers below, which invalidate layout
+     * only when a value actually changed.
+     */
+    virtual void SyncDerivedProperties() {}
+
+    // Re-read `propertyName` into `cached`. Returns true, and invalidates layout, only if
+    // the value actually changed -- so calling these every pass is free when nothing moved.
+    bool SyncCachedFloat(const std::string& propertyName, float& cached);
+    bool SyncCachedInt(const std::string& propertyName, int& cached);
+    bool SyncCachedBool(const std::string& propertyName, bool& cached);
+    bool SyncCachedColor(const std::string& propertyName, math::Color& cached);
+
+    template <typename EnumT>
+    bool SyncCachedEnum(const std::string& propertyName, EnumT& cached) {
+        const EnumT value = static_cast<EnumT>(GetPropertyValue<int>(propertyName));
+        if (value == cached) {
+            return false;
+        }
+        cached = value;
+        InvalidateLayout();
+        return true;
+    }
+
+    /**
+     * Invalidate the cached minimum size of this container and of every ancestor
+     * container, so the next measure query recomputes. Called whenever anything that can
+     * change our content size changes (children, padding, separation, a descendant's
+     * text).
+     */
+    void InvalidateMeasureCache() const;
+
+    /**
+     * Adopt the CURRENT visible-child list as the baseline that PerformLayout() compares
+     * against, without invalidating.
+     *
+     * For a container whose own CalculateLayout() changes child visibility (TabContainer
+     * hides the inactive pages). Without this, PerformLayout() sees the list it itself
+     * just caused to change, treats it as an external edit, and re-invalidates -- a
+     * guaranteed redundant re-layout on the frame after every tab switch.
+     */
+    void SyncChildListCache();
 
 protected:
     // ========================================
@@ -308,14 +585,26 @@ protected:
     bool m_LayoutDirty;
     math::Vec2 m_CachedSize;
     math::Vec2 m_CachedPosition;
+    size_t m_CachedChildCount;
+    size_t m_CachedVisibleChildCount;
+
+    // Identity+order of the visible children at the last layout. Comparing only the
+    // COUNT (as this class used to) misses reordering and reparenting entirely: swapping
+    // two children of a VBox left them drawn in their old slots.
+    std::vector<core::Node*> m_CachedVisibleChildren;
+
+    // Memoized GetMinimumSize(). Mutable because GetContentMinSize() is a const query on
+    // the measure path; dropped by InvalidateMeasureCache().
+    mutable math::Vec2 m_CachedMinimumSize{0.0f, 0.0f};
+    mutable bool m_MeasureCacheValid = false;
 
     // Padding & Margin (stored as top, right, bottom, left)
-    math::LinkedValue<float> m_Padding;
-    math::LinkedValue<float> m_Margin;
+    core::LinkedProperty4 m_Padding;
+    core::LinkedProperty4 m_Margin;
 
     // Border & Corner Radius
-    math::LinkedValue<float> m_BorderWidth;
-    math::LinkedValue<float> m_CornerRadius;
+    core::LinkedProperty4 m_BorderWidth;
+    core::LinkedProperty4 m_CornerRadius;
 
     // Style
     std::shared_ptr<StyleBoxFlat> m_StyleBox;

@@ -1,0 +1,12 @@
+{
+    "lupine_extension": "1.0",
+    "name": "hello_component",
+    "description": "Example native C++ extension providing the OrbitMover component.",
+    "entry_symbol": "lupine_extension_init",
+    "binaries": {
+        "windows.x86_64": "bin/hello_component.dll",
+        "linux.x86_64": "bin/hello_component.so",
+        "macos.x86_64": "bin/hello_component.dylib",
+        "macos.arm64": "bin/hello_component.dylib"
+    }
+}

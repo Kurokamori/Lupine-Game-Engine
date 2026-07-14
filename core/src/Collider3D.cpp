@@ -1,7 +1,9 @@
 #include "lupine/physics3d/Collider3D.hpp"
 #include "lupine/physics3d/RigidBody3D.hpp"
+#include "lupine/physics3d/PhysicsShapeCache.hpp"
 #include "lupine/logger/Logger.hpp"
 #include <btBulletDynamicsCommon.h>
+#include <BulletCollision/CollisionShapes/btScaledBvhTriangleMeshShape.h>
 
 namespace lupine {
 namespace physics3d {
@@ -20,31 +22,35 @@ Collider3D::Collider3D(RigidBody3D* body, const core::UUID& id)
 
 Collider3D::~Collider3D() {
     if (m_Body) {
+        m_Body->DetachColliderShape(m_Shape);
         m_Body->RemoveCollider(this);
     }
 
-    if (m_Shape) {
-        delete m_Shape;
-    }
+    CleanupShape();
+}
+
+void Collider3D::OnOwningBodyDestroyed() {
+    m_Body = nullptr;
 }
 
 void Collider3D::SetOffset(const math::Vec3& offset) {
     m_Offset = offset;
-    RecreateShape();
+    if (m_Body) {
+        m_Body->RebuildCompoundShape();
+    }
 }
 
 void Collider3D::SetRotationOffset(const math::Quat& rotation) {
     m_RotationOffset = rotation;
-    RecreateShape();
+    if (m_Body) {
+        m_Body->RebuildCompoundShape();
+    }
 }
 
 void Collider3D::SetMaterial(const PhysicsMaterial3D& material) {
     m_Material = material;
-    if (m_Body && m_Body->GetBulletBody()) {
-        m_Body->GetBulletBody()->setFriction(material.friction);
-        m_Body->GetBulletBody()->setRestitution(material.restitution);
-        UpdateBodyMass();
-    }
+    ApplyMaterialToBody();
+    UpdateBodyMass();
 }
 
 void Collider3D::SetFriction(float friction) {
@@ -79,38 +85,81 @@ void Collider3D::SetIsSensor(bool isSensor) {
     }
 }
 
-bool Collider3D::IsEnabled() const {
-    if (m_Body && m_Body->GetBulletBody()) {
-        return m_Body->GetBulletBody()->isActive();
+void Collider3D::SetCollisionLayers(uint32_t layers) {
+    m_CollisionLayers = layers;
+    if (m_Body) {
+        // Use same value for both group and mask (objects collide if they share any layer)
+        m_Body->UpdateCollisionFiltering(layers, layers);
     }
-    return false;
+}
+
+bool Collider3D::IsEnabled() const {
+    return m_Enabled;
 }
 
 void Collider3D::SetEnabled(bool enabled) {
-    if (m_Body && m_Body->GetBulletBody()) {
-        if (enabled) {
-            m_Body->GetBulletBody()->activate(true);
-        } else {
-            m_Body->GetBulletBody()->setActivationState(DISABLE_SIMULATION);
-        }
+    if (m_Enabled == enabled) {
+        return;
+    }
+    m_Enabled = enabled;
+
+    if (!m_Body) {
+        return;
+    }
+
+    // A disabled collider drops out of the body's compound shape entirely, which is what
+    // "disabled" means for a collider. Freezing the whole body via DISABLE_SIMULATION (the
+    // previous behaviour) could not be undone by activate(), which refuses to leave that state.
+    m_Body->RebuildCompoundShape();
+
+    if (btRigidBody* body = m_Body->GetBulletBody()) {
+        body->forceActivationState(ACTIVE_TAG);
+        body->activate(true);
     }
 }
 
 void Collider3D::UpdateBodyMass() {
     if (m_Body) {
+        m_Body->RebuildCompoundShape();
+    }
+}
 
+void Collider3D::ApplyMaterialToBody() {
+    // Bullet stores friction and restitution per body, not per shape.
+    if (m_Body && m_Body->GetBulletBody()) {
+        m_Body->GetBulletBody()->setFriction(m_Material.friction);
+        m_Body->GetBulletBody()->setRestitution(m_Material.restitution);
+    }
+}
+
+void Collider3D::InitializeShape() {
+    CreateShape();
+    ApplyMaterialToBody();
+    if (m_Body) {
+        m_Body->RebuildCompoundShape();
     }
 }
 
 void Collider3D::RecreateShape() {
+    // Detach before destroying: CreateShape() may legitimately decline to produce a shape
+    // (degenerate hull, empty mesh), and the body must not keep a child pointing at freed memory.
+    if (m_Body) {
+        m_Body->DetachColliderShape(m_Shape);
+    }
+
+    CleanupShape();
+    CreateShape();
+    ApplyMaterialToBody();
+
+    if (m_Body) {
+        m_Body->RebuildCompoundShape();
+    }
+}
+
+void Collider3D::CleanupShape() {
     if (m_Shape) {
         delete m_Shape;
         m_Shape = nullptr;
-    }
-    CreateShape();
-
-    if (m_Body && m_Body->GetBulletBody() && m_Shape) {
-        m_Body->GetBulletBody()->setCollisionShape(m_Shape);
     }
 }
 
@@ -118,7 +167,7 @@ BoxCollider3D::BoxCollider3D(RigidBody3D* body, const core::UUID& id, const math
     : Collider3D(body, id)
     , m_Size(size)
 {
-    CreateShape();
+    InitializeShape();
 }
 
 void BoxCollider3D::SetSize(const math::Vec3& size) {
@@ -128,19 +177,13 @@ void BoxCollider3D::SetSize(const math::Vec3& size) {
 
 void BoxCollider3D::CreateShape() {
     m_Shape = new btBoxShape(btVector3(m_Size.x * 0.5f, m_Size.y * 0.5f, m_Size.z * 0.5f));
-
-    if (m_Body && m_Body->GetBulletBody()) {
-        m_Body->GetBulletBody()->setCollisionShape(m_Shape);
-        m_Body->GetBulletBody()->setFriction(m_Material.friction);
-        m_Body->GetBulletBody()->setRestitution(m_Material.restitution);
-    }
 }
 
 SphereCollider3D::SphereCollider3D(RigidBody3D* body, const core::UUID& id, float radius)
     : Collider3D(body, id)
     , m_Radius(radius)
 {
-    CreateShape();
+    InitializeShape();
 }
 
 void SphereCollider3D::SetRadius(float radius) {
@@ -150,12 +193,6 @@ void SphereCollider3D::SetRadius(float radius) {
 
 void SphereCollider3D::CreateShape() {
     m_Shape = new btSphereShape(m_Radius);
-
-    if (m_Body && m_Body->GetBulletBody()) {
-        m_Body->GetBulletBody()->setCollisionShape(m_Shape);
-        m_Body->GetBulletBody()->setFriction(m_Material.friction);
-        m_Body->GetBulletBody()->setRestitution(m_Material.restitution);
-    }
 }
 
 CapsuleCollider3D::CapsuleCollider3D(RigidBody3D* body, const core::UUID& id, float radius, float height)
@@ -163,7 +200,7 @@ CapsuleCollider3D::CapsuleCollider3D(RigidBody3D* body, const core::UUID& id, fl
     , m_Radius(radius)
     , m_Height(height)
 {
-    CreateShape();
+    InitializeShape();
 }
 
 void CapsuleCollider3D::SetRadius(float radius) {
@@ -177,14 +214,7 @@ void CapsuleCollider3D::SetHeight(float height) {
 }
 
 void CapsuleCollider3D::CreateShape() {
-
     m_Shape = new btCapsuleShape(m_Radius, m_Height);
-
-    if (m_Body && m_Body->GetBulletBody()) {
-        m_Body->GetBulletBody()->setCollisionShape(m_Shape);
-        m_Body->GetBulletBody()->setFriction(m_Material.friction);
-        m_Body->GetBulletBody()->setRestitution(m_Material.restitution);
-    }
 }
 
 CylinderCollider3D::CylinderCollider3D(RigidBody3D* body, const core::UUID& id, float radius, float height)
@@ -192,7 +222,7 @@ CylinderCollider3D::CylinderCollider3D(RigidBody3D* body, const core::UUID& id, 
     , m_Radius(radius)
     , m_Height(height)
 {
-    CreateShape();
+    InitializeShape();
 }
 
 void CylinderCollider3D::SetRadius(float radius) {
@@ -206,14 +236,7 @@ void CylinderCollider3D::SetHeight(float height) {
 }
 
 void CylinderCollider3D::CreateShape() {
-
     m_Shape = new btCylinderShape(btVector3(m_Radius, m_Height * 0.5f, m_Radius));
-
-    if (m_Body && m_Body->GetBulletBody()) {
-        m_Body->GetBulletBody()->setCollisionShape(m_Shape);
-        m_Body->GetBulletBody()->setFriction(m_Material.friction);
-        m_Body->GetBulletBody()->setRestitution(m_Material.restitution);
-    }
 }
 
 ConeCollider3D::ConeCollider3D(RigidBody3D* body, const core::UUID& id, float radius, float height)
@@ -221,7 +244,7 @@ ConeCollider3D::ConeCollider3D(RigidBody3D* body, const core::UUID& id, float ra
     , m_Radius(radius)
     , m_Height(height)
 {
-    CreateShape();
+    InitializeShape();
 }
 
 void ConeCollider3D::SetRadius(float radius) {
@@ -235,14 +258,7 @@ void ConeCollider3D::SetHeight(float height) {
 }
 
 void ConeCollider3D::CreateShape() {
-
     m_Shape = new btConeShape(m_Radius, m_Height);
-
-    if (m_Body && m_Body->GetBulletBody()) {
-        m_Body->GetBulletBody()->setCollisionShape(m_Shape);
-        m_Body->GetBulletBody()->setFriction(m_Material.friction);
-        m_Body->GetBulletBody()->setRestitution(m_Material.restitution);
-    }
 }
 
 PlaneCollider3D::PlaneCollider3D(RigidBody3D* body, const core::UUID& id, const math::Vec3& normal, float distance)
@@ -250,7 +266,7 @@ PlaneCollider3D::PlaneCollider3D(RigidBody3D* body, const core::UUID& id, const 
     , m_Normal(normal)
     , m_Distance(distance)
 {
-    CreateShape();
+    InitializeShape();
 }
 
 void PlaneCollider3D::SetNormal(const math::Vec3& normal) {
@@ -264,14 +280,7 @@ void PlaneCollider3D::SetDistance(float distance) {
 }
 
 void PlaneCollider3D::CreateShape() {
-
     m_Shape = new btStaticPlaneShape(btVector3(m_Normal.x, m_Normal.y, m_Normal.z), m_Distance);
-
-    if (m_Body && m_Body->GetBulletBody()) {
-        m_Body->GetBulletBody()->setCollisionShape(m_Shape);
-        m_Body->GetBulletBody()->setFriction(m_Material.friction);
-        m_Body->GetBulletBody()->setRestitution(m_Material.restitution);
-    }
 }
 
 MeshCollider3D::MeshCollider3D(RigidBody3D* body, const core::UUID& id, const std::vector<math::Vec3>& vertices, bool convex)
@@ -280,7 +289,7 @@ MeshCollider3D::MeshCollider3D(RigidBody3D* body, const core::UUID& id, const st
     , m_IsConvex(convex)
     , m_TriangleMesh(nullptr)
 {
-    CreateShape();
+    InitializeShape();
 }
 
 MeshCollider3D::MeshCollider3D(RigidBody3D* body, const core::UUID& id, const std::vector<math::Vec3>& vertices, const std::vector<uint32_t>& indices, bool convex)
@@ -290,14 +299,80 @@ MeshCollider3D::MeshCollider3D(RigidBody3D* body, const core::UUID& id, const st
     , m_IsConvex(convex)
     , m_TriangleMesh(nullptr)
 {
-    CreateShape();
+    InitializeShape();
+}
+
+MeshCollider3D::MeshCollider3D(RigidBody3D* body, const core::UUID& id, btBvhTriangleMeshShape* cachedShape,
+                               const std::string& meshPath, const math::Vec3& scale)
+    : Collider3D(body, id)
+    , m_IsConvex(false)
+    , m_TriangleMesh(nullptr)
+    , m_UsesCachedShape(true)
+    , m_CachedMeshPath(meshPath)
+    , m_CachedBvhShape(cachedShape)
+{
+    if (!cachedShape) {
+        
+        return;
+    }
+
+    // Check if we need scaling
+    bool needsScaling = (scale.x != 1.0f || scale.y != 1.0f || scale.z != 1.0f);
+
+    if (needsScaling) {
+        // Create a scaled wrapper around the cached BVH shape
+        // btScaledBvhTriangleMeshShape is very lightweight - it just applies a scale transform
+        btVector3 btScale(scale.x, scale.y, scale.z);
+        m_Shape = new btScaledBvhTriangleMeshShape(cachedShape, btScale);
+        m_UsesScaledWrapper = true;
+    } else {
+        // Use the cached shape directly
+        // NOTE: We don't own this shape - the cache does
+        m_Shape = cachedShape;
+        m_UsesScaledWrapper = false;
+    }
+
+    // Register with cache that we're using this shape
+    PhysicsShapeCache::Instance().AddRef(meshPath);
+
+    ApplyMaterialToBody();
+    if (m_Body) {
+        m_Body->RebuildCompoundShape();
+    }
 }
 
 MeshCollider3D::~MeshCollider3D() {
+    // Detach here as well as in ~Collider3D: this override runs first and nulls m_Shape,
+    // so the base destructor would have nothing left to detach.
+    if (m_Body) {
+        m_Body->DetachColliderShape(m_Shape);
+    }
+    CleanupShape();
+}
 
-    if (m_TriangleMesh) {
-        delete m_TriangleMesh;
-        m_TriangleMesh = nullptr;
+void MeshCollider3D::CleanupShape() {
+    if (m_UsesCachedShape) {
+        // Release our reference to the cached shape
+        PhysicsShapeCache::Instance().Release(m_CachedMeshPath);
+
+        // Only delete the scaled wrapper if we created one
+        // The underlying BVH is owned by the cache
+        if (m_UsesScaledWrapper && m_Shape) {
+            delete m_Shape;
+        }
+        m_Shape = nullptr;  // Don't let base class delete it
+        m_UsesCachedShape = false;
+        m_UsesScaledWrapper = false;
+        m_CachedMeshPath.clear();
+        m_CachedBvhShape = nullptr;
+    } else {
+        // Standard path - we own the triangle mesh
+        if (m_TriangleMesh) {
+            delete m_TriangleMesh;
+            m_TriangleMesh = nullptr;
+        }
+        // Let base class handle m_Shape deletion via Collider3D::CleanupShape
+        Collider3D::CleanupShape();
     }
 }
 
@@ -362,12 +437,6 @@ void MeshCollider3D::CreateShape() {
         }
 
         m_Shape = new btBvhTriangleMeshShape(m_TriangleMesh, true);
-    }
-
-    if (m_Body && m_Body->GetBulletBody()) {
-        m_Body->GetBulletBody()->setCollisionShape(m_Shape);
-        m_Body->GetBulletBody()->setFriction(m_Material.friction);
-        m_Body->GetBulletBody()->setRestitution(m_Material.restitution);
     }
 }
 

@@ -119,7 +119,7 @@ public:
     // ===== Direct StyleBox Property Access =====
 
     // Background
-    const math::Color& GetBackgroundColor() const;
+    math::Color GetBackgroundColor() const;
     void SetBackgroundColor(const math::Color& color);
 
     float GetOpacity() const;
@@ -146,7 +146,7 @@ public:
     void SetBorderEnabled(bool enabled);
 
     // Border color
-    const math::Color& GetBorderColor() const;
+    math::Color GetBorderColor() const;
     void SetBorderColor(const math::Color& color);
 
     // Corner radius
@@ -179,7 +179,7 @@ public:
     bool GetShadowEnabled() const;
     void SetShadowEnabled(bool enabled);
 
-    const math::Color& GetShadowColor() const;
+    math::Color GetShadowColor() const;
     void SetShadowColor(const math::Color& color);
 
     float GetShadowSize() const;

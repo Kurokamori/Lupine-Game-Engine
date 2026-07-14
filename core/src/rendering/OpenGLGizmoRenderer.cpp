@@ -4,7 +4,6 @@
 #include <windows.h>
 #endif
 #include <GL/glew.h>
-#include <GL/glu.h>
 #include <cmath>
 
 namespace lupine {
@@ -123,7 +122,7 @@ void OpenGLGizmoRenderer::begin2DGizmoOverlay(int viewportWidth, int viewportHei
     glMatrixMode(GL_PROJECTION);
     glPushMatrix();
     glLoadIdentity();
-    gluOrtho2D(0, viewportWidth, 0, viewportHeight);
+    glOrtho(0, viewportWidth, 0, viewportHeight, -1.0, 1.0);
     glMatrixMode(GL_MODELVIEW);
     glPushMatrix();
     glLoadIdentity();

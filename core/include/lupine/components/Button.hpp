@@ -6,10 +6,14 @@
 #include "lupine/math/Math.hpp"
 #include "lupine/rendering/ResourceHandles.hpp"
 #include "lupine/rendering/RenderWorld.hpp"
+#include "lupine/rendering/TextLayout.hpp"
 #include "lupine/components/StyleBox.hpp"
+#include "lupine/components/UIControl.hpp"
+#include "lupine/components/UIImageDraw.hpp"
 #include "lupine/audio/AudioManager.hpp"
 #include "lupine/asset/AudioAsset.hpp"
 #include "lupine/asset/FontAsset.hpp"
+#include "lupine/asset/ImageAsset.hpp"
 #include <string>
 #include <memory>
 #include <unordered_map>
@@ -89,7 +93,7 @@ struct ButtonStateTween {
  * - Scale modes (fixed, fit to text)
  * - Text formatting (word wrap, bold, italic)
  */
-class Button : public core::Component, public IRenderableComponent {
+class Button : public UIControl, public IRenderableComponent {
 public:
     Button();
     explicit Button(const std::string& name);
@@ -98,6 +102,10 @@ public:
     // ISerializable interface
     std::string GetTypeName() const override { return "Button"; }
     void DefineProperties() override;
+    void DefineSignals() override;
+
+    // Theme: background/border/font colours, font size + uniform corner radius.
+    const std::vector<ThemeBinding>& GetThemeBindings() const override;
 
     // Lifecycle hooks
     void OnAwake() override;
@@ -106,16 +114,28 @@ public:
     void OnUpdate(float deltaTime) override;
     void OnRender() override;
 
+    // Pointer arbitration: a button is opaque to the cursor and hit-tests with its
+    // own center-pivot bounds, so overlapping buttons don't all react to one click.
+    bool ConsumesPointerInput() const override { return true; }
+    bool ContainsCanvasPoint(const math::Vec2& point) const override { return IsMouseOver(point); }
+
     // Editor gizmo hooks
     bool OnGizmoScale(float scaleDelta, int axis, bool is3D) override;
 
+    // Asset hot-reload support
+    bool OnAssetFileChanged(const std::string& changedPath, const std::string& resolvedChangedPath) override;
+
     // ===== Size Properties =====
-    
-    float GetWidth() const;
+    // Width/height keep button-specific scale-mode logic (FitToText). The
+    // width/height properties themselves are registered by the UIControl base.
+    float GetWidth() const override;
     void SetWidth(float width);
 
-    float GetHeight() const;
+    float GetHeight() const override;
     void SetHeight(float height);
+
+    // Content minimum size = measured text + text padding (used by containers/anchors).
+    math::Vec2 GetContentMinSize() const override;
 
     // ===== Layer Properties =====
     
@@ -126,9 +146,7 @@ public:
     void SetSortingOrder(int order);
 
     // ===== UI Space =====
-    
-    bool GetUseUISpace() const;
-    void SetUseUISpace(bool useUISpace);
+    // GetUseUISpace/SetUseUISpace are provided by the UIControl base class.
 
     // ===== Button State =====
     
@@ -155,11 +173,33 @@ public:
     void SetBaseStyleBox(std::shared_ptr<StyleBox> styleBox);
 
     // Background
-    const math::Color& GetBackgroundColor() const;
+    math::Color GetBackgroundColor() const;
     void SetBackgroundColor(const math::Color& color);
 
     float GetOpacity() const;
     void SetOpacity(float opacity);
+
+    // Background image (themeable). Drawn over the flat background fill, tinted by the
+    // current state modulation + opacity. Empty path = flat-color background only.
+    std::string GetBackgroundImagePath() const;
+    void SetBackgroundImagePath(const std::string& path);
+
+    UIImageStretchMode GetBackgroundImageStretchMode() const;
+    void SetBackgroundImageStretchMode(UIImageStretchMode mode);
+
+    // Nine-slice config for the background image (used when stretch mode == NineSlice).
+    // Margins are in SOURCE texture pixels: x=left, y=top, z=right, w=bottom.
+    math::Vec4 GetNineSliceMargins() const;
+    void SetNineSliceMargins(const math::Vec4& margins);
+
+    UINineSliceAxisMode GetNineSliceAxisHorizontal() const;
+    void SetNineSliceAxisHorizontal(UINineSliceAxisMode mode);
+
+    UINineSliceAxisMode GetNineSliceAxisVertical() const;
+    void SetNineSliceAxisVertical(UINineSliceAxisMode mode);
+
+    bool GetNineSliceDrawCenter() const;
+    void SetNineSliceDrawCenter(bool drawCenter);
 
     // Border width
     bool GetBorderWidthLinked() const;
@@ -176,7 +216,7 @@ public:
     void SetBorderEnabled(bool enabled);
 
     // Border color
-    const math::Color& GetBorderColor() const;
+    math::Color GetBorderColor() const;
     void SetBorderColor(const math::Color& color);
 
     // Corner radius
@@ -202,11 +242,24 @@ public:
     float GetFontSize() const;
     void SetFontSize(float size);
 
-    const math::Color& GetFontColor() const;
+    math::Color GetFontColor() const;
     void SetFontColor(const math::Color& color);
 
     bool GetWordWrap() const;
     void SetWordWrap(bool wrap);
+
+    // Text alignment inside the button's content box. A Button previously had none: the text
+    // was hard-centered by a hand-rolled glyph loop and there was no way to left-align it.
+    TextHAlign GetTextHAlign() const;
+    void SetTextHAlign(TextHAlign align);
+
+    TextVAlign GetTextVAlign() const;
+    void SetTextVAlign(TextVAlign align);
+
+    // Extra pixels between wrapped/multiline rows. Present on Label/RichTextLabel/TextEdit,
+    // and missing here until now.
+    float GetLineSpacing() const;
+    void SetLineSpacing(float spacing);
 
     // ===== Per-State Modulation (Automatic Mode) =====
 
@@ -257,6 +310,11 @@ private:
     // Sync internal state from properties
     void SyncFromProperties();
 
+    // Resolve per-state modulation + tween from the theme (falling back to this
+    // control's own property values / overrides). Called from OnAwake and each
+    // SyncFromProperties so theme edits apply live.
+    void LoadThemedStateData();
+
     // Update mouse interaction
     void UpdateMouseInteraction(float deltaTime);
 
@@ -278,11 +336,31 @@ private:
     // Calculate button size based on scale mode
     math::Vec2 CalculateButtonSize() const;
 
-    // Calculate text size
+    // Effective on-screen size: in Fixed scale mode this is the resolved (anchor-driven)
+    // rect, so the button stretches with anchors like any UIControl; in FitToText /
+    // FitToTextWidth the text-fit size wins on the fitted axis ("fit to text" overrides
+    // anchoring). Used for rendering, world bounds, and mouse hit-testing.
+    math::Vec2 GetEffectiveSize() const;
+
+    // Calculate text size (through TextLayout, so wrap/line-spacing/multiline all count)
     math::Vec2 CalculateTextSize() const;
+
+    // The box the label is laid out inside: the button's rect (centered on `center`) inset by
+    // the content margins -- textPadding and/or the themed StyleBox's content margins.
+    math::Rect GetTextBoxRect(const math::Vec2& center) const;
+
+    // Shared TextLayout parameters for both the measure and the draw path, so the two can
+    // never disagree. `boxSize` is passed in rather than read, so measuring cannot recurse
+    // into the sizing it feeds.
+    TextLayoutParams BuildLayoutParams(const math::Vec2& boxSize) const;
 
     // Render the button background
     void RenderBackground(RenderContext& ctx, const math::Vec2& position, const math::Vec2& size, float rotation);
+
+    // Render the optional background image (lazily loads/uploads the texture). Drawn
+    // over the flat fill, tinted by the supplied color (state modulation * opacity).
+    void RenderBackgroundImage(RenderContext& ctx, const math::Vec2& position, const math::Vec2& size,
+                               float rotation, const math::Color& tint);
 
     // Regenerate the text mesh
     void RegenerateTextMesh(RenderContext& ctx, const math::Vec2& position, const math::Vec2& size);
@@ -330,6 +408,11 @@ private:
     math::Vec2 m_TweenStartPositionOffset{0.0f, 0.0f};
     float m_TweenProgress{0.0f};
     bool m_IsTweening{false};
+
+    // Background image rendering
+    asset::AssetRef<asset::ImageAsset> m_BackgroundImageAsset;
+    TextureHandle m_BackgroundImageHandle;
+    std::string m_CurrentBackgroundImagePath;
 
     // Font rendering
     asset::AssetRef<asset::FontAsset> m_FontAsset;

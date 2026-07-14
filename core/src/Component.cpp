@@ -1,7 +1,9 @@
 #include "lupine/core/Component.hpp"
 #include "lupine/core/Node.hpp"
 #include "lupine/core/PropertyDescriptor.hpp"
+#include "lupine/asset/AssetDatabase.hpp"
 #include "lupine/logger/Logger.hpp"
+#include "lupine/rendering/FontBaker.hpp"
 
 namespace lupine {
 namespace core {
@@ -15,6 +17,16 @@ Component::Component(const std::string& name)
 }
 
 Component::~Component() {
+}
+
+void Component::NotifyRenderStateChanged() {
+    if (m_Owner) {
+        m_Owner->MarkRenderDirty();
+    }
+}
+
+std::vector<std::string> Component::GetImplementedInterfaces() const {
+    return InterfaceRegistry::GetInstance().GetTypeInterfaces(GetTypeName());
 }
 
 void Component::RegisterProperties() {
@@ -204,9 +216,61 @@ nlohmann::json Component::Serialize() const {
 
     if (!m_CustomProperties.GetProperties().empty()) {
         json["properties"] = m_CustomProperties.SerializeProperties();
+
+        // "name" and "enabled" are registered on the ISerializable property list, not on
+        // m_CustomProperties, so this branch would otherwise drop them - and nearly every
+        // gameplay component defines custom properties. Deserialize reads both back from here.
+        // A component that declares its own property under either name keeps it.
+        nlohmann::json& properties = json["properties"];
+        if (!properties.contains("name")) {
+            properties["name"] = m_Name;
+        }
+        if (!properties.contains("enabled")) {
+            properties["enabled"] = m_Enabled;
+        }
     } else {
 
         json = core::ISerializable::Serialize();
+    }
+
+    // Add asset UUIDs for file path properties (for robust asset referencing)
+    auto& assetDb = asset::AssetDatabase::GetInstance();
+    if (assetDb.IsInitialized()) {
+        nlohmann::json assetUuids = nlohmann::json::object();
+
+        for (const auto& desc : m_CustomProperties.GetPropertyDescriptors()) {
+            // Check if this is a file property
+            if (desc.hint.type == PropertyHintType::File) {
+                auto prop = m_CustomProperties.GetProperty(desc.name);
+                if (prop) {
+                    std::string path = prop->GetValue<std::string>();
+                    if (!path.empty()) {
+                        // Get UUID for this asset path
+                        const auto* meta = assetDb.GetAssetByPath(path);
+                        if (meta && meta->uuid.IsValid()) {
+                            assetUuids[desc.name] = meta->uuid.ToString();
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!assetUuids.empty()) {
+            json["asset_uuids"] = assetUuids;
+        }
+    }
+
+    // Persist declarative (object+method) signal connections originating from
+    // this component (e.g. a Button's "pressed" wired to a handler node).
+    SignalObject::TargetResolveFn resolver = [](SignalObject* target) -> SignalObject::TargetLocator {
+        if (Node* n = dynamic_cast<Node*>(target)) {
+            return { n->GetUUID().ToString(), n->GetPath() };
+        }
+        return {};
+    };
+    nlohmann::json connections = SerializeConnections(resolver);
+    if (!connections.empty()) {
+        json["connections"] = connections;
     }
 
     return json;
@@ -234,15 +298,114 @@ void Component::Deserialize(const nlohmann::json& json) {
             if (props.contains("enabled") && props["enabled"].is_boolean()) {
                 m_Enabled = props["enabled"].get<bool>();
             }
+            if (props.contains("name") && props["name"].is_string()) {
+                m_Name = props["name"].get<std::string>();
+            }
+        }
+
+        // Resolve asset paths using UUIDs for robust asset referencing
+        // This ensures assets can be found even if moved/renamed
+        auto& assetDb = asset::AssetDatabase::GetInstance();
+        if (assetDb.IsInitialized() && json.contains("asset_uuids")) {
+            const auto& assetUuids = json["asset_uuids"];
+
+            for (const auto& desc : m_CustomProperties.GetPropertyDescriptors()) {
+                if (desc.hint.type == PropertyHintType::File) {
+                    auto prop = m_CustomProperties.GetProperty(desc.name);
+                    if (prop && assetUuids.contains(desc.name)) {
+                        std::string uuidStr = assetUuids[desc.name].get<std::string>();
+                        core::UUID uuid = core::UUID::FromString(uuidStr);
+
+                        if (uuid.IsValid()) {
+                            // Try to resolve path from UUID
+                            const auto* meta = assetDb.GetAssetByUUID(uuid);
+                            if (meta && !meta->path.empty()) {
+                                // UUID resolved successfully - update path
+                                prop->SetValue<std::string>(meta->path);
+                            }
+                            // If UUID didn't resolve, keep the path from deserialization
+                        }
+                    }
+                }
+            }
         }
     } else {
 
         core::ISerializable::Deserialize(json);
     }
+
+    // Stash declarative connections; resolved once the tree is built.
+    if (json.contains("connections")) {
+        LoadConnectionData(json["connections"]);
+    }
 }
 
 std::vector<core::PropertyDescriptor> Component::GetPropertyDescriptors() const {
     return m_CustomProperties.GetPropertyDescriptors();
+}
+
+bool Component::OnAssetFileChanged(const std::string& changedPath, const std::string& resolvedChangedPath) {
+    bool affected = false;
+
+    // Get the asset database for path resolution
+    auto& assetDb = asset::AssetDatabase::GetInstance();
+
+    // Iterate through all property descriptors
+    auto descriptors = m_CustomProperties.GetPropertyDescriptors();
+    for (const auto& desc : descriptors) {
+        // Only check file-type properties
+        if (desc.hint.type != PropertyHintType::File) {
+            continue;
+        }
+
+        // Only string properties can hold file paths
+        if (desc.type != PropertyValueType::String) {
+            continue;
+        }
+
+        // Get current property value
+        auto prop = m_CustomProperties.GetProperty(desc.name);
+        if (!prop) continue;
+
+        std::string propValue = prop->GetValue<std::string>();
+        if (propValue.empty()) continue;
+
+        // Resolve the property path for comparison
+        std::string resolvedPropPath;
+        if (assetDb.IsInitialized()) {
+            resolvedPropPath = assetDb.ResolveAsset(propValue);
+        }
+
+        // Check if this property references the changed file
+        bool matches = false;
+        if (propValue == changedPath) {
+            matches = true;
+        } else if (!resolvedPropPath.empty() && !resolvedChangedPath.empty() &&
+                   resolvedPropPath == resolvedChangedPath) {
+            matches = true;
+        }
+
+        if (matches) {
+
+            // Trigger reload by clearing and re-setting the property
+            // This forces the component to reload the asset from disk
+            prop->SetValue<std::string>("");
+            prop->SetValue<std::string>(propValue);
+
+            affected = true;
+        }
+    }
+
+    return affected;
+}
+
+bool Component::ConsumeFontOversampleChanged() {
+    uint64_t generation = GetFontOversampleGeneration();
+    if (generation != m_FontOversampleGenSeen) {
+        m_FontOversampleGenSeen = generation;
+        return true;
+    }
+    return false;
 }
 
 }

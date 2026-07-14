@@ -4,8 +4,10 @@
 #include "lupine/rendering/RenderWorld.hpp"
 #include "lupine/rendering/Mesh.hpp"
 #include "lupine/rendering/gfx/IGfxDevice.hpp"
+#include "lupine/rendering/TextureUpload.hpp"
 #include "lupine/rendering/gfx/GfxDescriptors.hpp"
 #include "lupine/rendering/Font.hpp"
+#include "lupine/asset/AssetDatabase.hpp"
 #include "lupine/logger/Logger.hpp"
 #include <algorithm>
 #include <sstream>
@@ -325,10 +327,8 @@ void ProgressBar3D::SetBackgroundTexturePath(const std::string& path) {
     SetPropertyValue<std::string>("backgroundTexturePath", path);
 }
 
-const Color& ProgressBar3D::GetBackgroundColor() const {
-    static Color cachedColor;
-    cachedColor = GetPropertyValue<Color>("backgroundColor");
-    return cachedColor;
+Color ProgressBar3D::GetBackgroundColor() const {
+    return GetPropertyValue<Color>("backgroundColor");
 }
 
 void ProgressBar3D::SetBackgroundColor(const Color& color) {
@@ -345,10 +345,8 @@ void ProgressBar3D::SetFillTexturePath(const std::string& path) {
     SetPropertyValue<std::string>("fillTexturePath", path);
 }
 
-const Color& ProgressBar3D::GetFillColor() const {
-    static Color cachedColor;
-    cachedColor = GetPropertyValue<Color>("fillColor");
-    return cachedColor;
+Color ProgressBar3D::GetFillColor() const {
+    return GetPropertyValue<Color>("fillColor");
 }
 
 void ProgressBar3D::SetFillColor(const Color& color) {
@@ -365,10 +363,8 @@ void ProgressBar3D::SetBorderTexturePath(const std::string& path) {
     SetPropertyValue<std::string>("borderTexturePath", path);
 }
 
-const Color& ProgressBar3D::GetBorderColor() const {
-    static Color cachedColor;
-    cachedColor = GetPropertyValue<Color>("borderColor");
-    return cachedColor;
+Color ProgressBar3D::GetBorderColor() const {
+    return GetPropertyValue<Color>("borderColor");
 }
 
 void ProgressBar3D::SetBorderColor(const Color& color) {
@@ -403,10 +399,8 @@ void ProgressBar3D::SetValueFontSize(float size) {
     m_TextMeshNeedsRegeneration = true;
 }
 
-const Color& ProgressBar3D::GetValueColor() const {
-    static Color cachedColor;
-    cachedColor = GetPropertyValue<Color>("valueColor");
-    return cachedColor;
+Color ProgressBar3D::GetValueColor() const {
+    return GetPropertyValue<Color>("valueColor");
 }
 
 void ProgressBar3D::SetValueColor(const Color& color) {
@@ -652,13 +646,7 @@ void ProgressBar3D::buildDrawCommands(RenderContext& ctx) {
     }
 
     if (!m_BackgroundTextureHandle.isValid() && m_BackgroundTextureAsset.IsValid() && m_BackgroundTextureAsset->IsLoaded()) {
-        TextureDesc desc;
-        desc.width = m_BackgroundTextureAsset->GetWidth();
-        desc.height = m_BackgroundTextureAsset->GetHeight();
-        desc.format = TextureFormat::RGBA8_SRGB;
-        desc.usage = TextureUsage::Sampled;
-        desc.initialData = m_BackgroundTextureAsset->GetData();
-        m_BackgroundTextureHandle = ctx.getDevice()->createTexture(desc);
+        m_BackgroundTextureHandle = lupine::CreateTexture2DFromImage(ctx.getDevice(), *m_BackgroundTextureAsset, TextureFormat::RGBA8_SRGB);
     }
 
     std::string fillTexPath = GetFillTexturePath();
@@ -675,13 +663,7 @@ void ProgressBar3D::buildDrawCommands(RenderContext& ctx) {
     }
 
     if (!m_FillTextureHandle.isValid() && m_FillTextureAsset.IsValid() && m_FillTextureAsset->IsLoaded()) {
-        TextureDesc desc;
-        desc.width = m_FillTextureAsset->GetWidth();
-        desc.height = m_FillTextureAsset->GetHeight();
-        desc.format = TextureFormat::RGBA8_SRGB;
-        desc.usage = TextureUsage::Sampled;
-        desc.initialData = m_FillTextureAsset->GetData();
-        m_FillTextureHandle = ctx.getDevice()->createTexture(desc);
+        m_FillTextureHandle = lupine::CreateTexture2DFromImage(ctx.getDevice(), *m_FillTextureAsset, TextureFormat::RGBA8_SRGB);
     }
 
     std::string borderTexPath = GetBorderTexturePath();
@@ -698,13 +680,7 @@ void ProgressBar3D::buildDrawCommands(RenderContext& ctx) {
     }
 
     if (!m_BorderTextureHandle.isValid() && m_BorderTextureAsset.IsValid() && m_BorderTextureAsset->IsLoaded()) {
-        TextureDesc desc;
-        desc.width = m_BorderTextureAsset->GetWidth();
-        desc.height = m_BorderTextureAsset->GetHeight();
-        desc.format = TextureFormat::RGBA8_SRGB;
-        desc.usage = TextureUsage::Sampled;
-        desc.initialData = m_BorderTextureAsset->GetData();
-        m_BorderTextureHandle = ctx.getDevice()->createTexture(desc);
+        m_BorderTextureHandle = lupine::CreateTexture2DFromImage(ctx.getDevice(), *m_BorderTextureAsset, TextureFormat::RGBA8_SRGB);
     }
 
     std::string fontPath = GetValueFontPath();
@@ -1001,6 +977,19 @@ void ProgressBar3D::RenderValue(RenderContext& ctx, const Mat4& transform, const
         return;
     }
 
+    // Build the GPU font atlas on demand from the loaded font asset (mirrors Label3D).
+    if (m_FontAsset.IsValid() && m_FontAsset->IsLoaded() && !m_FontHandle.isValid()) {
+        FontDesc fontDesc;
+        fontDesc.fontPath = m_FontAsset->GetPhysicalPath();
+        fontDesc.fontSize = GetValueFontSize();
+        fontDesc.atlasWidth = m_FontAsset->GetAtlasWidth();
+        fontDesc.atlasHeight = m_FontAsset->GetAtlasHeight();
+        if (IGfxDevice* device = ctx.getDevice()) {
+            m_FontHandle = device->createFontAtlas(fontDesc);
+        }
+        m_TextMeshNeedsRegeneration = true;
+    }
+
     if (m_TextMeshNeedsRegeneration) {
         RegenerateTextMesh(ctx, size);
         m_TextMeshNeedsRegeneration = false;
@@ -1025,8 +1014,7 @@ void ProgressBar3D::RenderValue(RenderContext& ctx, const Mat4& transform, const
 
     MaterialPropertyBlock overrides;
     overrides.setTexture("u_FontAtlas", fontAtlas->texture);
-    overrides.setColor("u_TextColor", valueColor);
-    overrides.setColor("u_Color", valueColor);
+    overrides.setColor("u_TintColor", valueColor);
 
     Mat4 textTransform = transform * Mat4::Translate(Vec3(0, 0, 0.003f));
 
@@ -1035,12 +1023,17 @@ void ProgressBar3D::RenderValue(RenderContext& ctx, const Mat4& transform, const
 
 void ProgressBar3D::RegenerateTextMesh(RenderContext& ctx, const Vec2& size) {
 
-    if (m_TextMesh.isValid() && ctx.getDevice()) {
-        ctx.getDevice()->destroyMesh(m_TextMesh);
-        m_TextMesh = MeshHandle();
+    if (!m_FontAsset.IsValid() || !m_FontAsset->IsLoaded() || !m_FontHandle.isValid()) {
+        if (m_TextMesh.isValid() && ctx.getDevice()) {
+            ctx.getDevice()->destroyMesh(m_TextMesh);
+            m_TextMesh = MeshHandle();
+        }
+        m_CachedValueText.clear();
+        return;
     }
 
-    if (!m_FontAsset.IsValid() || !m_FontAsset->IsLoaded()) {
+    const FontAtlas* fontAtlas = ctx.getDevice()->getFontAtlas(m_FontHandle);
+    if (!fontAtlas || fontAtlas->fontSize <= 0.0f) {
         return;
     }
 
@@ -1048,14 +1041,168 @@ void ProgressBar3D::RegenerateTextMesh(RenderContext& ctx, const Vec2& size) {
     oss << std::fixed << std::setprecision(1) << m_DisplayValue;
     std::string valueText = oss.str();
 
+    // The animated value produces the same 1-decimal string across many frames; skip
+    // the rebuild when the displayed digits are unchanged and a mesh already exists.
     if (valueText == m_CachedValueText && m_TextMesh.isValid()) {
         return;
     }
-
     m_CachedValueText = valueText;
 
-    float fontSize = GetValueFontSize();
+    if (m_TextMesh.isValid() && ctx.getDevice()) {
+        ctx.getDevice()->destroyMesh(m_TextMesh);
+        m_TextMesh = MeshHandle();
+    }
 
+    if (valueText.empty()) {
+        return;
+    }
+
+    Color valueColor = GetValueColor();
+
+    // Lay glyph quads out left-to-right in atlas-pixel units (front-facing, +Z normal),
+    // matching Label3D's glyph geometry.
+    MeshData textMeshData;
+    Vec2 cursor(0.0f, 0.0f);
+    uint32_t vertexOffset = 0;
+    for (char c : valueText) {
+        uint32_t codepoint = static_cast<uint32_t>(static_cast<unsigned char>(c));
+        const Glyph* glyph = fontAtlas->getGlyph(codepoint);
+        if (!glyph) {
+            if (c == ' ') {
+                cursor.x += fontAtlas->fontSize * 0.25f;
+            }
+            continue;
+        }
+
+        float glyphX = cursor.x + glyph->bearing.x;
+        float glyphY = cursor.y - glyph->bearing.y;
+        float glyphW = glyph->size.x;
+        float glyphH = glyph->size.y;
+
+        Vertex v0, v1, v2, v3;
+        v0.position = Vec3(glyphX, glyphY - glyphH, 0.0f);
+        v0.normal = Vec3(0.0f, 0.0f, 1.0f);
+        v0.texCoord = Vec2(glyph->uvMin.x, glyph->uvMax.y);
+        v0.color = Vec4(valueColor.r, valueColor.g, valueColor.b, valueColor.a);
+
+        v1.position = Vec3(glyphX + glyphW, glyphY - glyphH, 0.0f);
+        v1.normal = Vec3(0.0f, 0.0f, 1.0f);
+        v1.texCoord = Vec2(glyph->uvMax.x, glyph->uvMax.y);
+        v1.color = v0.color;
+
+        v2.position = Vec3(glyphX + glyphW, glyphY, 0.0f);
+        v2.normal = Vec3(0.0f, 0.0f, 1.0f);
+        v2.texCoord = Vec2(glyph->uvMax.x, glyph->uvMin.y);
+        v2.color = v0.color;
+
+        v3.position = Vec3(glyphX, glyphY, 0.0f);
+        v3.normal = Vec3(0.0f, 0.0f, 1.0f);
+        v3.texCoord = Vec2(glyph->uvMin.x, glyph->uvMin.y);
+        v3.color = v0.color;
+
+        textMeshData.vertices.push_back(v0);
+        textMeshData.vertices.push_back(v1);
+        textMeshData.vertices.push_back(v2);
+        textMeshData.vertices.push_back(v3);
+
+        textMeshData.indices.push_back(vertexOffset + 0);
+        textMeshData.indices.push_back(vertexOffset + 1);
+        textMeshData.indices.push_back(vertexOffset + 2);
+        textMeshData.indices.push_back(vertexOffset + 0);
+        textMeshData.indices.push_back(vertexOffset + 2);
+        textMeshData.indices.push_back(vertexOffset + 3);
+        vertexOffset += 4;
+
+        cursor.x += glyph->advance;
+    }
+
+    if (textMeshData.vertices.empty()) {
+        return;
+    }
+
+    // Map the pixel-space glyph run into the bar's local units: centered at origin and
+    // uniformly scaled (preserving aspect) to fit ~60% of the bar height and ~90% of
+    // its width. RenderValue draws the mesh with the bar transform directly, so the
+    // geometry must already be at final local size.
+    textMeshData.calculateBounds();
+    Vec3 pixelSize = textMeshData.bounds.max - textMeshData.bounds.min;
+    Vec3 pixelCenter = (textMeshData.bounds.min + textMeshData.bounds.max) * 0.5f;
+
+    const float targetHeight = size.y * 0.6f;
+    const float targetWidth = size.x * 0.9f;
+    float scale = 1.0f;
+    if (pixelSize.y > 0.0f) {
+        scale = targetHeight / pixelSize.y;
+    }
+    if (pixelSize.x > 0.0f && pixelSize.x * scale > targetWidth) {
+        scale = targetWidth / pixelSize.x;
+    }
+
+    for (auto& vertex : textMeshData.vertices) {
+        vertex.position.x = (vertex.position.x - pixelCenter.x) * scale;
+        vertex.position.y = (vertex.position.y - pixelCenter.y) * scale;
+    }
+    textMeshData.calculateBounds();
+
+    m_TextMesh = ctx.getDevice()->createMesh(textMeshData);
+}
+
+bool ProgressBar3D::OnAssetFileChanged(const std::string& changedPath, const std::string& resolvedChangedPath) {
+    auto& assetDb = asset::AssetDatabase::GetInstance();
+    bool anyChanged = false;
+
+    auto matchesPath = [&](const std::string& currentPath) -> bool {
+        if (currentPath.empty()) return false;
+        std::string resolved;
+        if (assetDb.IsInitialized()) {
+            resolved = assetDb.ResolveAsset(currentPath);
+        }
+        return (currentPath == changedPath) ||
+               (!resolved.empty() && !resolvedChangedPath.empty() && resolved == resolvedChangedPath);
+    };
+
+    // Check background texture
+    std::string bgPath = GetBackgroundTexturePath();
+    if (matchesPath(bgPath)) {
+        
+        m_BackgroundTextureHandle = TextureHandle();
+        m_BackgroundTextureAsset.Reset();
+        m_CurrentBackgroundTexturePath.clear();
+        anyChanged = true;
+    }
+
+    // Check fill texture
+    std::string fillPath = GetFillTexturePath();
+    if (matchesPath(fillPath)) {
+        
+        m_FillTextureHandle = TextureHandle();
+        m_FillTextureAsset.Reset();
+        m_CurrentFillTexturePath.clear();
+        anyChanged = true;
+    }
+
+    // Check border texture
+    std::string borderPath = GetBorderTexturePath();
+    if (matchesPath(borderPath)) {
+        
+        m_BorderTextureHandle = TextureHandle();
+        m_BorderTextureAsset.Reset();
+        m_CurrentBorderTexturePath.clear();
+        anyChanged = true;
+    }
+
+    // Check font
+    std::string fontPath = GetValueFontPath();
+    if (matchesPath(fontPath)) {
+        
+        m_FontHandle = FontHandle();
+        m_FontAsset.Reset();
+        m_CurrentFontPath.clear();
+        m_TextMeshNeedsRegeneration = true;
+        anyChanged = true;
+    }
+
+    return anyChanged;
 }
 
 }

@@ -1,6 +1,7 @@
 #include "lupine/components/PrimitiveMesh3D.hpp"
 #include "lupine/core/Node.hpp"
 #include "lupine/rendering/RenderContext.hpp"
+#include "lupine/rendering/TextureUpload.hpp"
 #include "lupine/rendering/MeshBuilder.hpp"
 #include "lupine/rendering/Material.hpp"
 #include "lupine/logger/Logger.hpp"
@@ -55,6 +56,8 @@ void PrimitiveMesh3D::DefineProperties() {
     DefineProperty(PROPERTY_DEFAULT_GROUP(doubleSided, Bool, false, "Rendering"));
 
     DefineProperty(PROPERTY_DEFAULT_GROUP(materialOverrideEnabled, Bool, false, "Material Override"));
+    // Shader type: PBR=0, Toon=1, Unlit=2, Standard3D=3, Custom=4
+    DefineProperty(PROPERTY_DEFAULT_GROUP(shaderType, String, std::string("PBR"), "Material Override"));
     DefineProperty(PROPERTY_DEFAULT_GROUP(albedoColor, Color, Color::White(), "Material Override"));
     DefineProperty(PROPERTY_DEFAULT_GROUP(albedoTexture, Int, 0, "Material Override"));
     DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(metallic, 0.0f, 0.0f, 1.0f, 0.01f, "Material Override"));
@@ -65,6 +68,19 @@ void PrimitiveMesh3D::DefineProperties() {
     DefineProperty(PROPERTY_DEFAULT_GROUP(emissiveColor, Color, Color::Black(), "Material Override"));
     DefineProperty(PROPERTY_DEFAULT_GROUP(emissiveTexture, Int, 0, "Material Override"));
     DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(emissiveStrength, 1.0f, 0.0f, 10.0f, 0.1f, "Material Override"));
+
+    // Toon shader parameters
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(shadowBands, 3.0f, 1.0f, 10.0f, 1.0f, "Material Override"));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(shadowThreshold, 0.5f, 0.0f, 1.0f, 0.01f, "Material Override"));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(shadowSoftness, 0.02f, 0.0f, 0.5f, 0.01f, "Material Override"));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(specularBands, 2.0f, 1.0f, 10.0f, 1.0f, "Material Override"));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(specularPower, 32.0f, 1.0f, 128.0f, 1.0f, "Material Override"));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(rimIntensity, 0.0f, 0.0f, 2.0f, 0.1f, "Material Override"));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(rimPower, 3.0f, 0.5f, 10.0f, 0.5f, "Material Override"));
+
+    // Custom .lsh shader (translated at runtime, honors #render_mode; takes precedence
+    // over shaderType when set).
+    DefineProperty(PROPERTY_FILE_GROUP(customLshShaderPath, std::string(""), "*.lsh", "Material Override"));
 }
 
 void PrimitiveMesh3D::OnAwake() {
@@ -94,15 +110,12 @@ void PrimitiveMesh3D::SetShape(PrimitiveShape shape) {
     m_MeshNeedsRegeneration = true;
 }
 
-const Color& PrimitiveMesh3D::GetColor() const {
-    static Color cachedColor;
+Color PrimitiveMesh3D::GetColor() const {
     const ComponentProperty* prop = m_CustomProperties.GetProperty("color");
     if (prop) {
-        cachedColor = prop->GetValue<Color>();
-        return cachedColor;
+        return prop->GetValue<Color>();
     }
-    static Color defaultColor = Color::White();
-    return defaultColor;
+    return Color::White();
 }
 
 void PrimitiveMesh3D::SetColor(const Color& color) {
@@ -254,11 +267,6 @@ void PrimitiveMesh3D::RegenerateMesh(RenderContext& ctx) {
 
     MeshData meshData = GenerateShapeMesh();
 
-    if (!meshData.vertices.empty()) {
-        const auto& v0 = meshData.vertices[0];
-
-    }
-
     Vec4 white(1.0f, 1.0f, 1.0f, 1.0f);
     for (Vertex& vertex : meshData.vertices) {
         vertex.color = white;
@@ -301,10 +309,40 @@ void PrimitiveMesh3D::buildDrawCommands(RenderContext& ctx) {
 
     MaterialHandle material;
     MaterialPropertyBlock overrides;
+    ShaderType shaderType = GetShaderType();
 
-    if (useMaterialOverride && ctx.getDefaultPBRMaterial().isValid()) {
+    if (useMaterialOverride) {
+        // A custom .lsh shader takes precedence: translated at runtime with the 3D-mesh
+        // vertex layout; its optional #render_mode drives blend/cull/depth.
+        const std::string lshPath = GetCustomLshShaderPath();
+        if (!lshPath.empty()) {
+            material = ctx.getOrCreateLshMaterial(lshPath, 3 /*opaque default*/,
+                                                  LshMaterialLayout::Mesh3D);
+        }
 
-        material = ctx.getDefaultPBRMaterial();
+        // Select material based on shader type using the material registry
+        // Handle custom shaders
+        if (!material.isValid() && shaderType == ShaderType::Custom) {
+            std::string vertPath = GetCustomVertShaderPath();
+            std::string fragPath = GetCustomFragShaderPath();
+            if (!vertPath.empty() || !fragPath.empty()) {
+                material = ctx.getOrCreateCustomMaterial(vertPath, fragPath, false);
+            }
+        }
+
+        // If not custom or custom failed, use registry
+        if (!material.isValid()) {
+            material = ctx.getMaterial(shaderType, false);  // false = not skeletal
+        }
+
+        if (!material.isValid()) {
+            material = GetDoubleSided()
+                ? ctx.getDefaultColoredDoubleSidedMaterial()
+                : ctx.getDefaultColoredMaterial();
+            overrides.setColor("u_TintColor", GetColor());
+            ctx.drawMesh(m_MeshHandle, material, transform, overrides, 0, GetCastShadow(), GetReceiveShadow());
+            return;
+        }
 
         if (m_TexturesNeedUpload) {
             UploadMaterialTextures(ctx);
@@ -314,11 +352,45 @@ void PrimitiveMesh3D::buildDrawCommands(RenderContext& ctx) {
         overrides.setColor("u_EmissiveColor", GetEmissiveColor());
         overrides.setColor("u_TintColor", Color::White());
 
-        Vec4 params1(GetMetallic(), GetRoughness(), GetNormalScale(), GetEmissiveStrength());
-        overrides.setVec4("u_MaterialParams1", params1);
+        // Set ALL material uniforms - shaders use what they need and ignore the rest
+        // This approach supports custom shaders without requiring per-shader-type code paths
 
-        Vec4 params2(0.5f, 1.0f, 1.0f, 0.0f);
-        overrides.setVec4("u_MaterialParams2", params2);
+        // PBR uniforms: u_MaterialParams1 = metallic, roughness, normalScale, emissiveStrength
+        overrides.setVec4("u_MaterialParams1", Vec4(GetMetallic(), GetRoughness(), GetNormalScale(), GetEmissiveStrength()));
+        // PBR uniforms: u_MaterialParams2 = alphaCutoff, aoStrength, heightScale, unused
+        overrides.setVec4("u_MaterialParams2", Vec4(0.5f, 1.0f, 1.0f, 0.0f));
+
+        // Toon uniforms: u_ToonMaterialParams = shadowBands, specularBands, normalScale, emissiveStrength
+        overrides.setVec4("u_ToonMaterialParams", Vec4(GetShadowBands(), GetSpecularBands(), GetNormalScale(), GetEmissiveStrength()));
+        // Toon uniforms: u_ToonMaterialParams2 = alphaCutoff, rimPower, rimIntensity, specularPower
+        overrides.setVec4("u_ToonMaterialParams2", Vec4(0.5f, GetRimPower(), GetRimIntensity(), GetSpecularPower()));
+        // Toon uniforms: u_ToonParams = shadowThreshold, shadowSoftness, specularThreshold, specularSoftness
+        overrides.setVec4("u_ToonParams", Vec4(GetShadowThreshold(), GetShadowSoftness(), GetShadowThreshold(), GetShadowSoftness()));
+
+        // Apply generic shader parameters from shaderParams map
+        // This allows custom shaders to receive their parameters without C++ code changes
+        for (const auto& [uniformName, value] : m_ShaderParams) {
+            std::visit([&overrides, &uniformName](auto&& arg) {
+                using T = std::decay_t<decltype(arg)>;
+                if constexpr (std::is_same_v<T, float>) {
+                    overrides.setFloat(uniformName, arg);
+                } else if constexpr (std::is_same_v<T, int>) {
+                    overrides.setInt(uniformName, arg);
+                } else if constexpr (std::is_same_v<T, bool>) {
+                    overrides.setBool(uniformName, arg);
+                } else if constexpr (std::is_same_v<T, Vec2>) {
+                    overrides.setVec2(uniformName, arg);
+                } else if constexpr (std::is_same_v<T, Vec3>) {
+                    overrides.setVec3(uniformName, arg);
+                } else if constexpr (std::is_same_v<T, Vec4>) {
+                    overrides.setVec4(uniformName, arg);
+                } else if constexpr (std::is_same_v<T, Color>) {
+                    overrides.setColor(uniformName, arg);
+                } else if constexpr (std::is_same_v<T, TextureHandle>) {
+                    overrides.setTexture(uniformName, arg);
+                }
+            }, value);
+        }
 
         Vec4 textureFlags(
             m_AlbedoTextureHandle.isValid() ? 1.0f : 0.0f,
@@ -328,20 +400,12 @@ void PrimitiveMesh3D::buildDrawCommands(RenderContext& ctx) {
         );
         overrides.setVec4("u_TextureFlags", textureFlags);
 
-        if (m_AlbedoTextureHandle.isValid()) {
-            overrides.setTexture("u_AlbedoTexture", m_AlbedoTextureHandle);
-        }
-        if (m_MetallicRoughnessTextureHandle.isValid()) {
-            overrides.setTexture("u_MetallicRoughnessTexture", m_MetallicRoughnessTextureHandle);
-        }
-        if (m_NormalTextureHandle.isValid()) {
-            overrides.setTexture("u_NormalTexture", m_NormalTextureHandle);
-        }
-        if (m_EmissiveTextureHandle.isValid()) {
-            overrides.setTexture("u_EmissiveTexture", m_EmissiveTextureHandle);
-        }
+        // Always bind textures (valid or not) to prevent stale texture bleeding
+        overrides.setTexture("u_AlbedoTexture", m_AlbedoTextureHandle);
+        overrides.setTexture("u_MetallicRoughnessTexture", m_MetallicRoughnessTextureHandle);
+        overrides.setTexture("u_NormalTexture", m_NormalTextureHandle);
+        overrides.setTexture("u_EmissiveTexture", m_EmissiveTextureHandle);
     } else {
-
         material = GetDoubleSided()
             ? ctx.getDefaultColoredDoubleSidedMaterial()
             : ctx.getDefaultColoredMaterial();
@@ -556,16 +620,12 @@ void PrimitiveMesh3D::SetAlbedoColor(const Color& color) {
     }
 }
 
-const Color& PrimitiveMesh3D::GetAlbedoColor() const {
+Color PrimitiveMesh3D::GetAlbedoColor() const {
     const ComponentProperty* prop = m_CustomProperties.GetProperty("albedoColor");
-    static Color cachedColor;
     if (prop) {
-        cachedColor = prop->GetValue<Color>();
-        return cachedColor;
+        return prop->GetValue<Color>();
     }
-
-    static Color defaultColor = Color::White();
-    return defaultColor;
+    return Color::White();
 }
 
 void PrimitiveMesh3D::SetAlbedoTexture(TextureHandle texture) {
@@ -647,13 +707,12 @@ void PrimitiveMesh3D::SetEmissiveColor(const Color& color) {
     }
 }
 
-const Color& PrimitiveMesh3D::GetEmissiveColor() const {
+Color PrimitiveMesh3D::GetEmissiveColor() const {
     const ComponentProperty* prop = m_CustomProperties.GetProperty("emissiveColor");
-    static Color cachedColor;
     if (prop) {
-        cachedColor = prop->GetValue<Color>();
+        return prop->GetValue<Color>();
     }
-    return cachedColor;
+    return Color();
 }
 
 void PrimitiveMesh3D::SetEmissiveTexture(TextureHandle texture) {
@@ -678,6 +737,115 @@ void PrimitiveMesh3D::SetEmissiveStrength(float strength) {
 float PrimitiveMesh3D::GetEmissiveStrength() const {
     const ComponentProperty* prop = m_CustomProperties.GetProperty("emissiveStrength");
     return prop ? prop->GetValue<float>() : 1.0f;
+}
+
+// ===== Shader Selection =====
+
+ShaderType PrimitiveMesh3D::GetShaderType() const {
+    std::string shaderName = GetPropertyValue<std::string>("shaderType");
+    if (shaderName == "Toon") return ShaderType::Toon;
+    if (shaderName == "Stylized") return ShaderType::Stylized;
+    if (shaderName == "Transparent") return ShaderType::Transparent;
+    if (shaderName == "Glow") return ShaderType::Glow;
+    if (shaderName == "Unlit") return ShaderType::Unlit;
+    if (shaderName == "Standard3D") return ShaderType::Standard3D;
+    if (shaderName == "Custom") return ShaderType::Custom;
+    return ShaderType::PBR;
+}
+
+void PrimitiveMesh3D::SetShaderType(ShaderType type) {
+    std::string shaderName;
+    switch (type) {
+        case ShaderType::Toon: shaderName = "Toon"; break;
+        case ShaderType::Stylized: shaderName = "Stylized"; break;
+        case ShaderType::Transparent: shaderName = "Transparent"; break;
+        case ShaderType::Glow: shaderName = "Glow"; break;
+        case ShaderType::Unlit: shaderName = "Unlit"; break;
+        case ShaderType::Standard3D: shaderName = "Standard3D"; break;
+        case ShaderType::Custom: shaderName = "Custom"; break;
+        default: shaderName = "PBR"; break;
+    }
+    SetPropertyValue<std::string>("shaderType", shaderName);
+}
+
+std::string PrimitiveMesh3D::GetCustomVertShaderPath() const {
+    return GetPropertyValue<std::string>("customVertShaderPath");
+}
+
+void PrimitiveMesh3D::SetCustomVertShaderPath(const std::string& path) {
+    SetPropertyValue<std::string>("customVertShaderPath", path);
+}
+
+std::string PrimitiveMesh3D::GetCustomFragShaderPath() const {
+    return GetPropertyValue<std::string>("customFragShaderPath");
+}
+
+void PrimitiveMesh3D::SetCustomFragShaderPath(const std::string& path) {
+    SetPropertyValue<std::string>("customFragShaderPath", path);
+}
+
+std::string PrimitiveMesh3D::GetCustomLshShaderPath() const {
+    return GetPropertyValue<std::string>("customLshShaderPath");
+}
+
+void PrimitiveMesh3D::SetCustomLshShaderPath(const std::string& path) {
+    SetPropertyValue<std::string>("customLshShaderPath", path);
+}
+
+float PrimitiveMesh3D::GetShadowBands() const {
+    return GetPropertyValue<float>("shadowBands");
+}
+
+void PrimitiveMesh3D::SetShadowBands(float bands) {
+    SetPropertyValue<float>("shadowBands", bands);
+}
+
+float PrimitiveMesh3D::GetShadowThreshold() const {
+    return GetPropertyValue<float>("shadowThreshold");
+}
+
+void PrimitiveMesh3D::SetShadowThreshold(float threshold) {
+    SetPropertyValue<float>("shadowThreshold", threshold);
+}
+
+float PrimitiveMesh3D::GetShadowSoftness() const {
+    return GetPropertyValue<float>("shadowSoftness");
+}
+
+void PrimitiveMesh3D::SetShadowSoftness(float softness) {
+    SetPropertyValue<float>("shadowSoftness", softness);
+}
+
+float PrimitiveMesh3D::GetSpecularBands() const {
+    return GetPropertyValue<float>("specularBands");
+}
+
+void PrimitiveMesh3D::SetSpecularBands(float bands) {
+    SetPropertyValue<float>("specularBands", bands);
+}
+
+float PrimitiveMesh3D::GetSpecularPower() const {
+    return GetPropertyValue<float>("specularPower");
+}
+
+void PrimitiveMesh3D::SetSpecularPower(float power) {
+    SetPropertyValue<float>("specularPower", power);
+}
+
+float PrimitiveMesh3D::GetRimIntensity() const {
+    return GetPropertyValue<float>("rimIntensity");
+}
+
+void PrimitiveMesh3D::SetRimIntensity(float intensity) {
+    SetPropertyValue<float>("rimIntensity", intensity);
+}
+
+float PrimitiveMesh3D::GetRimPower() const {
+    return GetPropertyValue<float>("rimPower");
+}
+
+void PrimitiveMesh3D::SetRimPower(float power) {
+    SetPropertyValue<float>("rimPower", power);
 }
 
 bool PrimitiveMesh3D::LoadTexture(const std::string& filepath, asset::AssetRef<asset::ImageAsset>& outAsset) {
@@ -708,46 +876,22 @@ void PrimitiveMesh3D::UploadMaterialTextures(RenderContext& ctx) {
     }
 
     if (m_AlbedoTextureAsset && m_AlbedoTextureAsset->IsLoaded() && !m_AlbedoTextureHandle.isValid()) {
-        TextureDesc desc;
-        desc.width = m_AlbedoTextureAsset->GetWidth();
-        desc.height = m_AlbedoTextureAsset->GetHeight();
-        desc.format = TextureFormat::RGBA8_SRGB;
-        desc.usage = TextureUsage::Sampled;
-        desc.initialData = m_AlbedoTextureAsset->GetData();
-        m_AlbedoTextureHandle = device->createTexture(desc);
+        m_AlbedoTextureHandle = lupine::CreateTexture2DFromImage(device, *m_AlbedoTextureAsset, TextureFormat::RGBA8_SRGB);
 
     }
 
     if (m_MetallicRoughnessTextureAsset && m_MetallicRoughnessTextureAsset->IsLoaded() && !m_MetallicRoughnessTextureHandle.isValid()) {
-        TextureDesc desc;
-        desc.width = m_MetallicRoughnessTextureAsset->GetWidth();
-        desc.height = m_MetallicRoughnessTextureAsset->GetHeight();
-        desc.format = TextureFormat::RGBA8_UNORM;
-        desc.usage = TextureUsage::Sampled;
-        desc.initialData = m_MetallicRoughnessTextureAsset->GetData();
-        m_MetallicRoughnessTextureHandle = device->createTexture(desc);
+        m_MetallicRoughnessTextureHandle = lupine::CreateTexture2DFromImage(device, *m_MetallicRoughnessTextureAsset, TextureFormat::RGBA8_UNORM);
 
     }
 
     if (m_NormalTextureAsset && m_NormalTextureAsset->IsLoaded() && !m_NormalTextureHandle.isValid()) {
-        TextureDesc desc;
-        desc.width = m_NormalTextureAsset->GetWidth();
-        desc.height = m_NormalTextureAsset->GetHeight();
-        desc.format = TextureFormat::RGBA8_UNORM;
-        desc.usage = TextureUsage::Sampled;
-        desc.initialData = m_NormalTextureAsset->GetData();
-        m_NormalTextureHandle = device->createTexture(desc);
+        m_NormalTextureHandle = lupine::CreateTexture2DFromImage(device, *m_NormalTextureAsset, TextureFormat::RGBA8_UNORM);
 
     }
 
     if (m_EmissiveTextureAsset && m_EmissiveTextureAsset->IsLoaded() && !m_EmissiveTextureHandle.isValid()) {
-        TextureDesc desc;
-        desc.width = m_EmissiveTextureAsset->GetWidth();
-        desc.height = m_EmissiveTextureAsset->GetHeight();
-        desc.format = TextureFormat::RGBA8_SRGB;
-        desc.usage = TextureUsage::Sampled;
-        desc.initialData = m_EmissiveTextureAsset->GetData();
-        m_EmissiveTextureHandle = device->createTexture(desc);
+        m_EmissiveTextureHandle = lupine::CreateTexture2DFromImage(device, *m_EmissiveTextureAsset, TextureFormat::RGBA8_SRGB);
 
     }
 

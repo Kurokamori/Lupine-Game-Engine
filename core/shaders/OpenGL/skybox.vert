@@ -7,25 +7,20 @@ layout(location = 2) in vec2 a_TexCoord;
 
 uniform mat4 u_ViewProjection;
 uniform mat4 u_View;
+uniform int u_SkyboxType;
+uniform vec4 u_SkyboxColor;
+uniform vec4 u_SkyTopColor;
+uniform vec4 u_SkyHorizonColor;
+uniform vec4 u_SkyBottomColor;
 
 out vec3 v_Position;
-out vec3 v_TexCoord;
+out vec3 v_TexCoord3D;
 
-void main() {
-    // Use position as texture coordinates for cubemap sampling
-    v_TexCoord = a_Position;
-    v_Position = a_Position;
-    
-    // Remove translation from view matrix to keep skybox centered on camera
-    mat4 viewNoTranslation = u_View;
-    viewNoTranslation[3][0] = 0.0;
-    viewNoTranslation[3][1] = 0.0;
-    viewNoTranslation[3][2] = 0.0;
-    
-    // Calculate position
-    vec4 pos = u_ViewProjection * vec4(a_Position, 1.0);
-    
-    // Set z = w to ensure skybox is always at maximum depth
-    gl_Position = pos.xyww;
-}
 
+
+    void main() {
+        v_TexCoord3D = a_Position;
+        v_Position = a_Position;
+        vec4 pos = (u_ViewProjection * vec4(a_Position, 1.0));
+        gl_Position = vec4(pos.xy, pos.w, pos.w);
+    }

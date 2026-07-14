@@ -1,4 +1,5 @@
 #include "lupine/components/Label.hpp"
+#include "lupine/localization/LocalizationManager.hpp"
 #include "lupine/core/Node.hpp"
 #include "lupine/core/Project.hpp"
 #include "lupine/rendering/RenderContext.hpp"
@@ -7,6 +8,7 @@
 #include "lupine/rendering/Mesh.hpp"
 #include "lupine/rendering/gfx/IGfxDevice.hpp"
 #include "lupine/rendering/gfx/GfxDescriptors.hpp"
+#include "lupine/asset/AssetDatabase.hpp"
 #include "lupine/logger/Logger.hpp"
 #include "lupine/math/OBB.hpp"
 #include "lupine/math/Ray.hpp"
@@ -19,7 +21,7 @@ using namespace core;
 using namespace math;
 
 Label::Label()
-    : Component("Label")
+    : UIControl("Label")
     , m_FontHandle()
     , m_FontNeedsUpload(false)
     , m_CurrentFontSize(0.0f)
@@ -32,7 +34,7 @@ Label::Label()
 }
 
 Label::Label(const std::string& name)
-    : Component(name)
+    : UIControl(name)
     , m_FontHandle()
     , m_FontNeedsUpload(false)
     , m_CurrentFontSize(0.0f)
@@ -50,10 +52,44 @@ Label::~Label() {
 
 void Label::DefineProperties() {
 
+    // Shared UIControl layout properties (anchors/size-flags/uiSpace + width/height).
+    DefineUIControlProperties(0.0f, 0.0f, "uiSpace", "Layout");
+
     DefineProperty(PROPERTY_DEFAULT_GROUP(text, String, std::string("Label"), "Text"));
+
+    // When localizationKey is set it overrides "text": the displayed string is
+    // resolved through the LocalizationManager for the active locale (live-updates
+    // on locale change). localizationTable optionally restricts the lookup to one
+    // table; leave empty to search all tables.
+    DefineProperty(PROPERTY_DEFAULT_GROUP(localizationKey, String, std::string(""), "Localization"));
+    DefineProperty(PROPERTY_DEFAULT_GROUP(localizationTable, String, std::string(""), "Localization"));
     DefineProperty(PROPERTY_FILE_GROUP(fontPath, std::string(""), "*.ttf,*.otf", "Text"));
     DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(fontSize, 16.0f, 1.0f, 256.0f, 1.0f, "Text"));
     DefineProperty(PROPERTY_DEFAULT_GROUP(color, Color, Color::White(), "Text"));
+
+    DefineProperty(PROPERTY_ENUM_GROUP(horizontalAlign, 0, "Text", Left, Center, Right, Fill));
+    DefineProperty(PROPERTY_ENUM_GROUP(verticalAlign, 0, "Text", Top, Center, Bottom));
+    DefineProperty(PROPERTY_DEFAULT_GROUP(wordWrap, Bool, false, "Text"));
+    DefineProperty(PROPERTY_DEFAULT_GROUP(multiline, Bool, true, "Text"));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(lineSpacing, 1.0f, 0.1f, 5.0f, 0.05f, "Text"));
+    // Line-breaking and overflow. `wordWrap` remains the simple on/off switch and still means
+    // WordSmart; autowrapMode selects the other modes. Off keeps `wordWrap` in charge.
+    DefineProperty(PROPERTY_ENUM_GROUP(autowrapMode, 0, "Text", Off, Arbitrary, Word, WordSmart));
+    DefineProperty(PROPERTY_ENUM_GROUP(overrunBehavior, 0, "Text",
+        None, TrimChar, TrimWord, EllipsisChar, EllipsisWord));
+    DefineProperty(PROPERTY_DEFAULT_GROUP(clipText, Bool, false, "Text"));
+    DefineProperty(PROPERTY_INT_RANGE_GROUP(tabSize, 4, 1, 16, 1, "Text"));
+    // Drop shadow. StyleBoxFlat has a box shadow; text had none at all.
+    DefineProperty(PROPERTY_DEFAULT_GROUP(shadowOffset, Vec2, Vec2(0.0f, 0.0f), "Shadow"));
+    DefineProperty(PROPERTY_DEFAULT_GROUP(shadowColor, Color, Color(0.0f, 0.0f, 0.0f, 0.0f), "Shadow"));
+    // Auto-shrink: step the font down (never past minFontSize) until the text fits the box.
+    // Button has scaleMode = FitToText, which grows the CONTROL to fit the text; this is the
+    // opposite and complementary knob, and Label had neither.
+    DefineProperty(PROPERTY_DEFAULT_GROUP(autoShrink, Bool, false, "Text"));
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(minFontSize, 8.0f, 1.0f, 256.0f, 1.0f, "Text"));
+
+    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(outlineWidth, 0.0f, 0.0f, 16.0f, 0.5f, "Outline"));
+    DefineProperty(PROPERTY_DEFAULT_GROUP(outlineColor, Color, Color::Black(), "Outline"));
 
     DefineProperty(PROPERTY_DEFAULT_GROUP(centered, Bool, false, "Layout"));
     DefineProperty(PROPERTY_DEFAULT_GROUP(offset, Vec2, Vec2(0.0f, 0.0f), "Layout"));
@@ -62,6 +98,15 @@ void Label::DefineProperties() {
 void Label::OnAwake() {
 
     std::string fontPath = GetFontPath();
+
+    // If no font path set, try to use the default font
+    if (fontPath.empty()) {
+        auto& assetDb = asset::AssetDatabase::GetInstance();
+        if (assetDb.IsInitialized()) {
+            fontPath = assetDb.GetDefaultFontPath();
+        }
+    }
+
     if (!fontPath.empty()) {
         LoadFont(fontPath);
     }
@@ -78,7 +123,7 @@ void Label::OnRender() {
 
 }
 
-bool Label::OnGizmoScale(float scaleDelta, int axis, bool is3D) {
+bool Label::OnGizmoScale(float scaleDelta, int, bool is3D) {
     if (!is3D) {
 
         float currentSize = GetFontSize();
@@ -121,9 +166,19 @@ bool Label::LoadFont(const std::string& filepath) {
     }
 
     m_FontNeedsUpload = true;
+    m_MeshNeedsRegeneration = true;
 
-    SetFontPath(filepath);
+    // The font is what the text is MEASURED with, and fonts load lazily -- the first time
+    // this control is drawn, which is after any parent container has already measured and
+    // arranged it against a zero-size (fontless) estimate. Tell the container its
+    // assumptions just changed, or the row keeps the height it was given before the glyphs
+    // existed.
+    NotifyContentSizeChanged();
 
+    // NOTE: deliberately does NOT write filepath back into the fontPath property.
+    // The effective path may come from the theme (font role); writing it back would
+    // both bake the themed path into the instance and mark it a local override,
+    // defeating font-face theming. Explicit path changes go through SetFontPath.
     return true;
 }
 
@@ -150,14 +205,78 @@ Vec2 Label::CalculateTextSize() const {
         return Vec2(0.0f, 0.0f);
     }
 
-    std::string text = GetText();
-    float fontSize = GetFontSize();
+    // Measure through the same layout engine that positions the glyphs, so the
+    // reported content size honors word wrap, line spacing and multiline exactly as
+    // drawn. (FontAsset::MeasureText does none of that and accumulates every line's
+    // width into one total, which made auto-sized multiline Labels mis-measure.)
+    //
+    // Only the wrap width is taken from the resolved rect: the box height would not
+    // change the measured size, and reading GetBoundsSize() here would recurse
+    // (GetBoundsSize -> GetMinSize -> GetContentMinSize -> here).
+    const Vec2 measureBox(GetResolvedRect().size.x, 0.0f);
+    TextLayoutParams params = BuildLayoutParams(measureBox);
 
-    return m_FontAsset->MeasureText(text, fontSize);
+    return TextLayout::Measure(GetText(), m_FontAsset->GetMetricsAtlas(), params);
+}
+
+Vec2 Label::GetContentMinSize() const {
+    Vec2 size = CalculateTextSize();
+
+    // The glyphs are inset from the control's rect by the content margins, and the outline
+    // is stroked OUTSIDE them (up to 16px). Neither was counted, so a container sized a
+    // Label to its bare text and then clipped the padding and the outline right off it.
+    const Vec4 margins = GetContentMargins();
+    const float outline = GetOutlineWidth();
+
+    size.x += margins.w + margins.y + outline * 2.0f;   // left + right
+    size.y += margins.x + margins.z + outline * 2.0f;   // top + bottom
+
+    return size;
+}
+
+math::Rect Label::GetTextBoxRect() const {
+    const math::Rect resolved = GetResolvedRect();
+    const Vec2 offset = GetOffset();
+
+    if (resolved.size.x > 0.0f || resolved.size.y > 0.0f) {
+        // LayoutMode::Position resolves the rect straight from the authored width/height,
+        // which are 0 on any axis the author left to the content (the normal way a Label
+        // is written: give it a width, let the text set the height). Apply the same
+        // min/max clamp GetBoundsSize() does, so the box always contains the text instead
+        // of collapsing to zero height. Growing must keep the TOP edge where it is --
+        // Rect::position is the MIN corner on the Y-up canvas and the text descends from
+        // the top -- so the extra height is taken off the min corner, not added to it.
+        const Vec2 size = ClampToMinMax(resolved.size);
+        const Vec2 position(resolved.position.x,
+                            resolved.position.y - (size.y - resolved.size.y));
+
+        // Inset by the content margins, so a themed StyleBox's content margins (which
+        // nothing read before) and any authored padding actually move the text.
+        return GetContentInsetRect(math::Rect(position + offset, size));
+    }
+
+    // No resolved size: the box collapses onto the text itself, anchored at the node.
+    const Node2D* node2D = dynamic_cast<const Node2D*>(m_Owner);
+    const Vec2 globalPos = node2D ? node2D->GetGlobalPosition() : Vec2(0.0f, 0.0f);
+    const Vec2 textSize = CalculateTextSize();
+
+    Vec2 topLeft = globalPos + offset;
+    if (GetCentered()) {
+        topLeft.x -= textSize.x * 0.5f;
+        topLeft.y += textSize.y * 0.5f;
+    }
+
+    return math::Rect(Vec2(topLeft.x, topLeft.y - textSize.y), textSize);
 }
 
 const std::string& Label::GetText() const {
     static std::string cachedText;
+    std::string locKey = GetPropertyValue<std::string>("localizationKey");
+    if (!locKey.empty()) {
+        cachedText = localization::LocalizationManager::GetInstance().Translate(
+            locKey, GetPropertyValue<std::string>("localizationTable"));
+        return cachedText;
+    }
     cachedText = GetPropertyValue<std::string>("text");
     return cachedText;
 }
@@ -169,21 +288,32 @@ void Label::SetText(const std::string& text) {
 
 const std::string& Label::GetFontPath() const {
     static std::string cachedPath;
-    cachedPath = GetPropertyValue<std::string>("fontPath");
+    cachedPath = ResolveThemedFontPath("fontPath", "font");
     return cachedPath;
 }
 
 void Label::SetFontPath(const std::string& path) {
-    SetPropertyValue("fontPath", path);
+    // Convert to res:// path if possible
+    std::string resPath = path;
+    if (!path.empty() && !(path.size() >= 6 && path.substr(0, 6) == "res://")) {
+        auto& assetDb = asset::AssetDatabase::GetInstance();
+        if (assetDb.IsInitialized()) {
+            std::string converted = assetDb.ToResourcePath(path);
+            if (!converted.empty()) {
+                resPath = converted;
+            }
+        }
+    }
+    SetThemedProperty<std::string>("fontPath", resPath);
     m_MeshNeedsRegeneration = true;
 }
 
 float Label::GetFontSize() const {
-    return GetPropertyValue<float>("fontSize");
+    return ResolveThemedFontSize("fontSize", "font_size", "font");
 }
 
 void Label::SetFontSize(float size) {
-    SetPropertyValue("fontSize", size);
+    SetThemedProperty<float>("fontSize", size);
 
     if (m_FontHandle.isValid()) {
         m_FontHandle = FontHandle();
@@ -191,14 +321,22 @@ void Label::SetFontSize(float size) {
     m_MeshNeedsRegeneration = true;
 }
 
-const Color& Label::GetColor() const {
-    static Color cachedColor;
-    cachedColor = GetPropertyValue<Color>("color");
-    return cachedColor;
+const std::vector<UIControl::ThemeBinding>& Label::GetThemeBindings() const {
+    static const std::vector<ThemeBinding> kBindings = {
+        { "color",        "font_color",    ThemeBinding::Kind::Color },
+        { "outlineColor", "outline_color", ThemeBinding::Kind::Color },
+        { "fontPath",     "font",          ThemeBinding::Kind::Font },
+        { "fontSize",     "font_size",     ThemeBinding::Kind::Constant }
+    };
+    return kBindings;
+}
+
+Color Label::GetColor() const {
+    return ResolveThemedColor("color", "font_color");
 }
 
 void Label::SetColor(const Color& color) {
-    SetPropertyValue("color", color);
+    SetThemedProperty<Color>("color", color);
 }
 
 bool Label::GetCentered() const {
@@ -217,6 +355,147 @@ const Vec2& Label::GetOffset() const {
 
 void Label::SetOffset(const Vec2& offset) {
     SetPropertyValue("offset", offset);
+    m_MeshNeedsRegeneration = true;
+}
+
+TextHAlign Label::GetHorizontalAlign() const {
+    return static_cast<TextHAlign>(GetPropertyValue<int>("horizontalAlign"));
+}
+
+void Label::SetHorizontalAlign(TextHAlign align) {
+    SetPropertyValue<int>("horizontalAlign", static_cast<int>(align));
+    m_MeshNeedsRegeneration = true;
+}
+
+TextVAlign Label::GetVerticalAlign() const {
+    return static_cast<TextVAlign>(GetPropertyValue<int>("verticalAlign"));
+}
+
+void Label::SetVerticalAlign(TextVAlign align) {
+    SetPropertyValue<int>("verticalAlign", static_cast<int>(align));
+    m_MeshNeedsRegeneration = true;
+}
+
+bool Label::GetWordWrap() const {
+    return GetPropertyValue<bool>("wordWrap");
+}
+
+void Label::SetWordWrap(bool wrap) {
+    SetPropertyValue("wordWrap", wrap);
+    m_MeshNeedsRegeneration = true;
+}
+
+bool Label::GetMultiline() const {
+    return GetPropertyValue<bool>("multiline");
+}
+
+void Label::SetMultiline(bool multiline) {
+    SetPropertyValue("multiline", multiline);
+    m_MeshNeedsRegeneration = true;
+}
+
+float Label::GetLineSpacing() const {
+    return GetPropertyValue<float>("lineSpacing");
+}
+
+void Label::SetLineSpacing(float spacing) {
+    SetPropertyValue("lineSpacing", spacing);
+    m_MeshNeedsRegeneration = true;
+}
+
+float Label::GetOutlineWidth() const {
+    return GetPropertyValue<float>("outlineWidth");
+}
+
+void Label::SetOutlineWidth(float width) {
+    SetPropertyValue("outlineWidth", width);
+    m_MeshNeedsRegeneration = true;
+}
+
+Color Label::GetOutlineColor() const {
+    return ResolveThemedColor("outlineColor", "outline_color");
+}
+
+void Label::SetOutlineColor(const Color& color) {
+    SetThemedProperty<Color>("outlineColor", color);
+    m_MeshNeedsRegeneration = true;
+}
+
+float Label::GetEffectiveFontSize(const Vec2& boxSize) const {
+    const float authored = GetFontSize();
+
+    if (!GetPropertyValue<bool>("autoShrink")) {
+        return authored;
+    }
+    // Nothing to shrink into: with no box there is no overflow to avoid.
+    if (boxSize.x <= 0.0f && boxSize.y <= 0.0f) {
+        return authored;
+    }
+    if (!m_FontAsset.IsValid() || !m_FontAsset->IsLoaded()) {
+        return authored;
+    }
+
+    const float minSize = std::max(1.0f, GetPropertyValue<float>("minFontSize"));
+    if (authored <= minSize) {
+        return authored;
+    }
+
+    // Step down until the measured text fits both axes of the box. Half-point steps: finer
+    // than the eye can resolve at UI sizes, and bounded by (authored - minSize) * 2 measures.
+    for (float size = authored; size > minSize; size -= 0.5f) {
+        TextLayoutParams probe = BuildLayoutParamsAt(boxSize, size);
+        const Vec2 measured = TextLayout::Measure(GetText(), m_FontAsset->GetMetricsAtlas(), probe);
+
+        const bool fitsX = (boxSize.x <= 0.0f) || (measured.x <= boxSize.x + 0.5f);
+        const bool fitsY = (boxSize.y <= 0.0f) || (measured.y <= boxSize.y + 0.5f);
+        if (fitsX && fitsY) {
+            return size;
+        }
+    }
+
+    return minSize;
+}
+
+TextLayoutParams Label::BuildLayoutParams(const Vec2& boxSize) const {
+    return BuildLayoutParamsAt(boxSize, GetEffectiveFontSize(boxSize));
+}
+
+TextLayoutParams Label::BuildLayoutParamsAt(const Vec2& boxSize, float fontSize) const {
+    TextLayoutParams params;
+    params.fontSize = fontSize;
+    params.color = GetColor();
+    params.hAlign = GetHorizontalAlign();
+    params.vAlign = GetVerticalAlign();
+    params.multiline = GetMultiline();
+    params.wordWrap = GetWordWrap();
+    params.autowrapMode = static_cast<TextAutowrapMode>(GetPropertyValue<int>("autowrapMode"));
+    params.overrunBehavior = static_cast<TextOverrunBehavior>(GetPropertyValue<int>("overrunBehavior"));
+    params.clipText = GetPropertyValue<bool>("clipText");
+    params.tabSize = GetPropertyValue<int>("tabSize");
+    params.lineSpacing = GetLineSpacing();
+    params.outlineWidth = GetOutlineWidth();
+    params.outlineColor = GetOutlineColor();
+    params.shadowOffset = GetPropertyValue<Vec2>("shadowOffset");
+    params.shadowColor = GetPropertyValue<Color>("shadowColor");
+    params.boxWidth = (boxSize.x > 0.0f) ? boxSize.x : 0.0f;
+    params.boxHeight = (boxSize.y > 0.0f) ? boxSize.y : 0.0f;
+    return params;
+}
+
+void Label::OnPropertyChanged(const std::string& propertyName, const nlohmann::json& newValue) {
+    UIControl::OnPropertyChanged(propertyName, newValue);
+
+    static const char* kTextProps[] = {
+        "text", "fontPath", "fontSize", "color",
+        "horizontalAlign", "verticalAlign", "wordWrap", "multiline", "lineSpacing",
+        "outlineWidth", "outlineColor", "centered", "offset", "width", "height"
+    };
+    for (const char* p : kTextProps) {
+        if (propertyName == p) {
+            m_MeshNeedsRegeneration = true;
+            break;
+        }
+    }
 }
 
 void Label::RegenerateTextMesh(RenderContext& ctx) {
@@ -227,16 +506,15 @@ void Label::RegenerateTextMesh(RenderContext& ctx) {
     }
 
     std::string text = GetText();
-    float fontSize = GetFontSize();
 
     if (text.empty() || !m_FontHandle.isValid()) {
+        m_CachedTextSize = Vec2(0.0f, 0.0f);
         m_MeshNeedsRegeneration = false;
         return;
     }
 
     const FontAtlas* fontAtlas = ctx.getDevice()->getFontAtlas(m_FontHandle);
     if (!fontAtlas) {
-
         m_MeshNeedsRegeneration = false;
         return;
     }
@@ -249,120 +527,75 @@ void Label::RegenerateTextMesh(RenderContext& ctx) {
 
     Vec2 globalPos = node2D->GetGlobalPosition();
     float globalRotation = node2D->GetGlobalRotation();
-    Vec2 offset = GetOffset();
 
-    if (GetCentered()) {
-        Vec2 textSize = CalculateTextSize();
-        offset.x -= textSize.x * 0.5f;
-        offset.y -= textSize.y * 0.5f;
+    // Lay the text out inside the control's own box, so alignment has real slack to
+    // work with and the glyphs land inside the rectangle the Label reports as its
+    // bounds. TextLayout's local origin is the box TOP-left; on the Y-up canvas that
+    // is the rect's max-Y corner, not Rect::position (which is the min corner).
+    const math::Rect box = GetTextBoxRect();
+    const Vec2 boxTopLeft(box.position.x, box.position.y + box.size.y);
+
+    TextLayoutParams params = BuildLayoutParams(box.size);
+    TextLayoutResult layout = TextLayout::Layout(text, *fontAtlas, params);
+    m_CachedTextSize = layout.size;
+    m_CachedBoxSize = box.size;
+
+    if (layout.quads.empty()) {
+        m_CachedText = text;
+        m_CachedFontSize = params.fontSize;
+        m_CachedPosition = globalPos;
+        m_CachedRotation = globalRotation;
+        m_MeshNeedsRegeneration = false;
+        return;
     }
 
-    Vec2 rotatedOffset = offset;
-    if (std::abs(globalRotation) > 0.0001f) {
-        float cosR = std::cos(globalRotation);
-        float sinR = std::sin(globalRotation);
-        rotatedOffset.x = offset.x * cosR - offset.y * sinR;
-        rotatedOffset.y = offset.x * sinR + offset.y * cosR;
-    }
-
-    Vec2 finalPos = globalPos + rotatedOffset;
-    Color color = GetColor();
+    const float cosR = std::cos(globalRotation);
+    const float sinR = std::sin(globalRotation);
+    const bool rotated = std::abs(globalRotation) > 0.0001f;
+    auto toWorld = [&](float lx, float ly) -> Vec3 {
+        float wx = boxTopLeft.x + lx;
+        float wy = boxTopLeft.y + ly;
+        if (rotated) {
+            float relX = wx - globalPos.x;
+            float relY = wy - globalPos.y;
+            return Vec3(relX * cosR - relY * sinR + globalPos.x,
+                        relX * sinR + relY * cosR + globalPos.y, 0.0f);
+        }
+        return Vec3(wx, wy, 0.0f);
+    };
 
     MeshData textMeshData;
-    float scale = fontSize / fontAtlas->fontSize;
-    Vec2 cursor = finalPos;
+    textMeshData.vertices.reserve(layout.quads.size() * 4);
+    textMeshData.indices.reserve(layout.quads.size() * 6);
 
     uint32_t vertexOffset = 0;
-    for (size_t i = 0; i < text.length(); ++i) {
-        char c = text[i];
-        uint32_t codepoint = static_cast<uint32_t>(c);
-
-        if (c == '\n') {
-            cursor.x = finalPos.x;
-            cursor.y += fontAtlas->lineHeight * scale;
-            continue;
+    for (const TextGlyphQuad& q : layout.quads) {
+        for (int k = 0; k < 4; ++k) {
+            Vertex vtx;
+            vtx.position = toWorld(q.pos[k].x, q.pos[k].y);
+            vtx.normal = Vec3(0.0f, 0.0f, 1.0f);
+            vtx.texCoord = q.uv[k];
+            vtx.color = Vec4(q.color.r, q.color.g, q.color.b, q.color.a);
+            textMeshData.vertices.push_back(vtx);
         }
-
-        const Glyph* glyph = fontAtlas->getGlyph(codepoint);
-        if (!glyph) {
-            if (c == ' ') {
-                cursor.x += fontAtlas->fontSize * 0.25f * scale;
-            }
-            continue;
-        }
-
-        float glyphX = cursor.x + glyph->bearing.x * scale;
-        float glyphY = cursor.y - glyph->bearing.y * scale;
-        float glyphW = glyph->size.x * scale;
-        float glyphH = glyph->size.y * scale;
-
-        auto rotateVertex = [&](float x, float y) -> Vec3 {
-            if (std::abs(globalRotation) > 0.0001f) {
-
-                float relX = x - globalPos.x;
-                float relY = y - globalPos.y;
-
-                float cosR = std::cos(globalRotation);
-                float sinR = std::sin(globalRotation);
-                float rotX = relX * cosR - relY * sinR;
-                float rotY = relX * sinR + relY * cosR;
-
-                return Vec3(rotX + globalPos.x, rotY + globalPos.y, 0.0f);
-            }
-            return Vec3(x, y, 0.0f);
-        };
-
-        Vertex v0, v1, v2, v3;
-        v0.position = rotateVertex(glyphX, glyphY - glyphH);
-        v0.texCoord = Vec2(glyph->uvMin.x, glyph->uvMax.y);
-        v0.color = Vec4(color.r, color.g, color.b, color.a);
-
-        v1.position = rotateVertex(glyphX + glyphW, glyphY - glyphH);
-        v1.texCoord = Vec2(glyph->uvMax.x, glyph->uvMax.y);
-        v1.color = Vec4(color.r, color.g, color.b, color.a);
-
-        v2.position = rotateVertex(glyphX + glyphW, glyphY);
-        v2.texCoord = Vec2(glyph->uvMax.x, glyph->uvMin.y);
-        v2.color = Vec4(color.r, color.g, color.b, color.a);
-
-        v3.position = rotateVertex(glyphX, glyphY);
-        v3.texCoord = Vec2(glyph->uvMin.x, glyph->uvMin.y);
-        v3.color = Vec4(color.r, color.g, color.b, color.a);
-
-        textMeshData.vertices.push_back(v0);
-        textMeshData.vertices.push_back(v1);
-        textMeshData.vertices.push_back(v2);
-        textMeshData.vertices.push_back(v3);
-
         textMeshData.indices.push_back(vertexOffset + 0);
         textMeshData.indices.push_back(vertexOffset + 1);
         textMeshData.indices.push_back(vertexOffset + 2);
         textMeshData.indices.push_back(vertexOffset + 0);
         textMeshData.indices.push_back(vertexOffset + 2);
         textMeshData.indices.push_back(vertexOffset + 3);
-
         vertexOffset += 4;
-
-        cursor.x += glyph->advance * scale;
-    }
-
-    if (textMeshData.vertices.empty()) {
-        m_MeshNeedsRegeneration = false;
-        return;
     }
 
     textMeshData.calculateBounds();
 
     m_TextMesh = ctx.getDevice()->createMesh(textMeshData);
-    if (!m_TextMesh.isValid()) {
-
-    } else {
-
+    if (m_TextMesh.isValid()) {
         m_CachedMeshBounds = textMeshData.bounds;
     }
 
     m_CachedText = text;
-    m_CachedFontSize = fontSize;
+    m_CachedFontSize = params.fontSize;
     m_CachedPosition = globalPos;
     m_CachedRotation = globalRotation;
     m_MeshNeedsRegeneration = false;
@@ -375,6 +608,18 @@ void Label::buildDrawCommands(RenderContext& ctx) {
         return;
     }
 
+
+    // Regenerate the (colour-baked) text mesh when the theme/palette changes.
+    if (ConsumeThemeVersionChanged()) {
+        m_MeshNeedsRegeneration = true;
+    }
+
+    // A resolution change re-bakes the font atlas at a new oversampling density,
+    // which repacks glyph UVs; regenerate the cached mesh so it matches.
+    if (ConsumeFontOversampleChanged()) {
+        m_MeshNeedsRegeneration = true;
+    }
+
     Node2D* node2D = dynamic_cast<Node2D*>(m_Owner);
     if (!node2D) {
 
@@ -382,6 +627,15 @@ void Label::buildDrawCommands(RenderContext& ctx) {
     }
 
     std::string fontPath = GetFontPath();
+
+    // If no font path set, try to use the default font
+    if (fontPath.empty()) {
+        auto& assetDb = asset::AssetDatabase::GetInstance();
+        if (assetDb.IsInitialized()) {
+            fontPath = assetDb.GetDefaultFontPath();
+        }
+    }
+
     float currentFontSize = GetFontSize();
     bool fontPathChanged = (fontPath != m_CurrentFontPath);
     bool fontSizeChanged = (currentFontSize != m_CurrentFontSize);
@@ -419,7 +673,8 @@ void Label::buildDrawCommands(RenderContext& ctx) {
     if (m_FontAsset.IsValid() && m_FontAsset->IsLoaded() && !m_FontHandle.isValid()) {
 
         FontDesc fontDesc;
-        fontDesc.fontPath = m_FontAsset->GetPath();
+        // Use GetPhysicalPath() to resolve res:// path to filesystem path for file loading
+        fontDesc.fontPath = m_FontAsset->GetPhysicalPath();
         fontDesc.fontSize = GetFontSize();
         fontDesc.atlasWidth = m_FontAsset->GetAtlasWidth();
         fontDesc.atlasHeight = m_FontAsset->GetAtlasHeight();
@@ -449,13 +704,27 @@ void Label::buildDrawCommands(RenderContext& ctx) {
     Vec2 currentPos = node2D->GetGlobalPosition();
     float currentRotation = node2D->GetGlobalRotation();
 
+    // Re-lay-out when the box the text is aligned in changes, which includes anchor
+    // stretching and container-assigned sizes, not just the authored width/height.
+    const Vec2 boxSize = GetTextBoxRect().size;
+
     if (text != m_CachedText || GetFontSize() != m_CachedFontSize ||
-        currentPos != m_CachedPosition || std::abs(currentRotation - m_CachedRotation) > 0.0001f) {
+        currentPos != m_CachedPosition || std::abs(currentRotation - m_CachedRotation) > 0.0001f ||
+        boxSize != m_CachedBoxSize) {
         m_MeshNeedsRegeneration = true;
     }
 
     if (m_MeshNeedsRegeneration || !m_TextMesh.isValid()) {
         RegenerateTextMesh(ctx);
+    }
+
+    // When the laid-out text size changes (notably the first time the font finishes
+    // loading, when it jumps from zero to the real size), tell the parent container so
+    // an auto-sized layout — e.g. a VerticalContainer inside a ScrollContainer — picks
+    // up the new content height instead of staying at the stale measurement.
+    if (m_CachedTextSize != m_LastPropagatedTextSize) {
+        m_LastPropagatedTextSize = m_CachedTextSize;
+        InvalidateParentContainerLayout();
     }
 
     if (!m_TextMesh.isValid()) {
@@ -485,113 +754,59 @@ AABB Label::getWorldBounds() const {
         return AABB();
     }
 
-    std::string text = GetText();
-    if (text.empty() || !m_FontAsset.IsValid() || !m_FontAsset->IsLoaded()) {
+    const Vec2 globalPos = node2D->GetGlobalPosition();
 
-        Vec2 globalPos = node2D->GetGlobalPosition();
+    // The bounds ARE the layout box, so the selection rectangle in the editor is the
+    // rectangle the text is aligned inside. Deriving them from a separate glyph walk
+    // (as this used to) makes them disagree with the drawn text the moment any
+    // alignment, wrapping or line spacing is in play.
+    const math::Rect box = GetTextBoxRect();
+    if (box.size.x <= 0.0f && box.size.y <= 0.0f) {
         return AABB(
             Vec3(globalPos.x - 5.0f, globalPos.y - 5.0f, -0.1f),
             Vec3(globalPos.x + 5.0f, globalPos.y + 5.0f, 0.1f)
         );
     }
 
-    Vec2 globalPos = node2D->GetGlobalPosition();
-    float globalRotation = node2D->GetGlobalRotation();
-    Vec2 offset = GetOffset();
-    float fontSize = GetFontSize();
+    const float globalRotation = node2D->GetGlobalRotation();
 
-    if (GetCentered()) {
-        Vec2 textSize = CalculateTextSize();
-        offset.x -= textSize.x * 0.5f;
-        offset.y -= textSize.y * 0.5f;
-    }
-
-    float scale = fontSize / m_FontAsset->GetFontSize();
-    Vec2 localCursor = Vec2(0.0f, 0.0f);
-
-    float localMinX = 0.0f;
-    float localMaxX = 0.0f;
-    float localMinY = 0.0f;
-    float localMaxY = 0.0f;
-
-    bool hasGlyphs = false;
-
-    for (size_t i = 0; i < text.length(); ++i) {
-        char c = text[i];
-        uint32_t codepoint = static_cast<uint32_t>(c);
-
-        if (c == '\n') {
-            localCursor.x = 0.0f;
-            localCursor.y += m_FontAsset->GetLineHeight() * scale;
-            continue;
-        }
-
-        const asset::Glyph* glyph = m_FontAsset->GetGlyph(codepoint);
-        if (!glyph) {
-            if (c == ' ') {
-                localCursor.x += m_FontAsset->GetFontSize() * 0.25f * scale;
-            }
-            continue;
-        }
-
-        float glyphX = localCursor.x + glyph->bearingX * scale;
-        float glyphY = localCursor.y + glyph->bearingY * scale;
-        float glyphW = glyph->width * scale;
-        float glyphH = glyph->height * scale;
-
-        float quadMinX = glyphX;
-        float quadMaxX = glyphX + glyphW;
-        float quadMinY = glyphY - glyphH;
-        float quadMaxY = glyphY;
-
-        if (!hasGlyphs) {
-            localMinX = quadMinX;
-            localMaxX = quadMaxX;
-            localMinY = quadMinY;
-            localMaxY = quadMaxY;
-            hasGlyphs = true;
-        } else {
-            localMinX = std::min(localMinX, quadMinX);
-            localMaxX = std::max(localMaxX, quadMaxX);
-            localMinY = std::min(localMinY, quadMinY);
-            localMaxY = std::max(localMaxY, quadMaxY);
-        }
-
-        localCursor.x += glyph->advance * scale;
-    }
-
-    Vec2 localCorners[4] = {
-        Vec2(localMinX + offset.x, localMinY + offset.y),
-        Vec2(localMaxX + offset.x, localMinY + offset.y),
-        Vec2(localMaxX + offset.x, localMaxY + offset.y),
-        Vec2(localMinX + offset.x, localMaxY + offset.y)
+    const Vec2 corners[4] = {
+        Vec2(box.position.x, box.position.y),
+        Vec2(box.position.x + box.size.x, box.position.y),
+        Vec2(box.position.x + box.size.x, box.position.y + box.size.y),
+        Vec2(box.position.x, box.position.y + box.size.y)
     };
 
     float minX, maxX, minY, maxY;
 
     if (std::abs(globalRotation) > 0.0001f) {
-        float cosR = std::cos(globalRotation);
-        float sinR = std::sin(globalRotation);
+        const float cosR = std::cos(globalRotation);
+        const float sinR = std::sin(globalRotation);
 
-        float rotX = localCorners[0].x * cosR - localCorners[0].y * sinR + globalPos.x;
-        float rotY = localCorners[0].x * sinR + localCorners[0].y * cosR + globalPos.y;
-        minX = maxX = rotX;
-        minY = maxY = rotY;
+        // The box is already in world space, so rotate it about the node's origin.
+        auto rotate = [&](const Vec2& p) -> Vec2 {
+            const float relX = p.x - globalPos.x;
+            const float relY = p.y - globalPos.y;
+            return Vec2(relX * cosR - relY * sinR + globalPos.x,
+                        relX * sinR + relY * cosR + globalPos.y);
+        };
+
+        Vec2 r = rotate(corners[0]);
+        minX = maxX = r.x;
+        minY = maxY = r.y;
 
         for (int i = 1; i < 4; ++i) {
-            rotX = localCorners[i].x * cosR - localCorners[i].y * sinR + globalPos.x;
-            rotY = localCorners[i].x * sinR + localCorners[i].y * cosR + globalPos.y;
-            minX = std::min(minX, rotX);
-            maxX = std::max(maxX, rotX);
-            minY = std::min(minY, rotY);
-            maxY = std::max(maxY, rotY);
+            r = rotate(corners[i]);
+            minX = std::min(minX, r.x);
+            maxX = std::max(maxX, r.x);
+            minY = std::min(minY, r.y);
+            maxY = std::max(maxY, r.y);
         }
     } else {
-
-        minX = localCorners[0].x + globalPos.x;
-        maxX = localCorners[2].x + globalPos.x;
-        minY = localCorners[0].y + globalPos.y;
-        maxY = localCorners[2].y + globalPos.y;
+        minX = corners[0].x;
+        maxX = corners[2].x;
+        minY = corners[0].y;
+        maxY = corners[2].y;
     }
 
     return AABB(
@@ -615,98 +830,32 @@ math::OBB Label::getOrientedBounds() const {
         return math::OBB();
     }
 
-    std::string text = GetText();
-    if (text.empty() || !m_FontAsset.IsValid() || !m_FontAsset->IsLoaded()) {
+    const Vec2 globalPos = node2D->GetGlobalPosition();
+    const float globalRotation = node2D->GetGlobalRotation();
+    const Quat rotation = Quat::FromAxisAngle(Vec3::UnitZ(), globalRotation);
 
-        Vec2 globalPos = node2D->GetGlobalPosition();
-        float globalRotation = node2D->GetGlobalRotation();
-        Quat rotation = Quat::FromAxisAngle(Vec3::UnitZ(), globalRotation);
+    // Same box as getWorldBounds(): the rect the text is laid out in.
+    const math::Rect box = GetTextBoxRect();
+    if (box.size.x <= 0.0f && box.size.y <= 0.0f) {
         return math::OBB(Vec3(globalPos.x, globalPos.y, 0.0f), Vec3(5.0f, 5.0f, 0.1f), rotation);
     }
 
-    Vec2 globalPos = node2D->GetGlobalPosition();
-    float globalRotation = node2D->GetGlobalRotation();
-    Vec2 offset = GetOffset();
-    float fontSize = GetFontSize();
+    const Vec2 boxCenter(box.position.x + box.size.x * 0.5f,
+                         box.position.y + box.size.y * 0.5f);
 
-    if (GetCentered()) {
-        Vec2 textSize = CalculateTextSize();
-        offset.x -= textSize.x * 0.5f;
-        offset.y -= textSize.y * 0.5f;
-    }
-
-    float scale = fontSize / m_FontAsset->GetFontSize();
-    Vec2 localCursor = Vec2(0.0f, 0.0f);
-
-    float localMinX = 0.0f;
-    float localMaxX = 0.0f;
-    float localMinY = 0.0f;
-    float localMaxY = 0.0f;
-
-    bool hasGlyphs = false;
-
-    for (size_t i = 0; i < text.length(); ++i) {
-        char c = text[i];
-        uint32_t codepoint = static_cast<uint32_t>(c);
-
-        if (c == '\n') {
-            localCursor.x = 0.0f;
-            localCursor.y += m_FontAsset->GetLineHeight() * scale;
-            continue;
-        }
-
-        const asset::Glyph* glyph = m_FontAsset->GetGlyph(codepoint);
-        if (!glyph) {
-            if (c == ' ') {
-                localCursor.x += m_FontAsset->GetFontSize() * 0.25f * scale;
-            }
-            continue;
-        }
-
-        float glyphX = localCursor.x + glyph->bearingX * scale;
-        float glyphY = localCursor.y + glyph->bearingY * scale;
-        float glyphW = glyph->width * scale;
-        float glyphH = glyph->height * scale;
-
-        float quadMinX = glyphX;
-        float quadMaxX = glyphX + glyphW;
-        float quadMinY = glyphY - glyphH;
-        float quadMaxY = glyphY;
-
-        if (!hasGlyphs) {
-            localMinX = quadMinX;
-            localMaxX = quadMaxX;
-            localMinY = quadMinY;
-            localMaxY = quadMaxY;
-            hasGlyphs = true;
-        } else {
-            localMinX = std::min(localMinX, quadMinX);
-            localMaxX = std::max(localMaxX, quadMaxX);
-            localMinY = std::min(localMinY, quadMinY);
-            localMaxY = std::max(localMaxY, quadMaxY);
-        }
-
-        localCursor.x += glyph->advance * scale;
-    }
-
-    Vec2 localCenter = Vec2((localMinX + localMaxX) * 0.5f, (localMinY + localMaxY) * 0.5f);
-    Vec2 localExtents = Vec2((localMaxX - localMinX) * 0.5f, (localMaxY - localMinY) * 0.5f);
-
-    localCenter += offset;
-
-    Vec2 rotatedCenter = localCenter;
+    Vec2 worldCenter = boxCenter;
     if (std::abs(globalRotation) > 0.0001f) {
-        float cosR = std::cos(globalRotation);
-        float sinR = std::sin(globalRotation);
-        rotatedCenter.x = localCenter.x * cosR - localCenter.y * sinR;
-        rotatedCenter.y = localCenter.x * sinR + localCenter.y * cosR;
+        const float cosR = std::cos(globalRotation);
+        const float sinR = std::sin(globalRotation);
+        const float relX = boxCenter.x - globalPos.x;
+        const float relY = boxCenter.y - globalPos.y;
+        worldCenter.x = relX * cosR - relY * sinR + globalPos.x;
+        worldCenter.y = relX * sinR + relY * cosR + globalPos.y;
     }
 
-    Vec3 worldCenter = Vec3(globalPos.x + rotatedCenter.x, globalPos.y + rotatedCenter.y, 0.0f);
-    Vec3 worldExtents = Vec3(localExtents.x, localExtents.y, 0.1f);
-    Quat rotation = Quat::FromAxisAngle(Vec3::UnitZ(), globalRotation);
-
-    return math::OBB(worldCenter, worldExtents, rotation);
+    return math::OBB(Vec3(worldCenter.x, worldCenter.y, 0.0f),
+                     Vec3(box.size.x * 0.5f, box.size.y * 0.5f, 0.1f),
+                     rotation);
 }
 
 bool Label::IntersectRay(const math::Ray& ray, float& outDistance) const {
@@ -721,6 +870,33 @@ bool Label::IntersectRay(const math::Ray& ray, float& outDistance) const {
 
     math::Ray localRay(localRayOrigin, localRayDir);
     return localRay.IntersectAABB(localAABB, outDistance);
+}
+
+bool Label::OnAssetFileChanged(const std::string& changedPath, const std::string& resolvedChangedPath) {
+    std::string fontPath = GetFontPath();
+    if (fontPath.empty()) return false;
+
+    auto& assetDb = asset::AssetDatabase::GetInstance();
+    std::string resolvedFontPath;
+    if (assetDb.IsInitialized()) {
+        resolvedFontPath = assetDb.ResolveAsset(fontPath);
+    }
+
+    bool matches = (fontPath == changedPath) ||
+                   (!resolvedFontPath.empty() && !resolvedChangedPath.empty() &&
+                    resolvedFontPath == resolvedChangedPath);
+
+    if (matches) {
+        
+        m_FontHandle = FontHandle();
+        m_FontAsset.Reset();
+        m_CurrentFontPath.clear();
+        m_FontNeedsUpload = true;
+        m_MeshNeedsRegeneration = true;
+        return true;
+    }
+
+    return false;
 }
 
 }

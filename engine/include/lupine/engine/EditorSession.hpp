@@ -91,6 +91,15 @@ public:
     std::shared_ptr<SceneDocument> OpenScene(const std::string& scenePath);
 
     /**
+     * Opens a prefab from a file as an editable document
+     * The prefab is loaded into an editable single-root scene; saving the
+     * resulting document writes the .prefab format back.
+     * @param prefabPath Path to the prefab file
+     * @return Shared pointer to the scene document, or nullptr if failed
+     */
+    std::shared_ptr<SceneDocument> OpenPrefab(const std::string& prefabPath);
+
+    /**
      * Closes a scene document
      * @param sceneID ID of the scene document to close
      * @param saveIfDirty If true, saves the scene if it has unsaved changes

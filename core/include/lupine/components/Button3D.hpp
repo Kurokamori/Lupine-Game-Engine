@@ -109,6 +109,7 @@ public:
     // ISerializable interface
     std::string GetTypeName() const override { return "Button3D"; }
     void DefineProperties() override;
+    void DefineSignals() override;
 
     // Lifecycle hooks
     void OnAwake() override;
@@ -119,6 +120,9 @@ public:
 
     // Editor gizmo hooks
     bool OnGizmoScale(float scaleDelta, int axis, bool is3D) override;
+
+    // Asset hot-reload support
+    bool OnAssetFileChanged(const std::string& changedPath, const std::string& resolvedChangedPath) override;
 
     // ===== Size Properties =====
     
@@ -178,7 +182,7 @@ public:
     void SetBaseStyleBox(std::shared_ptr<StyleBox> styleBox);
 
     // Background
-    const math::Color& GetBackgroundColor() const;
+    math::Color GetBackgroundColor() const;
     void SetBackgroundColor(const math::Color& color);
 
     float GetOpacity() const;
@@ -199,7 +203,7 @@ public:
     void SetBorderEnabled(bool enabled);
 
     // Border color
-    const math::Color& GetBorderColor() const;
+    math::Color GetBorderColor() const;
     void SetBorderColor(const math::Color& color);
 
     // Corner radius
@@ -225,7 +229,7 @@ public:
     float GetFontSize() const;
     void SetFontSize(float size);
 
-    const math::Color& GetFontColor() const;
+    math::Color GetFontColor() const;
     void SetFontColor(const math::Color& color);
 
     bool GetWordWrap() const;

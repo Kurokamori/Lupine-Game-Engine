@@ -57,6 +57,9 @@ struct GLPipeline {
 
     std::vector<ShaderHandle> shaders;
     VertexBufferLayout vertexLayout;
+    // Additional per-binding layouts (e.g. binding 1 = per-instance data). Used
+    // to set up instanced vertex attributes with glVertexAttribDivisor.
+    std::vector<VertexBufferLayout> extraVertexBuffers;
     PrimitiveTopology topology = PrimitiveTopology::TriangleList;
     BlendState blendState;
     DepthStencilState depthStencilState;
@@ -182,6 +185,9 @@ public:
     void bindFramebuffer(GLuint fbo);
     void bindTexture(uint32_t unit, GLenum target, GLuint texture);
     void bindSampler(uint32_t unit, GLuint sampler);
+
+    // Reset all binding state (call when runtime restarts to avoid stale texture ID issues)
+    void resetBindingState();
 };
 
 /**

@@ -29,7 +29,7 @@ enum class LightType : uint32_t {
  * - Vec4 positionOrDirection (16 bytes): xyz=position/direction, w=0 for directional, w=1 for point/spot
  * - Vec4 direction (16 bytes): xyz=direction for spot lights, w=unused
  * - Vec4 color (16 bytes): RGB + intensity in w
- * - Vec4 params (16 bytes): x=range, y=innerConeAngle, z=outerConeAngle, w=attenuation
+ * - Vec4 params (16 bytes): x=range, y=cos(innerConeAngle), z=cos(outerConeAngle), w=attenuation
  * - Vec4 flags (16 bytes): x=type, y=castShadows, z=shadowMapIndex, w=unused
  * Total: 80 bytes per light
  */
@@ -37,7 +37,7 @@ struct alignas(16) GPULightData {
     Vec4 positionOrDirection; // w=0 for directional, w=1 for point/spot
     Vec4 direction;           // xyz=direction for spot/directional lights, w=unused
     Vec4 color;               // RGB + intensity in w
-    Vec4 params;              // x=range, y=innerConeAngle, z=outerConeAngle, w=attenuation
+    Vec4 params;              // x=range, y=cos(innerConeAngle), z=cos(outerConeAngle), w=attenuation
     Vec4 flags;               // x=type, y=castShadows, z=shadowMapIndex, w=unused
 
     GPULightData()
@@ -132,12 +132,12 @@ constexpr uint32_t MAX_CASCADES = 8;
 struct alignas(16) ShadowMapData {
     math::Mat4 lightSpaceMatrix; // 64 bytes (4x Vec4)
     Vec4 shadowParams;           // x=bias, y=normalBias, z=shadowBlur, w=shadowOpacity
-    Vec4 shadowParams2;          // x=shadowResolution, y=isCubeMap, z=lightRange (for cube maps), w=unused
+    Vec4 shadowParams2;          // x=shadowResolution, y=isCubeMap, z=lightRange (for cube maps), w=biasMultiplier
 
     ShadowMapData()
         : lightSpaceMatrix(math::Mat4::Identity())
         , shadowParams(0.005f, 0.01f, 1.0f, 1.0f)
-        , shadowParams2(2048.0f, 0.0f, 0.0f, 0.0f)
+        , shadowParams2(2048.0f, 0.0f, 0.0f, 1.0f)  // Default bias multiplier = 1.0
     {}
 };
 
@@ -149,6 +149,7 @@ struct alignas(16) CascadedShadowMapData {
     Vec4 cascadeSplits;                        // Split distances for up to 4 cascades (x, y, z, w)
     Vec4 cascadeSplits2;                       // Split distances for cascades 5-8 (x, y, z, w)
     Vec4 cascadeParams;                        // x=cascadeCount, y=bias, z=normalBias, w=baseShadowMapIndex
+    Vec4 cascadeParams2;                       // x=biasMultiplier, y=unused, z=unused, w=unused
 
     CascadedShadowMapData() {
         for (int i = 0; i < MAX_CASCADES; ++i) {
@@ -157,6 +158,7 @@ struct alignas(16) CascadedShadowMapData {
         cascadeSplits = Vec4(0.0f, 0.0f, 0.0f, 0.0f);
         cascadeSplits2 = Vec4(0.0f, 0.0f, 0.0f, 0.0f);
         cascadeParams = Vec4(1.0f, 0.005f, 0.01f, 0.0f);
+        cascadeParams2 = Vec4(1.0f, 0.0f, 0.0f, 0.0f);  // Default bias multiplier = 1.0
     }
 };
 

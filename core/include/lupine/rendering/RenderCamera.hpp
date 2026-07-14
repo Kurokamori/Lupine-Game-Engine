@@ -165,14 +165,38 @@ public:
     // Canvas size (in logical pixels)
     Vec2 canvasSize = Vec2(1920.0f, 1080.0f);
 
-    // Origin position (0,0 = top-left, 1,1 = bottom-right)
+    // Screen-space offset applied to the whole canvas (canvas pixels). Drives the
+    // CameraUI node's position, shake and smoothing. Defaults to zero so internal
+    // full-screen blits and existing scenes are unaffected.
+    Vec2 position = Vec2(0.0f, 0.0f);
+
+    // Origin position within the canvas (0,0 = top-left, 0.5,0.5 = centered, 1,1 = bottom-right).
+    // Kept at top-left here so internal full-screen texture blits (renderTexturedQuad) are
+    // unaffected; the user-facing CameraUI node defaults to a centered origin and propagates it.
     Vec2 origin = Vec2(0.0f, 0.0f);
 
     // Scale factor for HiDPI displays
     float scaleFactor = 1.0f;
 
+    // Rotation of the whole canvas about its origin, in radians. Drives the
+    // CameraUI node's rotation property. Zero by default so internal full-screen
+    // blits and existing scenes keep an identity view.
+    float rotation = 0.0f;
+
+    // Uniform zoom of the whole canvas about its origin (1 = normal, 2 = 2x in,
+    // 0.5 = 2x out). Drives the CameraUI node's zoom property. Defaults to 1 so
+    // internal full-screen blits keep an identity view.
+    float zoom = 1.0f;
+
     // Whether to use pixel-perfect rendering
     bool pixelPerfect = false;
+
+    // When true the canvas uses a Y-up convention (+Y is up on every backend),
+    // matching Camera2D and the centered UIControl layout, so UI renders right-side
+    // up and coincides with the editor view. When false (default) it keeps the
+    // legacy top-left screen convention (Y=0 at top, +Y down) used by internal
+    // full-screen blits (renderTexturedQuad). The user-facing CameraUI sets this true.
+    bool yUp = false;
 };
 
 } // namespace lupine

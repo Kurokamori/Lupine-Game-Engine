@@ -4,16 +4,19 @@
 in vec2 v_TexCoord;
 in vec4 v_Color;
 
-uniform sampler2D u_Texture;
+uniform mat4 u_ViewProjection;
+uniform mat4 u_Model;
 uniform vec4 u_TintColor;
-uniform bool u_UseTexture;
+uniform int u_UseTexture;
+uniform sampler2D u_Texture;
 
 out vec4 FragColor;
 
-void main() {
-    vec4 color = v_Color * u_TintColor;
-    if (u_UseTexture) {
-        color *= texture(u_Texture, v_TexCoord);
+
+    void main() {
+        vec4 color = v_Color * u_TintColor;
+        if (u_UseTexture != 0) {
+            color *= texture(u_Texture, v_TexCoord);
+        }
+        FragColor = color;
     }
-    FragColor = color;
-}

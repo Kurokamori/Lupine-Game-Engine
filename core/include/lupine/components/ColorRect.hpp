@@ -3,9 +3,11 @@
 #include "lupine/core/Component.hpp"
 #include "lupine/core/ComponentProperty.hpp"
 #include "lupine/core/LinkedProperty.hpp"
+#include "lupine/components/UIControl.hpp"
 #include "lupine/math/Math.hpp"
 #include "lupine/rendering/ResourceHandles.hpp"
 #include "lupine/rendering/RenderWorld.hpp"
+#include "lupine/components/CustomShaderParams.hpp"
 #include <string>
 
 namespace lupine {
@@ -35,7 +37,7 @@ enum class BlendMode;
  * - Border with customizable color and per-edge width control
  * - UI space toggle (belongs to Camera2D or CameraUI render pass)
  */
-class ColorRect : public core::Component, public IRenderableComponent {
+class ColorRect : public UIControl, public IRenderableComponent {
 public:
     ColorRect();
     explicit ColorRect(const std::string& name);
@@ -44,10 +46,15 @@ public:
     // ISerializable interface
     std::string GetTypeName() const override { return "ColorRect"; }
     void DefineProperties() override;
+    void DefineSignals() override;
+
+    // Theme: fill/border colours + uniform corner radius.
+    const std::vector<ThemeBinding>& GetThemeBindings() const override;
 
     // Lifecycle hooks
     void OnAwake() override;
     void OnReady() override;
+    void OnInput(float deltaTime) override;
     void OnRender() override;
 
     // Editor gizmo hooks
@@ -58,7 +65,7 @@ public:
     /**
      * Get/Set the fill color of the rectangle
      */
-    const math::Color& GetColor() const;
+    math::Color GetColor() const;
     void SetColor(const math::Color& color);
     
     /**
@@ -74,24 +81,7 @@ public:
     void SetSortingOrder(int order);
 
     // ===== Size Properties =====
-    
-    /**
-     * Get/Set width
-     */
-    float GetWidth() const;
-    void SetWidth(float width);
-    
-    /**
-     * Get/Set height
-     */
-    float GetHeight() const;
-    void SetHeight(float height);
-    
-    /**
-     * Get size as Vec2
-     */
-    math::Vec2 GetSize() const;
-    void SetSize(const math::Vec2& size);
+    // Width/height/size are provided by the UIControl base class.
 
     // ===== Corner Radius Properties =====
     
@@ -130,7 +120,7 @@ public:
     /**
      * Get/Set border color
      */
-    const math::Color& GetBorderColor() const;
+    math::Color GetBorderColor() const;
     void SetBorderColor(const math::Color& color);
     
     /**
@@ -158,14 +148,12 @@ public:
     void SetBorderWidthLinked(bool linked);
 
     // ===== UI Space Properties =====
-    
-    /**
-     * Get/Set UI space flag
-     * true = renders in CameraUI space
-     * false = renders in Camera2D space
-     */
-    bool GetUISpace() const;
-    void SetUISpace(bool uiSpace);
+    // GetUISpace/SetUISpace are provided by the UIControl base class.
+
+    // ===== Mouse Handling =====
+    // GetMouseFilter/SetMouseFilter, the hover/press queries and the mouse signals are
+    // provided by the UIControl base class. A ColorRect defaults to MouseFilter::Ignore,
+    // so it stays decorative (and click-transparent) unless the filter is changed.
 
     // ===== Blend Mode =====
     
@@ -189,6 +177,26 @@ public:
      */
     const std::string& GetMaterialOverride() const;
     void SetMaterialOverride(const std::string& materialPath);
+
+    // ===== Custom Shader (.lsh) =====
+
+    /**
+     * Get/Set the attached Lupine Shader (.lsh) path.
+     * Empty string means use the built-in rounded-rect shader.
+     * When set, the fill is rendered with the custom shader and its exported parameters.
+     */
+    const std::string& GetShader() const;
+    void SetShader(const std::string& shaderPath);
+
+    /**
+     * Get/Set the serialized exported-shader-parameter values (JSON object).
+     * Maps uniform name -> typed value, e.g.
+     *   {"u_Intensity": {"type":"float","value":1.0},
+     *    "u_GlowColor": {"type":"color","value":[1,0,0,1]}}
+     * Managed by the editor's shader-parameter inspector; consumed at render time.
+     */
+    const std::string& GetShaderParameters() const;
+    void SetShaderParameters(const std::string& parametersJson);
 
     // ===== IRenderableComponent Interface =====
 
@@ -218,12 +226,21 @@ private:
     /**
      * Render the filled rectangle
      */
-    void RenderFill(RenderContext& ctx, const math::Vec2& position, const math::Vec2& size, float rotation);
+    void RenderFill(RenderContext& ctx, const math::Vec2& center, const math::Vec2& size, float rotation);
+
+    /**
+     * Render the filled rectangle using the attached custom shader.
+     * Returns false if the shader could not be resolved/compiled (caller falls back to RenderFill).
+     */
+    bool RenderFillCustomShader(RenderContext& ctx, const math::Vec2& center, const math::Vec2& size, float rotation);
 
     /**
      * Render the border
      */
-    void RenderBorder(RenderContext& ctx, const math::Vec2& position, const math::Vec2& size, float rotation);
+    void RenderBorder(RenderContext& ctx, const math::Vec2& center, const math::Vec2& size, float rotation);
+
+    // Custom shader parameter parsing + texture-parameter cache (shared helper).
+    CustomShaderParams m_ShaderParams;
 };
 
 } // namespace components

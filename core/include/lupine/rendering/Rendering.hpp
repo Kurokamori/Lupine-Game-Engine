@@ -21,8 +21,12 @@
 #include "backends/GfxDeviceVulkan.hpp"
 #include "backends/GfxDeviceMetal.hpp"
 #include "backends/GfxDeviceWebGL.hpp"
+#ifdef LUPINE_HAS_DIRECTX11
 #include "backends/GfxDeviceDX11.hpp"
+#endif
+#ifdef LUPINE_HAS_DIRECTX12
 #include "backends/GfxDeviceDX12.hpp"
+#endif
 
 // High-level rendering
 #include "Material.hpp"

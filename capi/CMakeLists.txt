@@ -3,13 +3,20 @@ cmake_minimum_required(VERSION 3.15)
 # C API library
 project(lupine_capi VERSION 1.0.0 LANGUAGES C CXX)
 
+# Find required packages
+find_package(OpenGL REQUIRED)
+find_package(GLEW CONFIG REQUIRED)
+find_package(Python3 COMPONENTS Development REQUIRED)
+
 # Gather all source files using GLOB_RECURSE
-file(GLOB_RECURSE CAPI_SOURCES
+# CONFIGURE_DEPENDS re-globs at build time so newly added C API files are
+# picked up without a manual reconfigure.
+file(GLOB_RECURSE CAPI_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.c"
 )
 
-file(GLOB_RECURSE CAPI_HEADERS
+file(GLOB_RECURSE CAPI_HEADERS CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h"
 )
 
@@ -28,17 +35,31 @@ set_target_properties(lupine_capi PROPERTIES
     SOVERSION 1
 )
 
-# Find Python (needed because lupine_core depends on it)
-find_package(Python COMPONENTS Development)
-
-# Link against C++ engine modules
+# Link against C++ engine modules and their dependencies
 target_link_libraries(lupine_capi PRIVATE
     lupine_core
+    GLEW::GLEW
+    OpenGL::GL
 )
 
-# Add Python libraries if found (transitively needed by lupine_core)
-if(Python_FOUND)
-    target_link_libraries(lupine_capi PRIVATE Python::Python)
+# Platform-specific Python linking
+# CAPI needs Python since it wraps Python-using core functionality
+if(WIN32)
+    # Link against Python using full paths (vcpkg)
+    target_link_libraries(lupine_capi PRIVATE
+        $<$<CONFIG:Debug>:${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/debug/lib/python312_d.lib>
+        $<$<CONFIG:Release>:${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/lib/python312.lib>
+    )
+else()
+    # Link against Python using CMake's found package (macOS/Linux)
+    target_link_libraries(lupine_capi PRIVATE
+        Python3::Python
+    )
+    # macOS-specific linking for iconv (required by libintl/gettext)
+    if(APPLE)
+        # Use system iconv on macOS
+        target_link_libraries(lupine_capi PRIVATE "-liconv")
+    endif()
 endif()
 
 # Public include directory (C headers only)

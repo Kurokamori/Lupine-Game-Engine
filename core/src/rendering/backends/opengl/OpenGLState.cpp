@@ -91,6 +91,26 @@ void OpenGLState::bindSampler(uint32_t unit, GLuint sampler) {
     }
 }
 
+void OpenGLState::resetBindingState() {
+    // Reset all binding state to force rebinding on next use
+    // This is necessary when runtime restarts because OpenGL texture IDs
+    // may be reused for different textures
+    boundProgram = 0;
+    boundVAO = 0;
+    boundArrayBuffer = 0;
+    boundElementBuffer = 0;
+    boundFramebuffer = 0;
+
+    // Clear all texture bindings
+    for (auto& binding : boundTextures) {
+        binding.id = 0;
+        binding.target = 0;
+    }
+
+    // Clear all sampler bindings
+    std::fill(boundSamplers.begin(), boundSamplers.end(), 0);
+}
+
 namespace GLUtils {
 
 GLenum toGLTextureFormat(TextureFormat format) {
@@ -312,7 +332,7 @@ GLint getVertexFormatCount(VertexFormat format) {
     }
 }
 
-bool isVertexFormatNormalized(VertexFormat format) {
+bool isVertexFormatNormalized(VertexFormat) {
 
     return false;
 }

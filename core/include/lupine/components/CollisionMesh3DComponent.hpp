@@ -64,6 +64,7 @@ public:
     void OnAwake() override;
     void OnReady() override;
     void OnDestroy() override;
+    void OnPhysicsWorldRebuild(PhysicsWorldRebuildPhase phase) override;
     void OnRender() override;
 
     // Property change notification
@@ -123,6 +124,12 @@ public:
     bool IsSensor() const;
     void SetSensor(bool isSensor);
 
+    /**
+     * Get/Set collision layers (bitmask - objects collide if they share any layer)
+     */
+    uint32_t GetCollisionLayers() const;
+    void SetCollisionLayers(uint32_t layers);
+
     // ===== Debug Visualization =====
 
     math::Color GetDebugColor() const;
@@ -154,6 +161,7 @@ private:
     float m_Friction;
     float m_Restitution;
     bool m_IsSensor;
+    uint32_t m_CollisionLayers = 1; // Default: layer 1 only
 
     // Debug visualization
     math::Color m_DebugColor;
@@ -164,6 +172,7 @@ private:
     core::UUID m_PhysicsBodyId;
 
     // Helper methods
+    void ReadShapeFields(const nlohmann::json& source);
     void CreateCollider();
     void DestroyCollider();
     void UpdateCollider();

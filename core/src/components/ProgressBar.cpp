@@ -1,11 +1,15 @@
 #include "lupine/components/ProgressBar.hpp"
 #include "lupine/core/Node.hpp"
+#include "lupine/ui/ThemeManager.hpp"
+#include "lupine/ui/Theme.hpp"
 #include "lupine/rendering/RenderContext.hpp"
 #include "lupine/rendering/RenderWorld.hpp"
 #include "lupine/rendering/Mesh.hpp"
 #include "lupine/rendering/gfx/IGfxDevice.hpp"
+#include "lupine/rendering/TextureUpload.hpp"
 #include "lupine/rendering/gfx/GfxDescriptors.hpp"
 #include "lupine/rendering/Font.hpp"
+#include "lupine/asset/AssetDatabase.hpp"
 #include "lupine/logger/Logger.hpp"
 #include <algorithm>
 #include <sstream>
@@ -21,7 +25,7 @@ using namespace math;
 using core::Node2D;
 
 ProgressBar::ProgressBar()
-    : Component("ProgressBar")
+    : UIControl("ProgressBar")
     , m_BackgroundTextureAsset()
     , m_BackgroundTextureHandle()
     , m_CurrentBackgroundTexturePath("")
@@ -45,7 +49,7 @@ ProgressBar::ProgressBar()
 }
 
 ProgressBar::ProgressBar(const std::string& name)
-    : Component(name)
+    : UIControl(name)
     , m_BackgroundTextureAsset()
     , m_BackgroundTextureHandle()
     , m_CurrentBackgroundTexturePath("")
@@ -74,6 +78,8 @@ ProgressBar::~ProgressBar() {
 
 void ProgressBar::DefineProperties() {
 
+    DefineUIControlProperties(200.0f, 20.0f, "uiSpace", "Size");
+
     DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(minValue, 0.0f, -10000.0f, 10000.0f, 0.1f, "Value"));
     DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(maxValue, 100.0f, -10000.0f, 10000.0f, 0.1f, "Value"));
     DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(value, 50.0f, -10000.0f, 10000.0f, 0.1f, "Value"));
@@ -81,9 +87,6 @@ void ProgressBar::DefineProperties() {
 
     DefineProperty(PROPERTY_DEFAULT_GROUP(smooth, Bool, false, "Smooth"));
     DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(smoothSpeed, 5.0f, 0.1f, 100.0f, 0.1f, "Smooth"));
-
-    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(width, 200.0f, 0.0f, 10000.0f, 1.0f, "Size"));
-    DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(height, 20.0f, 0.0f, 10000.0f, 1.0f, "Size"));
 
     DefineProperty(PROPERTY_ENUM_GROUP(orientation, 0, "Orientation", Horizontal, Vertical));
     DefineProperty(PROPERTY_ENUM_GROUP(fillDirection, 0, "Orientation", LeftToRight, RightToLeft, UpToDown, DownToUp));
@@ -143,6 +146,8 @@ void ProgressBar::OnAwake() {
 }
 
 void ProgressBar::OnUpdate(float deltaTime) {
+    UIControl::OnUpdate(deltaTime);
+
     if (!GetSmooth()) {
         m_DisplayValue = GetValue();
         return;
@@ -160,27 +165,11 @@ void ProgressBar::OnUpdate(float deltaTime) {
 }
 
 bool ProgressBar::OnGizmoScale(float scaleDelta, int axis, bool is3D) {
-
-    if (!is3D) {
-        float currentWidth = GetWidth();
-        float currentHeight = GetHeight();
-
-        if (axis == 0) {
-
-            SetWidth(std::max(0.1f, currentWidth + scaleDelta * currentWidth));
-        } else if (axis == 1) {
-
-            SetHeight(std::max(0.1f, currentHeight + scaleDelta * currentHeight));
-        } else if (axis == -1) {
-
-            SetWidth(std::max(0.1f, currentWidth + scaleDelta * currentWidth));
-            SetHeight(std::max(0.1f, currentHeight + scaleDelta * currentHeight));
-        }
-
-        return true;
-    }
-
-    return false;
+    // Resizing is delegated to the base, which writes whichever property actually drives
+    // the axis: width/height when point-anchored, the offsets when anchor-stretched (where
+    // width/height are never read at all), and nothing when a container owns the rect.
+    const bool handled = UIControl::OnGizmoScale(scaleDelta, axis, is3D);
+    return handled;
 }
 
 float ProgressBar::GetMinValue() const {
@@ -242,21 +231,6 @@ void ProgressBar::SetSmoothSpeed(float speed) {
     SetPropertyValue<float>("smoothSpeed", std::max(0.1f, speed));
 }
 
-float ProgressBar::GetWidth() const {
-    return GetPropertyValue<float>("width");
-}
-
-void ProgressBar::SetWidth(float width) {
-    SetPropertyValue<float>("width", std::max(0.0f, width));
-}
-
-float ProgressBar::GetHeight() const {
-    return GetPropertyValue<float>("height");
-}
-
-void ProgressBar::SetHeight(float height) {
-    SetPropertyValue<float>("height", std::max(0.0f, height));
-}
 
 int ProgressBar::GetOrientation() const {
     return GetPropertyValue<int>("orientation");
@@ -284,14 +258,25 @@ void ProgressBar::SetBackgroundTexturePath(const std::string& path) {
     SetPropertyValue<std::string>("backgroundTexturePath", path);
 }
 
-const Color& ProgressBar::GetBackgroundColor() const {
-    static Color cachedColor;
-    cachedColor = GetPropertyValue<Color>("backgroundColor");
-    return cachedColor;
+const std::vector<UIControl::ThemeBinding>& ProgressBar::GetThemeBindings() const {
+    static const std::vector<ThemeBinding> kBindings = {
+        { "backgroundColor", "background",    ThemeBinding::Kind::Color },
+        { "fillColor",       "fill_color",    ThemeBinding::Kind::Color },
+        { "borderColor",     "border_color",  ThemeBinding::Kind::Color },
+        { "valueColor",      "font_color",    ThemeBinding::Kind::Color },
+        { "valueFontPath",   "font",          ThemeBinding::Kind::Font },
+        { "valueFontSize",   "font_size",     ThemeBinding::Kind::Constant },
+        { "cornerRadius",    "corner_radius", ThemeBinding::Kind::Constant }
+    };
+    return kBindings;
+}
+
+Color ProgressBar::GetBackgroundColor() const {
+    return ResolveThemedColor("backgroundColor", "background");
 }
 
 void ProgressBar::SetBackgroundColor(const Color& color) {
-    SetPropertyValue<Color>("backgroundColor", color);
+    SetThemedProperty<Color>("backgroundColor", color);
 }
 
 const std::string& ProgressBar::GetFillTexturePath() const {
@@ -304,14 +289,12 @@ void ProgressBar::SetFillTexturePath(const std::string& path) {
     SetPropertyValue<std::string>("fillTexturePath", path);
 }
 
-const Color& ProgressBar::GetFillColor() const {
-    static Color cachedColor;
-    cachedColor = GetPropertyValue<Color>("fillColor");
-    return cachedColor;
+Color ProgressBar::GetFillColor() const {
+    return ResolveThemedColor("fillColor", "fill_color");
 }
 
 void ProgressBar::SetFillColor(const Color& color) {
-    SetPropertyValue<Color>("fillColor", color);
+    SetThemedProperty<Color>("fillColor", color);
 }
 
 const std::string& ProgressBar::GetBorderTexturePath() const {
@@ -324,14 +307,12 @@ void ProgressBar::SetBorderTexturePath(const std::string& path) {
     SetPropertyValue<std::string>("borderTexturePath", path);
 }
 
-const Color& ProgressBar::GetBorderColor() const {
-    static Color cachedColor;
-    cachedColor = GetPropertyValue<Color>("borderColor");
-    return cachedColor;
+Color ProgressBar::GetBorderColor() const {
+    return ResolveThemedColor("borderColor", "border_color");
 }
 
 void ProgressBar::SetBorderColor(const Color& color) {
-    SetPropertyValue<Color>("borderColor", color);
+    SetThemedProperty<Color>("borderColor", color);
 }
 
 bool ProgressBar::GetShowValue() const {
@@ -345,31 +326,29 @@ void ProgressBar::SetShowValue(bool show) {
 
 const std::string& ProgressBar::GetValueFontPath() const {
     static std::string cachedPath;
-    cachedPath = GetPropertyValue<std::string>("valueFontPath");
+    cachedPath = ResolveThemedFontPath("valueFontPath", "font");
     return cachedPath;
 }
 
 void ProgressBar::SetValueFontPath(const std::string& path) {
-    SetPropertyValue<std::string>("valueFontPath", path);
+    SetThemedProperty<std::string>("valueFontPath", path);
 }
 
 float ProgressBar::GetValueFontSize() const {
-    return GetPropertyValue<float>("valueFontSize");
+    return ResolveThemedFontSize("valueFontSize", "font_size", "font");
 }
 
 void ProgressBar::SetValueFontSize(float size) {
-    SetPropertyValue<float>("valueFontSize", std::max(1.0f, size));
+    SetThemedProperty<float>("valueFontSize", std::max(1.0f, size));
     m_TextMeshNeedsRegeneration = true;
 }
 
-const Color& ProgressBar::GetValueColor() const {
-    static Color cachedColor;
-    cachedColor = GetPropertyValue<Color>("valueColor");
-    return cachedColor;
+Color ProgressBar::GetValueColor() const {
+    return ResolveThemedColor("valueColor", "font_color");
 }
 
 void ProgressBar::SetValueColor(const Color& color) {
-    SetPropertyValue<Color>("valueColor", color);
+    SetThemedProperty<Color>("valueColor", color);
 }
 
 const core::LinkedProperty4& ProgressBar::GetCornerRadius() const {
@@ -378,18 +357,18 @@ const core::LinkedProperty4& ProgressBar::GetCornerRadius() const {
 
 void ProgressBar::SetCornerRadius(const core::LinkedProperty4& radius) {
     m_CornerRadius = radius;
-    SetPropertyValue<Vec4>("cornerRadius", radius.AsVec4());
+    SetThemedProperty<Vec4>("cornerRadius", radius.AsVec4());
     SetPropertyValue<bool>("cornerRadiusLinked", radius.IsLinked());
 }
 
 void ProgressBar::SetCornerRadiusAll(float radius) {
     m_CornerRadius.SetAll(radius);
-    SetPropertyValue<Vec4>("cornerRadius", m_CornerRadius.AsVec4());
+    SetThemedProperty<Vec4>("cornerRadius", m_CornerRadius.AsVec4());
 }
 
 void ProgressBar::SetCornerRadiusIndividual(size_t index, float radius) {
     m_CornerRadius.Set(index, radius);
-    SetPropertyValue<Vec4>("cornerRadius", m_CornerRadius.AsVec4());
+    SetThemedProperty<Vec4>("cornerRadius", m_CornerRadius.AsVec4());
 }
 
 bool ProgressBar::IsCornerRadiusLinked() const {
@@ -506,21 +485,45 @@ void ProgressBar::buildDrawCommands(RenderContext& ctx) {
     Node2D* node2D = dynamic_cast<Node2D*>(owner);
     if (!node2D) return;
 
+    // Regenerate the (colour-baked) value-text mesh when the theme/palette changes.
+    if (ConsumeThemeVersionChanged()) {
+        m_TextMeshNeedsRegeneration = true;
+    }
+
+    // A resolution change re-bakes the font atlas at a new oversampling density,
+    // which repacks glyph UVs; regenerate the cached text mesh so it matches.
+    if (ConsumeFontOversampleChanged()) {
+        m_TextMeshNeedsRegeneration = true;
+    }
+
     Vec4 cornerRadiusVec = GetPropertyValue<Vec4>("cornerRadius");
     bool cornerRadiusLinked = GetPropertyValue<bool>("cornerRadiusLinked");
     m_CornerRadius.FromVec4(cornerRadiusVec);
     m_CornerRadius.SetLinked(cornerRadiusLinked);
+
+    // A theme may supply a uniform corner radius. Applied only when the theme
+    // defines it and the property is not a local override (preserving per-corner
+    // values otherwise).
+    if (!IsThemeOverridden("cornerRadius")) {
+        const ui::ThemeAsset* theme = GetEffectiveTheme();
+        ui::ThemeManager& tm = ui::ThemeManager::GetInstance();
+        if (tm.HasConstant(theme, GetThemeTypeName(), GetThemeTypeVariation(), "corner_radius")) {
+            float r = tm.ResolveConstant(theme, GetThemeTypeName(), GetThemeTypeVariation(), "corner_radius", 0.0f);
+            m_CornerRadius.FromVec4(Vec4(r, r, r, r));
+            m_CornerRadius.SetLinked(true);
+        }
+    }
 
     Vec4 borderWidthVec = GetPropertyValue<Vec4>("borderWidth");
     bool borderWidthLinked = GetPropertyValue<bool>("borderWidthLinked");
     m_BorderWidth.FromVec4(borderWidthVec);
     m_BorderWidth.SetLinked(borderWidthLinked);
 
-    Vec2 globalPos = node2D->GetGlobalPosition();
-    Vec2 size = Vec2(GetWidth(), GetHeight());
+    const Rect __rect = GetResolvedRect();
+    Vec2 size = __rect.size;
     float rotation = node2D->GetGlobalRotation();
 
-    Vec2 position = Vec2(globalPos.x - size.x * 0.5f, globalPos.y - size.y * 0.5f);
+    Vec2 position = __rect.position;
 
     std::string bgTexPath = GetBackgroundTexturePath();
     if (bgTexPath != m_CurrentBackgroundTexturePath) {
@@ -535,20 +538,18 @@ void ProgressBar::buildDrawCommands(RenderContext& ctx) {
         m_CurrentBackgroundTexturePath = bgTexPath;
     }
 
+    IGfxDevice* device = ctx.getDevice();
+    // Use linear color space (UNORM) for consistency across backends
+    TextureFormat colorFormat = TextureFormat::RGBA8_UNORM;
+
     if (!m_BackgroundTextureHandle.isValid() && m_BackgroundTextureAsset.IsValid() && m_BackgroundTextureAsset->IsLoaded()) {
-        TextureDesc desc;
-        desc.width = m_BackgroundTextureAsset->GetWidth();
-        desc.height = m_BackgroundTextureAsset->GetHeight();
-        desc.format = TextureFormat::RGBA8_SRGB;
-        desc.usage = TextureUsage::Sampled;
-        desc.initialData = m_BackgroundTextureAsset->GetData();
-        m_BackgroundTextureHandle = ctx.getDevice()->createTexture(desc);
+        m_BackgroundTextureHandle = lupine::CreateTexture2DFromImage(device, *m_BackgroundTextureAsset, colorFormat);
     }
 
     std::string fillTexPath = GetFillTexturePath();
     if (fillTexPath != m_CurrentFillTexturePath) {
         if (m_FillTextureHandle.isValid()) {
-            ctx.getDevice()->destroyTexture(m_FillTextureHandle);
+            device->destroyTexture(m_FillTextureHandle);
             m_FillTextureHandle = TextureHandle();
         }
         m_FillTextureAsset.Reset();
@@ -559,19 +560,13 @@ void ProgressBar::buildDrawCommands(RenderContext& ctx) {
     }
 
     if (!m_FillTextureHandle.isValid() && m_FillTextureAsset.IsValid() && m_FillTextureAsset->IsLoaded()) {
-        TextureDesc desc;
-        desc.width = m_FillTextureAsset->GetWidth();
-        desc.height = m_FillTextureAsset->GetHeight();
-        desc.format = TextureFormat::RGBA8_SRGB;
-        desc.usage = TextureUsage::Sampled;
-        desc.initialData = m_FillTextureAsset->GetData();
-        m_FillTextureHandle = ctx.getDevice()->createTexture(desc);
+        m_FillTextureHandle = lupine::CreateTexture2DFromImage(device, *m_FillTextureAsset, colorFormat);
     }
 
     std::string borderTexPath = GetBorderTexturePath();
     if (borderTexPath != m_CurrentBorderTexturePath) {
         if (m_BorderTextureHandle.isValid()) {
-            ctx.getDevice()->destroyTexture(m_BorderTextureHandle);
+            device->destroyTexture(m_BorderTextureHandle);
             m_BorderTextureHandle = TextureHandle();
         }
         m_BorderTextureAsset.Reset();
@@ -582,13 +577,7 @@ void ProgressBar::buildDrawCommands(RenderContext& ctx) {
     }
 
     if (!m_BorderTextureHandle.isValid() && m_BorderTextureAsset.IsValid() && m_BorderTextureAsset->IsLoaded()) {
-        TextureDesc desc;
-        desc.width = m_BorderTextureAsset->GetWidth();
-        desc.height = m_BorderTextureAsset->GetHeight();
-        desc.format = TextureFormat::RGBA8_SRGB;
-        desc.usage = TextureUsage::Sampled;
-        desc.initialData = m_BorderTextureAsset->GetData();
-        m_BorderTextureHandle = ctx.getDevice()->createTexture(desc);
+        m_BorderTextureHandle = lupine::CreateTexture2DFromImage(device, *m_BorderTextureAsset, colorFormat);
     }
 
     std::string fontPath = GetValueFontPath();
@@ -616,12 +605,12 @@ void ProgressBar::buildDrawCommands(RenderContext& ctx) {
 
     if (m_FontAsset.IsValid() && m_FontAsset->IsLoaded() && !m_FontHandle.isValid()) {
         FontDesc fontDesc;
-        fontDesc.fontPath = m_FontAsset->GetPath();
+        // Use GetPhysicalPath() to resolve res:// path to filesystem path for file loading
+        fontDesc.fontPath = m_FontAsset->GetPhysicalPath();
         fontDesc.fontSize = fontSize;
         fontDesc.atlasWidth = m_FontAsset->GetAtlasWidth();
         fontDesc.atlasHeight = m_FontAsset->GetAtlasHeight();
 
-        IGfxDevice* device = ctx.getDevice();
         if (device) {
             m_FontHandle = device->createFontAtlas(fontDesc);
         }
@@ -817,7 +806,7 @@ void ProgressBar::RenderValue(RenderContext& ctx, const Vec2& position, const Ve
     ctx.drawMesh(m_TextMesh, ctx.getDefaultTextMaterial(), transform, overrides);
 }
 
-void ProgressBar::RegenerateTextMesh(RenderContext& ctx, const Vec2& position, const Vec2& size) {
+void ProgressBar::RegenerateTextMesh(RenderContext& ctx, const Vec2& position, const Vec2&) {
 
     if (m_TextMesh.isValid() && ctx.getDevice()) {
         ctx.getDevice()->destroyMesh(m_TextMesh);
@@ -921,9 +910,6 @@ AABB ProgressBar::getWorldBounds() const {
         return AABB();
     }
 
-    float width = GetWidth();
-    float height = GetHeight();
-
     Node2D* node2d = dynamic_cast<Node2D*>(GetOwner());
     if (!node2d) {
         return AABB();
@@ -933,7 +919,8 @@ AABB ProgressBar::getWorldBounds() const {
     Vec2 globalScale = node2d->GetGlobalScale();
     float rotation = node2d->GetGlobalRotation();
 
-    Vec2 size(width * globalScale.x, height * globalScale.y);
+    Vec2 boundsSize = GetBoundsSize();
+    Vec2 size(boundsSize.x * globalScale.x, boundsSize.y * globalScale.y);
 
     if (std::abs(rotation) > 0.0001f) {
         float cosR = std::cos(rotation);
@@ -976,8 +963,65 @@ RenderLayer ProgressBar::getRenderLayer() const {
 }
 
 SpatialType ProgressBar::getSpatialType() const {
+    return GetUISpatialType();
+}
 
-    return SpatialType::World2D;
+bool ProgressBar::OnAssetFileChanged(const std::string& changedPath, const std::string& resolvedChangedPath) {
+    auto& assetDb = asset::AssetDatabase::GetInstance();
+    bool anyChanged = false;
+
+    auto matchesPath = [&](const std::string& currentPath) -> bool {
+        if (currentPath.empty()) return false;
+        std::string resolved;
+        if (assetDb.IsInitialized()) {
+            resolved = assetDb.ResolveAsset(currentPath);
+        }
+        return (currentPath == changedPath) ||
+               (!resolved.empty() && !resolvedChangedPath.empty() && resolved == resolvedChangedPath);
+    };
+
+    // Check background texture
+    std::string bgPath = GetBackgroundTexturePath();
+    if (matchesPath(bgPath)) {
+        
+        m_BackgroundTextureHandle = TextureHandle();
+        m_BackgroundTextureAsset.Reset();
+        m_CurrentBackgroundTexturePath.clear();
+        anyChanged = true;
+    }
+
+    // Check fill texture
+    std::string fillPath = GetFillTexturePath();
+    if (matchesPath(fillPath)) {
+        
+        m_FillTextureHandle = TextureHandle();
+        m_FillTextureAsset.Reset();
+        m_CurrentFillTexturePath.clear();
+        anyChanged = true;
+    }
+
+    // Check border texture
+    std::string borderPath = GetBorderTexturePath();
+    if (matchesPath(borderPath)) {
+        
+        m_BorderTextureHandle = TextureHandle();
+        m_BorderTextureAsset.Reset();
+        m_CurrentBorderTexturePath.clear();
+        anyChanged = true;
+    }
+
+    // Check font
+    std::string fontPath = GetValueFontPath();
+    if (matchesPath(fontPath)) {
+        
+        m_FontHandle = FontHandle();
+        m_FontAsset.Reset();
+        m_CurrentFontPath.clear();
+        m_TextMeshNeedsRegeneration = true;
+        anyChanged = true;
+    }
+
+    return anyChanged;
 }
 
 }

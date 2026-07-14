@@ -25,6 +25,38 @@ if str(editor_path) not in sys.path:
 from panels.base_panel import EditorPanel
 
 
+def _resolve_res_path(res_path: str) -> str:
+    """Resolve a res:// path to an absolute path"""
+    if not res_path:
+        return res_path
+
+    if res_path.startswith("res://"):
+        project_root = None
+
+        # Try to get project root from AssetDatabase
+        try:
+            import lupine_engine as le
+            asset_db = le.AssetDatabase.get_instance()
+            if asset_db.is_initialized():
+                project_root = asset_db.get_project_root()
+        except Exception:
+            pass
+
+        if not project_root:
+            # Try panels.inspector_panel
+            try:
+                from panels.inspector_panel import get_project_root
+                project_root = get_project_root()
+            except Exception:
+                pass
+
+        if project_root:
+            relative_path = res_path[6:]  # Remove "res://"
+            return str(Path(project_root) / relative_path)
+
+    return res_path
+
+
 class SpriteSlice:
     """Represents a single sprite slice"""
     def __init__(self, rect: QRect, index: int, source_image_path: str = None):
@@ -105,10 +137,12 @@ class SpriteSliceWidget(QWidget):
         self.selected_indices.clear()
 
         for idx, path in enumerate(image_paths):
-            pixmap = QPixmap(str(path))
+            # Resolve res:// paths to absolute paths for loading
+            resolved_path = _resolve_res_path(str(path))
+            pixmap = QPixmap(resolved_path)
             if not pixmap.isNull():
                 self.images.append(pixmap)
-                # Each image is its own slice
+                # Each image is its own slice - store original path (may be res://)
                 rect = QRect(0, 0, pixmap.width(), pixmap.height())
                 self.sprites.append(SpriteSlice(rect, idx, str(path)))
 
@@ -116,7 +150,9 @@ class SpriteSliceWidget(QWidget):
 
     def load_sprite_sheet(self, image_path: str, cols: int, rows: int):
         """Load a sprite sheet and slice it into a grid"""
-        pixmap = QPixmap(str(image_path))
+        # Resolve res:// path for loading
+        resolved_path = _resolve_res_path(str(image_path))
+        pixmap = QPixmap(resolved_path)
         if pixmap.isNull():
             return
 
@@ -133,6 +169,7 @@ class SpriteSliceWidget(QWidget):
                 x = col * sprite_width
                 y = row * sprite_height
                 rect = QRect(x, y, sprite_width, sprite_height)
+                # Store original path (may be res://)
                 self.sprites.append(SpriteSlice(rect, idx, str(image_path)))
                 idx += 1
 
@@ -140,7 +177,9 @@ class SpriteSliceWidget(QWidget):
 
     def load_sprite_sheet_by_size(self, image_path: str, sprite_width: int, sprite_height: int):
         """Load a sprite sheet and slice it by sprite dimensions"""
-        pixmap = QPixmap(str(image_path))
+        # Resolve res:// path for loading
+        resolved_path = _resolve_res_path(str(image_path))
+        pixmap = QPixmap(resolved_path)
         if pixmap.isNull():
             return
 
@@ -984,6 +1023,8 @@ class SpriteAnimatorTool(EditorPanel):
 
     def _load_sprite_sheet(self):
         """Load a sprite sheet image"""
+        from panels.inspector_panel import convert_to_res_path
+
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Load Sprite Sheet",
@@ -992,8 +1033,10 @@ class SpriteAnimatorTool(EditorPanel):
         )
 
         if file_path:
-            self.current_sheet_path = file_path
-            self.loaded_image_paths = [file_path]
+            # Convert to res:// path for storage, but use original for loading
+            res_path = convert_to_res_path(file_path)
+            self.current_sheet_path = file_path  # Keep absolute for loading
+            self.loaded_image_paths = [res_path]  # Store res:// path
             self.slicing_group.setEnabled(True)
             self.slice_mode_info.setText("Configure sprite sheet slicing")
 
@@ -1008,6 +1051,8 @@ class SpriteAnimatorTool(EditorPanel):
 
     def _load_images(self):
         """Load multiple images as individual sprites"""
+        from panels.inspector_panel import convert_to_res_path
+
         file_paths, _ = QFileDialog.getOpenFileNames(
             self,
             "Load Images",
@@ -1016,8 +1061,10 @@ class SpriteAnimatorTool(EditorPanel):
         )
 
         if file_paths:
-            self.loaded_image_paths = file_paths
+            # Convert to res:// paths for storage
+            self.loaded_image_paths = [convert_to_res_path(p) for p in file_paths]
             self.current_sheet_path = None
+            # Use original paths for loading
             self.sprite_widget.load_images(file_paths)
 
             # Enable slicing settings for batch images (controls display grid)

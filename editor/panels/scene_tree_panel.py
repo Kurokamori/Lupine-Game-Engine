@@ -1,13 +1,13 @@
 """
 Scene Tree Panel
-Displays and manages the scene hierarchy (Godot-style)
+Displays and manages the scene hierarchy
 """
 
 from PyQt6.QtWidgets import (QTreeWidget, QTreeWidgetItem, QVBoxLayout, QHBoxLayout,
-                             QPushButton, QMenu, QMessageBox, QCheckBox, QWidget, QLabel, 
-                             QStyledItemDelegate, QStyle)
+                             QPushButton, QMenu, QMessageBox, QCheckBox, QWidget, QLabel,
+                             QStyledItemDelegate, QStyle, QFileDialog)
 from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QRect
-from PyQt6.QtGui import QAction, QIcon, QDropEvent, QPixmap, QPainter
+from PyQt6.QtGui import QAction, QIcon, QDropEvent, QPixmap, QPainter, QShortcut, QKeySequence, QCursor
 from .base_panel import EditorPanel
 from dialogs import AddNodeDialog, AddComponentDialog, AddNodePrefabDialog
 import lupine_engine as le
@@ -20,6 +20,12 @@ import json
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from theme import get_theme_manager, get_icon_pack_manager
 from clipboard_manager import ClipboardManager
+
+# Script-bearing component type names and the source extensions they reference.
+# Used to decide whether a node shows the inline script shortcut button.
+SCRIPT_COMPONENT_TYPES = ('LuaScriptComponent', 'PythonScriptComponent', 'MRubyScriptComponent')
+SCRIPT_FILE_EXTENSIONS = ('.lua', '.py', '.rb')
+
 
 class IconButton(QPushButton):
     """Small icon button for tree items"""
@@ -60,7 +66,8 @@ class CenteredIconWidget(QWidget):
 class SceneTreeWidget(QTreeWidget):
     """Custom tree widget with drag-and-drop reparenting support"""
 
-    node_reparented = pyqtSignal(str, str)  # dragged_node_uuid, new_parent_uuid
+    # dragged_node_uuid, new_parent_uuid, target_index (-1 = append)
+    node_reparented = pyqtSignal(str, str, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -72,8 +79,19 @@ class SceneTreeWidget(QTreeWidget):
         else:
             super().mouseDoubleClickEvent(event)
 
+    def _child_uuids(self, parent_item, exclude_uuid=None):
+        """Ordered list of child node UUIDs under a tree item, optionally
+        excluding one (used to compute drop indices in the post-removal list)."""
+        uuids = []
+        for i in range(parent_item.childCount()):
+            child = parent_item.child(i)
+            uuid = child.data(0, Qt.ItemDataRole.UserRole)
+            if uuid and uuid != exclude_uuid:
+                uuids.append(uuid)
+        return uuids
+
     def dropEvent(self, event: QDropEvent):
-        """Handle drop event for reparenting nodes"""
+        """Handle drop event for reparenting and reordering nodes"""
         # Get the dragged item
         dragged_item = self.currentItem()
         if not dragged_item:
@@ -87,7 +105,7 @@ class SceneTreeWidget(QTreeWidget):
         # Determine the new parent based on drop position
         new_parent_item = None
         if drop_indicator == QTreeWidget.DropIndicatorPosition.OnItem:
-            # Dropped ON an item - make it a child
+            # Dropped ON an item - make it a child (appended)
             new_parent_item = target_item
         elif drop_indicator in (QTreeWidget.DropIndicatorPosition.AboveItem,
                                  QTreeWidget.DropIndicatorPosition.BelowItem):
@@ -108,12 +126,30 @@ class SceneTreeWidget(QTreeWidget):
         dragged_uuid = dragged_item.data(0, Qt.ItemDataRole.UserRole)
         new_parent_uuid = new_parent_item.data(0, Qt.ItemDataRole.UserRole) if new_parent_item else None
 
-        if dragged_uuid and new_parent_uuid:
-            # Emit signal for reparenting
-            self.node_reparented.emit(dragged_uuid, new_parent_uuid)
-            event.accept()
-        else:
+        if not dragged_uuid or not new_parent_uuid:
             event.ignore()
+            return
+
+        # Compute the target index within the new parent's child list, evaluated
+        # against the sibling order WITHOUT the dragged node (matching the
+        # engine's MoveChild erase-then-insert semantics so the result lands
+        # exactly where the drop indicator showed).
+        target_index = -1  # append
+        if drop_indicator in (QTreeWidget.DropIndicatorPosition.AboveItem,
+                              QTreeWidget.DropIndicatorPosition.BelowItem):
+            target_uuid = target_item.data(0, Qt.ItemDataRole.UserRole) if target_item else None
+            if target_uuid == dragged_uuid:
+                event.ignore()
+                return
+            siblings = self._child_uuids(new_parent_item, exclude_uuid=dragged_uuid)
+            if target_uuid in siblings:
+                idx = siblings.index(target_uuid)
+                if drop_indicator == QTreeWidget.DropIndicatorPosition.BelowItem:
+                    idx += 1
+                target_index = idx
+
+        self.node_reparented.emit(dragged_uuid, new_parent_uuid, target_index)
+        event.accept()
 
     def _is_descendant(self, potential_descendant, ancestor):
         """Check if potential_descendant is a child/grandchild/etc of ancestor"""
@@ -129,12 +165,15 @@ class SceneTreeWidget(QTreeWidget):
 
 
 class SceneTreePanel(EditorPanel):
-    """Scene hierarchy tree panel (Godot-style)"""
+    """Scene hierarchy tree panel"""
     def _on_item_renamed(self, item, column):
         if column != 0:
             return
         node_uuid_str = item.data(0, Qt.ItemDataRole.UserRole)
         new_name = item.text(0)
+        # The "%" badge shown for unique nodes is display-only; never persist it.
+        if new_name.startswith("%"):
+            new_name = new_name[1:]
         if not node_uuid_str or not new_name or not self.editor_bridge:
             return
         node_uuid = le.UUID.from_string(node_uuid_str)
@@ -142,6 +181,14 @@ class SceneTreePanel(EditorPanel):
         if node and node.get_name() != new_name:
             node.set_name(new_name)
             self.editor_bridge.mark_scene_dirty()
+            # Auto hot-reload: push the rename into any running play instances.
+            runtime = getattr(self.main_editor, 'runtime', None) if self.main_editor else None
+            if runtime is not None:
+                try:
+                    if runtime.is_running():
+                        runtime.push_node_rename(node_uuid_str, new_name)
+                except Exception:
+                    pass
             self.refresh_tree()
             if self.main_editor and 'console' in self.main_editor.panels:
                 self.main_editor.panels['console'].log_message(
@@ -149,7 +196,8 @@ class SceneTreePanel(EditorPanel):
     
 
     # Signals
-    node_selected = pyqtSignal(object)  # Emits selected node
+    node_selected = pyqtSignal(object)  # Emits the primary (first) selected node
+    nodes_selected = pyqtSignal(object)  # Emits the full list of selected nodes
     node_deleted = pyqtSignal(object)   # Emits deleted node
 
     def __init__(self, parent=None):
@@ -161,19 +209,28 @@ class SceneTreePanel(EditorPanel):
         self.node_to_item_map = {}  # Maps node UUID to tree item
         self.clipboard_manager = ClipboardManager()
 
-    def _setup_panel(self):
-        """Setup scene tree panel UI"""
-        # Get icon pack path from current theme
+    def _update_icon_pack_path(self):
+        """Update the icon pack path from the current theme"""
         theme_manager = get_theme_manager()
         icon_pack_manager = get_icon_pack_manager()
         current_theme = theme_manager.get_current_theme()
         icon_pack_name = current_theme.colors.icon_pack if current_theme else "dark"
         self.assets_path = Path(icon_pack_manager.get_icon_pack_path(icon_pack_name))
-        
+
         # If icon pack path doesn't exist, fall back to dark
         if not self.assets_path.exists():
             self.assets_path = Path(__file__).parent.parent / "assets" / "icons" / "dark"
-        
+
+    def on_theme_changed(self):
+        """Called when the editor theme changes - updates icons to match"""
+        self._update_icon_pack_path()
+        self.refresh_tree()
+
+    def _setup_panel(self):
+        """Setup scene tree panel UI"""
+        # Initialize icon pack path from current theme
+        self._update_icon_pack_path()
+
         # Toolbar
         toolbar_layout = QHBoxLayout()
         toolbar_layout.setContentsMargins(5, 5, 5, 5)
@@ -192,23 +249,25 @@ class SceneTreePanel(EditorPanel):
 
         # Tree widget (custom widget with drag-drop reparenting)
         self.tree_widget = SceneTreeWidget()
-        self.tree_widget.setColumnCount(3)  # Name, View, Enable
-        self.tree_widget.setHeaderLabels(["Scene", "View", "Enable"])
-        
+        self.tree_widget.setColumnCount(4)  # Name, Script, View, Enable
+        self.tree_widget.setHeaderLabels(["Scene", "Script", "View", "Enable"])
+
         # Enable multi-selection with Ctrl/Shift
         self.tree_widget.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
-        
+
         # Set column widths - make icon columns narrow and fixed
         self.tree_widget.setColumnWidth(0, 200)  # Name column
-        self.tree_widget.setColumnWidth(1, 35)   # View column - narrower
-        self.tree_widget.setColumnWidth(2, 50)   # Enable column - narrower
-        
+        self.tree_widget.setColumnWidth(1, 35)   # Script column - narrower
+        self.tree_widget.setColumnWidth(2, 35)   # View column - narrower
+        self.tree_widget.setColumnWidth(3, 50)   # Enable column - narrower
+
         # Anchor icon columns to the right
         header = self.tree_widget.header()
         header.setStretchLastSection(False)
         header.setSectionResizeMode(0, header.ResizeMode.Stretch)  # Name stretches
-        header.setSectionResizeMode(1, header.ResizeMode.Fixed)     # View fixed
-        header.setSectionResizeMode(2, header.ResizeMode.Fixed)     # Enable fixed
+        header.setSectionResizeMode(1, header.ResizeMode.Fixed)     # Script fixed
+        header.setSectionResizeMode(2, header.ResizeMode.Fixed)     # View fixed
+        header.setSectionResizeMode(3, header.ResizeMode.Fixed)     # Enable fixed
         
         self.tree_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree_widget.customContextMenuRequested.connect(self._show_context_menu)
@@ -238,6 +297,15 @@ class SceneTreePanel(EditorPanel):
         self.content_layout.addLayout(toolbar_layout)
         self.content_layout.addWidget(self.tree_widget)
 
+        # Keyboard shortcuts (active when the scene tree panel has focus)
+        add_node_shortcut = QShortcut(QKeySequence("Shift+A"), self)
+        add_node_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        add_node_shortcut.activated.connect(self._on_add_node_clicked)
+
+        add_component_shortcut = QShortcut(QKeySequence("Ctrl+Shift+A"), self)
+        add_component_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        add_component_shortcut.activated.connect(self._on_add_component_clicked)
+
     def set_scene(self, scene):
         """Set the active scene and refresh the tree"""
         self.current_scene = scene
@@ -245,17 +313,24 @@ class SceneTreePanel(EditorPanel):
 
     def refresh_tree(self):
         """Refresh the scene tree from the current scene"""
-        self.tree_widget.clear()
-        self.node_to_item_map.clear()
+        # Block itemChanged signals while populating: setText() during tree
+        # construction would otherwise fire _on_item_renamed, which calls
+        # refresh_tree again and recurses until the stack overflows.
+        self.tree_widget.blockSignals(True)
+        try:
+            self.tree_widget.clear()
+            self.node_to_item_map.clear()
 
-        if not self.current_scene or not self.editor_bridge:
-            return
+            if not self.current_scene or not self.editor_bridge:
+                return
 
-        # Get root node from the scene
-        root_node = self.current_scene.get_root()
-        if root_node:
-            self._add_node_to_tree(root_node, None)
-            self.tree_widget.expandAll()
+            # Get root node from the scene
+            root_node = self.current_scene.get_root()
+            if root_node:
+                self._add_node_to_tree(root_node, None)
+                self.tree_widget.expandAll()
+        finally:
+            self.tree_widget.blockSignals(False)
 
     def _add_node_to_tree(self, node, parent_item):
         """Recursively add a node and its children to the tree"""
@@ -265,8 +340,15 @@ class SceneTreePanel(EditorPanel):
         else:
             item = QTreeWidgetItem(self.tree_widget)
 
-        # Set node name in first column
-        item.setText(0, node.get_name())
+        # Set node name in first column. Nodes exposed as a unique name show a
+        # leading "%" badge (Godot-style). The prefix is display-only and is
+        # stripped on rename so it never becomes part of the node name.
+        node_name = node.get_name()
+        if node.is_unique_name_in_owner():
+            item.setText(0, "%" + node_name)
+            item.setToolTip(0, f"Accessible in scripts as %{node_name}")
+        else:
+            item.setText(0, node_name)
         item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
 
         # Store node UUID in item data
@@ -282,17 +364,32 @@ class SceneTreePanel(EditorPanel):
         visible_state = self._get_visibility_state(node)
         enabled_state = self._get_enabled_state(node)
         
+        # Create and add the script shortcut button (centered). The button only
+        # appears when one or more script components with a resolvable script
+        # path are attached to the node (Godot-style script indicator).
+        scripts = self._get_node_scripts(node)
+        if scripts:
+            script_btn = IconButton(self._resolve_script_icon_path(), node_uuid_str)
+            if len(scripts) == 1:
+                script_btn.setToolTip(f"Edit script: {scripts[0][0]}")
+            else:
+                script_btn.setToolTip(f"{len(scripts)} scripts attached - click to choose")
+            script_btn.clicked.connect(
+                lambda checked, uuid=node_uuid_str: self._on_script_button_clicked(uuid))
+            script_widget = CenteredIconWidget(script_btn)
+            self.tree_widget.setItemWidget(item, 1, script_widget)
+
         # Create and add visibility icon button (centered)
         view_btn = self._create_icon_button(visible_state, 'visible', node_uuid_str)
         view_btn.clicked.connect(lambda checked, uuid=node_uuid_str: self._toggle_visibility(uuid))
         view_widget = CenteredIconWidget(view_btn)
-        self.tree_widget.setItemWidget(item, 1, view_widget)
-        
+        self.tree_widget.setItemWidget(item, 2, view_widget)
+
         # Create and add enabled icon button (centered)
         enable_btn = self._create_icon_button(enabled_state, 'enabled', node_uuid_str)
         enable_btn.clicked.connect(lambda checked, uuid=node_uuid_str: self._toggle_enabled(uuid))
         enable_widget = CenteredIconWidget(enable_btn)
-        self.tree_widget.setItemWidget(item, 2, enable_widget)
+        self.tree_widget.setItemWidget(item, 3, enable_widget)
 
         # Add child nodes
         children = node.get_children()
@@ -439,34 +536,135 @@ class SceneTreePanel(EditorPanel):
                 self.main_editor.panels['console'].log_message(
                     f"Error toggling enabled state: {str(e)}", "Error")
 
+    def _get_node_scripts(self, node):
+        """Return the script components attached to a node as (script_path, label)
+        tuples, limited to script components that reference a usable source file."""
+        scripts = []
+        if not self.editor_bridge:
+            return scripts
+        try:
+            components = self.editor_bridge.get_components(node)
+        except Exception:
+            return scripts
+
+        for component in components:
+            try:
+                if component.get_type_name() not in SCRIPT_COMPONENT_TYPES:
+                    continue
+                props_json = self.editor_bridge.get_component_properties(component)
+                data = json.loads(props_json)
+                props = data.get("properties", data) if isinstance(data, dict) else {}
+                script_path = props.get("script_path", "")
+                if not isinstance(script_path, str):
+                    continue
+                script_path = script_path.strip()
+                if not script_path or not script_path.lower().endswith(SCRIPT_FILE_EXTENSIONS):
+                    continue
+                label = component.get_name() or Path(script_path).name
+                scripts.append((script_path, label))
+            except Exception:
+                continue
+        return scripts
+
+    def _resolve_script_icon_path(self):
+        """Path to the script indicator icon, preferring the active icon pack and
+        falling back to the bundled dark-pack SVG if the pack lacks one."""
+        candidate = self.assets_path / "script.svg"
+        if candidate.exists():
+            return str(candidate)
+        return str(Path(__file__).parent.parent / "assets" / "icons" / "dark" / "script.svg")
+
+    def _resolve_script_path(self, script_path):
+        """Resolve a res:// (or already-absolute) script path to an absolute path."""
+        if not script_path:
+            return ""
+        if script_path.startswith("res://"):
+            project = getattr(self.main_editor, "project", None) if self.main_editor else None
+            if project is not None:
+                try:
+                    base = project.get_directory()
+                    return str(Path(base) / script_path[len("res://"):])
+                except Exception:
+                    return script_path
+            return script_path
+        return script_path
+
+    def _open_node_script(self, script_path):
+        """Open a single script in the script editor panel."""
+        abs_path = self._resolve_script_path(script_path)
+        if not abs_path:
+            return
+        if self.main_editor and hasattr(self.main_editor, "_open_script_in_editor"):
+            self.main_editor._open_script_in_editor(abs_path)
+
+    def _on_script_button_clicked(self, node_uuid_str):
+        """Handle the inline script button: open the script directly when a node
+        has exactly one, otherwise pop a menu to choose among the attached scripts."""
+        if not self.editor_bridge:
+            return
+        try:
+            node = self.editor_bridge.get_node(le.UUID.from_string(node_uuid_str))
+        except Exception:
+            node = None
+        if not node:
+            return
+
+        scripts = self._get_node_scripts(node)
+        if not scripts:
+            return
+        if len(scripts) == 1:
+            self._open_node_script(scripts[0][0])
+            return
+
+        menu = QMenu()
+        for script_path, label in scripts:
+            action = QAction(f"{label}  ({script_path})", self)
+            action.triggered.connect(
+                lambda checked, p=script_path: self._open_node_script(p))
+            menu.addAction(action)
+        menu.exec(QCursor.pos())
+
     def _on_item_clicked(self, item, column):
         """Handle item click - only select node when clicking the name column"""
         # Only process clicks on column 0 (name column)
         # Columns 1 and 2 are handled by the icon buttons directly
         if column != 0:
             return
-        
-        node_uuid_str = item.data(0, Qt.ItemDataRole.UserRole)
-        if node_uuid_str and self.editor_bridge:
-            # Get the node from the editor bridge
-            node_uuid = le.UUID.from_string(node_uuid_str)
-            node = self.editor_bridge.get_node(node_uuid)
-            if node:
-                # Multi-selection support:
-                # The QTreeWidget handles Shift/Ctrl selection automatically via its selection mode
-                # We just emit the currently selected node for inspector/viewport updates
-                # In the future, we could emit all selected nodes for batch operations
-                self.node_selected.emit(node)
+        self._emit_selection()
 
     def _on_selection_changed(self):
         """Handle selection change"""
-        selected_items = self.tree_widget.selectedItems()
-        if selected_items:
-            item = selected_items[0]
-            self._on_item_clicked(item, 0)
+        self._emit_selection()
 
-    def _on_node_reparented(self, dragged_uuid_str, new_parent_uuid_str):
-        """Handle node reparenting from drag-and-drop"""
+    def _collect_selected_nodes(self):
+        """Resolve every selected tree item to its node object (column-0 rows only)."""
+        nodes = []
+        if not self.editor_bridge:
+            return nodes
+        seen = set()
+        for item in self.tree_widget.selectedItems():
+            node_uuid_str = item.data(0, Qt.ItemDataRole.UserRole)
+            if not node_uuid_str or node_uuid_str in seen:
+                continue
+            seen.add(node_uuid_str)
+            try:
+                node_uuid = le.UUID.from_string(node_uuid_str)
+                node = self.editor_bridge.get_node(node_uuid)
+            except Exception:
+                node = None
+            if node:
+                nodes.append(node)
+        return nodes
+
+    def _emit_selection(self):
+        """Broadcast the current selection: the full list (for shared editing) plus
+        the primary node (for panels that only track a single node)."""
+        nodes = self._collect_selected_nodes()
+        self.nodes_selected.emit(nodes)
+        self.node_selected.emit(nodes[0] if nodes else None)
+
+    def _on_node_reparented(self, dragged_uuid_str, new_parent_uuid_str, target_index=-1):
+        """Handle node reparenting/reordering from drag-and-drop"""
         if not self.editor_bridge:
             return
 
@@ -503,9 +701,15 @@ class SceneTreePanel(EditorPanel):
                 QMessageBox.warning(self, "Error", "Failed to find nodes for reparenting")
                 return
 
-            # Perform the reparenting using the bridge method
-            print(f"[_on_node_reparented] Reparenting '{dragged_node.get_name()}'")
-            self.editor_bridge.reparent_node(dragged_node, new_parent_node)
+            # Perform the move (reparent + reorder) using the bridge method.
+            # move_node handles same-parent reorders and cross-parent moves at a
+            # specific index, and is undoable; falls back to reparent_node if the
+            # running engine build predates move_node.
+            print(f"[_on_node_reparented] Moving '{dragged_node.get_name()}' (index {target_index})")
+            if hasattr(self.editor_bridge, "move_node"):
+                self.editor_bridge.move_node(dragged_node, new_parent_node, target_index)
+            else:
+                self.editor_bridge.reparent_node(dragged_node, new_parent_node)
 
             # Mark scene as dirty
             self.editor_bridge.mark_scene_dirty()
@@ -515,8 +719,8 @@ class SceneTreePanel(EditorPanel):
 
             if self.main_editor and 'console' in self.main_editor.panels:
                 self.main_editor.panels['console'].log_message(
-                    f"Reparented '{dragged_node.get_name()}' to '{new_parent_node.get_name()}'", "Info")
-            print(f"[_on_node_reparented] Reparenting completed successfully")
+                    f"Moved '{dragged_node.get_name()}' to '{new_parent_node.get_name()}'", "Info")
+            print(f"[_on_node_reparented] Move completed successfully")
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Error reparenting node: {str(e)}")
@@ -585,7 +789,110 @@ class SceneTreePanel(EditorPanel):
         delete_action.setShortcut("Delete")
         menu.addAction(delete_action)
 
+        menu.addSeparator()
+
+        save_prefab_action = QAction("Save as Prefab...", self)
+        save_prefab_action.setEnabled(item is not None and self.editor_bridge is not None)
+        if item is not None:
+            prefab_uuid = item.data(0, Qt.ItemDataRole.UserRole)
+            save_prefab_action.triggered.connect(
+                lambda checked, uuid=prefab_uuid: self._save_node_as_prefab(uuid))
+        menu.addAction(save_prefab_action)
+
+        if item is not None and self.editor_bridge:
+            menu.addSeparator()
+            node_uuid_str = item.data(0, Qt.ItemDataRole.UserRole)
+            node = self.editor_bridge.get_node(le.UUID.from_string(node_uuid_str)) if node_uuid_str else None
+            unique_action = QAction("Access as Unique Name (%)", self)
+            unique_action.setCheckable(True)
+            if node:
+                unique_action.setChecked(node.is_unique_name_in_owner())
+            unique_action.triggered.connect(
+                lambda checked, uuid=node_uuid_str: self._toggle_unique_name(uuid))
+            menu.addAction(unique_action)
+
         menu.exec(self.tree_widget.viewport().mapToGlobal(position))
+
+    def _toggle_unique_name(self, node_uuid_str):
+        """Toggle a node's 'Access as Unique Name' flag, warning on name collisions."""
+        if not node_uuid_str or not self.editor_bridge:
+            return
+        node = self.editor_bridge.get_node(le.UUID.from_string(node_uuid_str))
+        if not node:
+            return
+
+        enabling = not node.is_unique_name_in_owner()
+        if enabling:
+            # A node that is not yet unique resolves any OTHER unique node sharing
+            # its name within the same scope; a hit means the name would collide.
+            existing = node.resolve_unique_name(node.get_name())
+            if existing is not None:
+                QMessageBox.warning(
+                    self, "Unique Name Conflict",
+                    f"Another node named '{node.get_name()}' is already marked as a "
+                    f"unique name within this scope. Unique names must be unique per scene.")
+                return
+
+        node.set_unique_name_in_owner(enabling)
+        self.editor_bridge.mark_scene_dirty()
+        self.refresh_tree()
+        if self.main_editor and 'console' in self.main_editor.panels:
+            state = "enabled" if enabling else "disabled"
+            self.main_editor.panels['console'].log_message(
+                f"Unique name {state} for '{node.get_name()}'", "Info")
+
+    def _save_node_as_prefab(self, node_uuid_str):
+        """Serialize the selected node subtree to a new .prefab file."""
+        if not node_uuid_str or not self.editor_bridge or not self.main_editor:
+            return
+
+        node = self.editor_bridge.get_node(le.UUID.from_string(node_uuid_str))
+        if not node:
+            QMessageBox.warning(self, "Error", "Could not resolve the selected node.")
+            return
+
+        node_name = node.get_name()
+
+        # Default to the project's prefab/ folder, creating it if needed.
+        project_dir = Path(self.main_editor.project.get_directory())
+        prefab_dir = project_dir / "prefab"
+        prefab_dir.mkdir(parents=True, exist_ok=True)
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save as Prefab",
+            str(prefab_dir / f"{node_name}.prefab"),
+            "Prefab Files (*.prefab);;All Files (*.*)"
+        )
+        if not file_path:
+            return
+
+        if not file_path.endswith(".prefab"):
+            file_path += ".prefab"
+
+        try:
+            prefab = le.Prefab(node_name)
+            prefab.create_from_node(node)
+            if not prefab.save_to(file_path):
+                QMessageBox.critical(self, "Save Failed",
+                                     f"Failed to save prefab:\n{file_path}")
+                return
+        except Exception as e:
+            QMessageBox.critical(self, "Save Failed", f"Error saving prefab: {str(e)}")
+            return
+
+        # Make the new prefab immediately available to the type catalog and browser.
+        try:
+            self.main_editor.editor_bridge.scan_project_types(self.main_editor.project.path)
+        except Exception:
+            pass
+        if 'file_browser' in self.main_editor.panels:
+            self.main_editor.panels['file_browser']._refresh_tree()
+
+        if 'console' in self.main_editor.panels:
+            self.main_editor.panels['console'].log_message(
+                f"Saved node '{node_name}' as prefab: {file_path}", "Info")
+        self.main_editor.status_bar.showMessage(f"Saved prefab: {file_path}", 3000)
 
     def _on_add_node_clicked(self):
         """Handle add node button click"""
@@ -601,6 +908,10 @@ class SceneTreePanel(EditorPanel):
                 self._create_and_add_node(value)
             elif mode == "prefab":
                 self._instantiate_prefab(value)
+            elif mode == "component_default":
+                base_node_type, component_type = value
+                self._create_and_add_node(base_node_type, component_type=component_type,
+                                          node_name=component_type)
 
     def _on_add_component_clicked(self):
         """Handle add component click"""
@@ -1197,17 +1508,36 @@ class SceneTreePanel(EditorPanel):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Error pasting nodes: {str(e)}")
 
-    def _create_and_add_node(self, node_type):
-        """Create a node of the specified type and add it to the scene"""
+    def _create_and_add_node(self, node_type, component_type=None, node_name=None):
+        """
+        Create a node of the specified type and add it to the scene.
+
+        When component_type is provided, a component of that type is attached to
+        the newly created node (used by the "Component Default" prefabs). When
+        node_name is provided, the node is created with that name.
+        """
         if not self.main_editor or not self.editor_bridge:
             return
 
         try:
-            # Create the node
-            node = self.editor_bridge.create_node(node_type)
+            # Create the node (optionally with a specific name)
+            if node_name:
+                node = self.editor_bridge.create_node(node_type, node_name)
+            else:
+                node = self.editor_bridge.create_node(node_type)
             if not node:
                 QMessageBox.critical(self, "Error", f"Failed to create node of type: {node_type}")
                 return
+
+            # Attach the requested component, if any
+            if component_type:
+                component = self.editor_bridge.create_component(component_type)
+                if not component:
+                    QMessageBox.critical(self, "Error", f"Failed to create component of type: {component_type}")
+                    return
+                if not self.editor_bridge.add_component(node, component):
+                    QMessageBox.critical(self, "Error", f"Failed to add component '{component_type}' to node")
+                    return
 
             # Check if scene is empty (no root node)
             # Use current_scene.get_root() instead of editor_bridge.get_root_node()

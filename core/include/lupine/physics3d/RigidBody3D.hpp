@@ -10,6 +10,8 @@
 
 // Forward declare Bullet types
 class btRigidBody;
+class btCollisionShape;
+class btCompoundShape;
 
 namespace lupine {
 namespace physics3d {
@@ -114,6 +116,20 @@ public:
     void RemoveCollider(Collider3D* collider);
     const std::vector<Collider3D*>& GetColliders() const { return m_Colliders; }
 
+    // The body's collision shape is always a compound whose children are the shapes of
+    // its enabled colliders, positioned by each collider's offset/rotation offset.
+    // Colliders call these when their shape, offset or enabled state changes.
+    void RebuildCompoundShape();
+    void DetachColliderShape(btCollisionShape* shape);
+    btCompoundShape* GetCompoundShape() const { return m_CompoundShape; }
+
+    // True once the destructor has started; colliders use it to skip compound
+    // maintenance while the body is tearing them down.
+    bool IsDestroying() const { return m_Destroying; }
+
+    // Collision filtering
+    void UpdateCollisionFiltering(uint32_t group, uint32_t mask);
+
     // Internal access
     btRigidBody* GetBulletBody() const { return m_RigidBody; }
     Physics3DWorld* GetWorld() const { return m_World; }
@@ -123,10 +139,13 @@ private:
     core::UUID m_Id;
     BodyType m_Type;
     btRigidBody* m_RigidBody;
+    btCompoundShape* m_CompoundShape;
     std::vector<Collider3D*> m_Colliders;
     float m_GravityScale;
+    bool m_Destroying;
 
     void UpdateMassProperties();
+    void RefreshBroadphaseAabb();
 };
 
 } // namespace physics3d

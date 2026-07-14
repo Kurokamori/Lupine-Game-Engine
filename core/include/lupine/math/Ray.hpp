@@ -77,7 +77,7 @@ namespace math {
 
         // Intersect with triangle using Möller-Trumbore algorithm
         bool IntersectTriangle(const Vec3& v0, const Vec3& v1, const Vec3& v2, float& distance) const {
-            const float EPSILON = 0.0000001f;
+            constexpr float RAY_TRIANGLE_EPSILON = 0.0000001f;
 
             Vec3 edge1 = v1 - v0;
             Vec3 edge2 = v2 - v0;
@@ -85,7 +85,7 @@ namespace math {
             float a = edge1.Dot(h);
 
             // Ray is parallel to triangle
-            if (a > -EPSILON && a < EPSILON) {
+            if (a > -RAY_TRIANGLE_EPSILON && a < RAY_TRIANGLE_EPSILON) {
                 return false;
             }
 
@@ -110,7 +110,7 @@ namespace math {
             float t = f * edge2.Dot(q);
 
             // Intersection is behind ray origin
-            if (t < EPSILON) {
+            if (t < RAY_TRIANGLE_EPSILON) {
                 return false;
             }
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "GfxTypes.hpp"
+#include "../ResourceHandles.hpp"
 #include <vector>
 #include <string>
 
@@ -41,6 +42,12 @@ struct BufferDesc {
     uint64_t size = 0;
     BufferUsage usage = BufferUsage::None;
     const void* initialData = nullptr;
+    // Frequently updated by the CPU (e.g. per-instance data refilled when it changes).
+    // Backends that can place the buffer in host-visible, persistently-mapped memory
+    // do so, making updateBuffer a plain memcpy instead of a staging copy that blocks
+    // the GPU queue. Leave false for write-once/static buffers (device-local is faster
+    // for the GPU to read).
+    bool dynamic = false;
 };
 
 /**
@@ -65,15 +72,25 @@ struct VertexAttribute {
     std::string name;
     VertexFormat format;
     uint32_t offset;
-    uint32_t binding;
+    uint32_t binding;   // Which vertex buffer binding to read from
+    uint32_t location;  // Shader location (layout(location = X))
 };
 
 /**
  * Vertex buffer layout
+ *
+ * Describes one vertex buffer binding: its stride, the attributes read from it,
+ * and whether those attributes advance per-vertex or per-instance.
+ *
+ * The primary geometry buffer (PipelineDesc::vertexLayout) is always per-vertex
+ * on binding 0. Additional per-instance buffers are supplied through
+ * PipelineDesc::extraVertexBuffers, each carrying its own binding index (encoded
+ * on the contained VertexAttribute::binding) and inputRate.
  */
 struct VertexBufferLayout {
     uint32_t stride;
     std::vector<VertexAttribute> attributes;
+    VertexInputRate inputRate = VertexInputRate::Vertex;
 };
 
 /**
@@ -120,9 +137,16 @@ struct RasterizerState {
     bool depthClampEnable = false;
     bool scissorEnable = false;
 
+    // Depth bias for shadow mapping
+    bool depthBiasEnable = false;
+    float depthBiasConstantFactor = 0.0f;
+    float depthBiasSlopeFactor = 0.0f;
+    float depthBiasClamp = 0.0f;
+
     static RasterizerState defaultState();
     static RasterizerState noCull();
     static RasterizerState wireframe();
+    static RasterizerState shadowMap();
 };
 
 /**
@@ -141,6 +165,11 @@ struct ShaderDesc {
 struct PipelineDesc {
     std::vector<ShaderHandle> shaders;
     VertexBufferLayout vertexLayout;
+    // Additional vertex buffer bindings beyond binding 0 (e.g. a per-instance
+    // buffer for GPU instancing). Each entry's attributes carry their own
+    // binding index; entries with inputRate == Instance are configured at a
+    // step rate of one element per instance. Empty for non-instanced pipelines.
+    std::vector<VertexBufferLayout> extraVertexBuffers;
     PrimitiveTopology topology = PrimitiveTopology::TriangleList;
     BlendState blendState;
     DepthStencilState depthStencilState;
@@ -265,6 +294,19 @@ inline RasterizerState RasterizerState::wireframe() {
     RasterizerState state;
     state.cullMode = CullMode::Back;
     state.fillMode = FillMode::Wireframe;
+    return state;
+}
+
+inline RasterizerState RasterizerState::shadowMap() {
+    RasterizerState state;
+    state.cullMode = CullMode::Back;  // Can also use Front to reduce peter-panning
+    state.fillMode = FillMode::Solid;
+    state.frontFace = WindingOrder::CounterClockwise;
+    state.depthClampEnable = true;  // Clamp fragments outside near/far
+    state.depthBiasEnable = true;
+    state.depthBiasConstantFactor = 1.25f;
+    state.depthBiasSlopeFactor = 1.75f;
+    state.depthBiasClamp = 0.0f;
     return state;
 }
 

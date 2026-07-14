@@ -4,10 +4,12 @@
 #include "lupine/rendering/RenderWorld.hpp"
 #include "lupine/rendering/ResourceHandles.hpp"
 #include "lupine/rendering/PBRMaterial.hpp"
+#include "lupine/rendering/Material.hpp"
 #include "lupine/math/Color.hpp"
 #include "lupine/math/AABB.hpp"
 #include "lupine/asset/ImageAsset.hpp"
 #include <optional>
+#include <unordered_map>
 
 namespace lupine {
 namespace components {
@@ -67,7 +69,7 @@ public:
     /**
      * Get/Set vertex color (tint)
      */
-    const Color& GetColor() const;
+    Color GetColor() const;
     void SetColor(const Color& color);
 
     /**
@@ -136,7 +138,7 @@ public:
      * Set albedo color
      */
     void SetAlbedoColor(const Color& color);
-    const Color& GetAlbedoColor() const;
+    Color GetAlbedoColor() const;
 
     /**
      * Set albedo texture
@@ -178,7 +180,7 @@ public:
      * Set emissive color
      */
     void SetEmissiveColor(const Color& color);
-    const Color& GetEmissiveColor() const;
+    Color GetEmissiveColor() const;
 
     /**
      * Set emissive texture
@@ -192,10 +194,68 @@ public:
     void SetEmissiveStrength(float strength);
     float GetEmissiveStrength() const;
 
+    // ===== Shader Selection =====
+
+    /**
+     * Get/Set shader type
+     */
+    ShaderType GetShaderType() const;
+    void SetShaderType(ShaderType type);
+
+    /**
+     * Custom shader paths (used when ShaderType::Custom is selected)
+     */
+    std::string GetCustomVertShaderPath() const;
+    void SetCustomVertShaderPath(const std::string& path);
+    std::string GetCustomFragShaderPath() const;
+    void SetCustomFragShaderPath(const std::string& path);
+    // Custom .lsh shader (translated at runtime, honors #render_mode; takes precedence).
+    std::string GetCustomLshShaderPath() const;
+    void SetCustomLshShaderPath(const std::string& path);
+
+    /**
+     * Toon shader parameters
+     */
+    float GetShadowBands() const;
+    void SetShadowBands(float bands);
+    float GetShadowThreshold() const;
+    void SetShadowThreshold(float threshold);
+    float GetShadowSoftness() const;
+    void SetShadowSoftness(float softness);
+    float GetSpecularBands() const;
+    void SetSpecularBands(float bands);
+    float GetSpecularPower() const;
+    void SetSpecularPower(float power);
+    float GetRimIntensity() const;
+    void SetRimIntensity(float intensity);
+    float GetRimPower() const;
+    void SetRimPower(float power);
+
+    // ===== Generic Shader Parameters =====
+
+    /**
+     * Get shader parameters map (for iteration)
+     */
+    const std::unordered_map<std::string, MaterialPropertyValue>& GetShaderParams() const { return m_ShaderParams; }
+
+    /**
+     * Set a shader parameter by uniform name
+     */
+    void SetShaderParam(const std::string& uniformName, const MaterialPropertyValue& value) { m_ShaderParams[uniformName] = value; }
+
+    /**
+     * Clear all shader parameters
+     */
+    void ClearShaderParams() { m_ShaderParams.clear(); }
+
     // ===== IRenderableComponent Interface =====
 
     void buildDrawCommands(RenderContext& ctx) override;
     AABB getWorldBounds() const override;
+    // Procedural mesh generated from (epoch-tracked) properties; static once generated.
+    // Reports dynamic until the mesh handle is valid so the first gather is never cached
+    // as empty.
+    bool isRenderContentDynamic() const override { return !m_MeshHandle.isValid(); }
     RenderLayer getRenderLayer() const override;
     SpatialType getSpatialType() const override { return SpatialType::World3D; }
     bool IntersectRay(const math::Ray& ray, float& outDistance) const override;
@@ -221,6 +281,9 @@ private:
     TextureHandle m_EmissiveTextureHandle;
 
     bool m_TexturesNeedUpload;
+
+    // Generic shader parameters - uniform name to value mapping
+    std::unordered_map<std::string, MaterialPropertyValue> m_ShaderParams;
 
     // Cached shape parameters to detect changes
     mutable PrimitiveShape m_CachedShape;

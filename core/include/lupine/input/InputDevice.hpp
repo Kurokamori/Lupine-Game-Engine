@@ -3,7 +3,9 @@
 #include "InputCodes.hpp"
 #include <glm/glm.hpp>
 #include <string>
+#include <vector>
 #include <cstdint>
+#include <mutex>
 
 namespace lupine {
 namespace input {
@@ -50,10 +52,27 @@ public:
     bool IsKeyJustPressed(KeyCode key) const;
     bool IsKeyJustReleased(KeyCode key) const;
 
+    // Text input (Unicode codepoints typed this frame, in event order).
+    // Populated by the platform layer from OS text-input/IME events and cleared
+    // every frame by Update(). Distinct from raw key state: this already accounts
+    // for keyboard layout, shift, dead keys and IME composition.
+    void AddTextInput(uint32_t codepoint);
+    const std::vector<uint32_t>& GetTextInput() const { return m_TextInput; }
+    void ClearTextInput();
+
+    // Atomically move the accumulated text into `out` and clear the buffer. Used by the
+    // consuming thread so it never copies the buffer while the platform thread is
+    // appending to it (async runtime). `out` is overwritten.
+    void DrainTextInput(std::vector<uint32_t>& out);
+
 private:
     static constexpr size_t MAX_KEYS = 512;
     bool m_CurrentKeyState[MAX_KEYS] = {false};
     bool m_PreviousKeyState[MAX_KEYS] = {false};
+    std::vector<uint32_t> m_TextInput;
+    // Guards m_TextInput: appended by the platform thread, drained by the consuming
+    // thread under the async runtime.
+    std::mutex m_TextMutex;
 };
 
 /**
@@ -69,7 +88,16 @@ public:
     uint32_t GetDeviceID() const override { return 0; }
     bool IsConnected() const override { return true; }
 
+    // Begin-of-frame phase: snapshot the previous button state (for edge detection)
+    // and clear the per-frame scroll delta. Must run BEFORE the platform pumps this
+    // frame's events so Is*JustPressed/Released and GetScrollDelta see this frame's
+    // input rather than having it overwritten.
     void Update() override;
+
+    // End-of-poll phase: compute the per-frame mouse movement delta. Must run AFTER
+    // this frame's position has been polled so GetDelta() is accurate with no lag.
+    void FinalizeFrame();
+
     void Reset() override;
 
     // Button state management
@@ -117,6 +145,15 @@ public:
     // Connection management
     void SetConnected(bool connected);
 
+    // Human-readable controller name (set by the platform layer; defaults to
+    // "Gamepad <id>" when unset).
+    void SetDeviceName(const std::string& name) { m_Name = name; }
+
+    // Physical controller family, used to pick the right on-screen glyphs. Set by
+    // the platform layer from SDL_GameControllerGetType.
+    void SetGamepadType(GamepadType type) { m_Type = type; }
+    GamepadType GetGamepadType() const { return m_Type; }
+
     // Button state management
     void SetButtonState(GamepadButton button, bool pressed);
     bool IsButtonPressed(GamepadButton button) const;
@@ -138,6 +175,8 @@ private:
     uint32_t m_DeviceID;
     bool m_Connected = false;
     float m_Deadzone = 0.15f;
+    std::string m_Name;
+    GamepadType m_Type = GamepadType::Unknown;
 
     static constexpr size_t MAX_BUTTONS = 15;
     bool m_CurrentButtonState[MAX_BUTTONS] = {false};
@@ -147,6 +186,69 @@ private:
     float m_AxisValues[MAX_AXES] = {0.0f};
 
     float ApplyDeadzone(float value) const;
+};
+
+/**
+ * Touch point data
+ */
+struct TouchPoint {
+    uint32_t id = 0;           // Unique identifier for this touch
+    glm::vec2 position;        // Current position
+    glm::vec2 startPosition;   // Position where touch started
+    glm::vec2 delta;           // Movement since last frame
+    float pressure = 1.0f;     // Pressure (0-1, 1 if not supported)
+    bool active = false;       // Is this touch currently active
+    bool justStarted = false;  // Did this touch start this frame
+    bool justEnded = false;    // Did this touch end this frame
+};
+
+/**
+ * Touch input device for mobile/web platforms
+ * Supports multi-touch with up to 10 simultaneous touch points
+ */
+class TouchDevice : public InputDevice {
+public:
+    static constexpr size_t MAX_TOUCH_POINTS = 10;
+
+    TouchDevice();
+    virtual ~TouchDevice() = default;
+
+    InputDeviceType GetDeviceType() const override { return InputDeviceType::Touch; }
+    std::string GetDeviceName() const override { return "Touch"; }
+    uint32_t GetDeviceID() const override { return 0; }
+    bool IsConnected() const override { return m_Available; }
+
+    void Update() override;
+    void Reset() override;
+
+    // Availability
+    void SetAvailable(bool available) { m_Available = available; }
+    bool IsAvailable() const { return m_Available; }
+
+    // Touch state management
+    void BeginTouch(uint32_t id, const glm::vec2& position, float pressure = 1.0f);
+    void UpdateTouch(uint32_t id, const glm::vec2& position, float pressure = 1.0f);
+    void EndTouch(uint32_t id);
+    void CancelTouch(uint32_t id);
+
+    // Touch queries
+    size_t GetActiveTouchCount() const;
+    const TouchPoint* GetTouch(size_t index) const;
+    const TouchPoint* GetTouchByID(uint32_t id) const;
+    bool IsTouching() const { return GetActiveTouchCount() > 0; }
+
+    // Convenience for single-touch games
+    glm::vec2 GetPrimaryTouchPosition() const;
+    bool HasPrimaryTouch() const;
+    bool IsPrimaryTouchJustStarted() const;
+    bool IsPrimaryTouchJustEnded() const;
+
+private:
+    bool m_Available = false;
+    TouchPoint m_TouchPoints[MAX_TOUCH_POINTS];
+
+    TouchPoint* FindTouchByID(uint32_t id);
+    TouchPoint* FindFreeTouchSlot();
 };
 
 } // namespace input

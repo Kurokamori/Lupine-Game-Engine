@@ -51,10 +51,43 @@ public:
 
     /**
      * Normalizes a path by resolving . and .. references and standardizing separators.
+     * Leading ".." segments of a relative path are PRESERVED, so the result may still
+     * point above its starting directory. Never use this to resolve untrusted input
+     * against a sandbox root - use NormalizeSandboxRelative()/JoinSandboxed() instead.
      * @param path Path to normalize
      * @return Normalized path
      */
     static std::string Normalize(const std::string& path);
+
+    /**
+     * Normalizes a relative path segment for use inside a sandbox root, resolving "."
+     * and ".." without ever letting the result climb above the root. Fails (returns
+     * false) if the segment is absolute (drive letter / device / drive-relative form)
+     * or if its ".." references would escape the root.
+     * Leading separators are ignored, so "/foo" and "foo" both resolve to "foo".
+     * @param relativePath Untrusted relative path segment
+     * @param outRelative Receives the normalized segment (forward slashes, no ".." )
+     * @return True if the segment is safe and was normalized, false if it escapes
+     */
+    static bool NormalizeSandboxRelative(const std::string& relativePath, std::string& outRelative);
+
+    /**
+     * Joins an untrusted relative path segment onto a trusted sandbox root, guaranteeing
+     * the result lies inside that root.
+     * @param root Trusted root directory
+     * @param relativePath Untrusted relative path segment
+     * @return The joined path, or an empty string if the segment escapes the root
+     */
+    static std::string JoinSandboxed(const std::string& root, const std::string& relativePath);
+
+    /**
+     * Checks whether path lies at or beneath root, comparing whole path segments.
+     * Comparison is case-insensitive on Windows.
+     * @param root Root directory
+     * @param path Path to test
+     * @return True if path is root or is contained by root
+     */
+    static bool IsSubPath(const std::string& root, const std::string& path);
 
     /**
      * Gets the directory portion of a path.

@@ -696,16 +696,20 @@ class CollisionMesh3DPropertyWidget(QWidget):
     def _browse_mesh(self):
         """Browse for mesh file"""
         from PyQt6.QtWidgets import QFileDialog
+        from panels.inspector_panel import get_project_root, convert_to_res_path
 
+        start_dir = get_project_root() or ""
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Select Mesh File",
-            "",
+            start_dir,
             "Model Files (*.obj *.fbx *.gltf *.glb);;All Files (*.*)"
         )
 
         if file_path:
-            self.mesh_path_edit.setText(file_path)
+            # Convert to res:// path
+            res_path = convert_to_res_path(file_path)
+            self.mesh_path_edit.setText(res_path)
 
     def set_value(self, value):
         """Set widget value (for compatibility with PropertyWidget interface)"""

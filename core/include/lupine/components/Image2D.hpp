@@ -3,10 +3,13 @@
 #include "lupine/core/Component.hpp"
 #include "lupine/core/ComponentProperty.hpp"
 #include "lupine/core/LinkedProperty.hpp"
+#include "lupine/components/UIControl.hpp"
+#include "lupine/components/UIImageDraw.hpp"
 #include "lupine/math/Math.hpp"
 #include "lupine/rendering/ResourceHandles.hpp"
 #include "lupine/rendering/RenderWorld.hpp"
 #include "lupine/asset/ImageAsset.hpp"
+#include "lupine/components/CustomShaderParams.hpp"
 #include <string>
 #include <memory>
 
@@ -63,7 +66,7 @@ enum class MouseBehaviour {
  * - Border rendering
  * - UI space toggle
  */
-class Image2D : public core::Component, public IRenderableComponent {
+class Image2D : public UIControl, public IRenderableComponent {
 public:
     Image2D();
     explicit Image2D(const std::string& name);
@@ -73,16 +76,29 @@ public:
     std::string GetTypeName() const override { return "Image2D"; }
     void DefineProperties() override;
 
+    // Theme: tint/modulate + border colour + uniform corner radius.
+    const std::vector<ThemeBinding>& GetThemeBindings() const override;
+
     // Lifecycle hooks
     void OnAwake() override;
     void OnReady() override;
     void OnRender() override;
+
+    // Property change notification (from editor)
+    void OnPropertyChanged(const std::string& propertyName, const nlohmann::json& newValue) override;
+
+    // Asset hot-reload support
+    bool OnAssetFileChanged(const std::string& changedPath, const std::string& resolvedChangedPath) override;
 
     // Editor gizmo hooks
     bool OnGizmoScale(float scaleDelta, int axis, bool is3D) override;
 
     // ===== Property Accessors =====
     math::Vec2 CalculateSize() const;
+
+    // Width/height/size are provided by the UIControl base class. When width or
+    // height is 0 the texture dimension is used for that axis (via GetContentMinSize).
+    math::Vec2 GetContentMinSize() const override;
 
     // ===== Texture Management =====
     
@@ -120,39 +136,32 @@ public:
     const std::string& GetMaterialOverride() const;
     void SetMaterialOverride(const std::string& materialPath);
 
+    // ===== Custom Shader (.lsh) =====
+
+    /**
+     * Get/Set the attached Lupine Shader (.lsh) path. Empty = built-in textured rounded rect.
+     * When set, the image is rendered with the custom shader (the image is exposed as u_Texture).
+     */
+    const std::string& GetShader() const;
+    void SetShader(const std::string& shaderPath);
+
+    /**
+     * Get/Set the serialized exported-shader-parameter values (JSON object string).
+     */
+    const std::string& GetShaderParameters() const;
+    void SetShaderParameters(const std::string& parametersJson);
+
     // ===== Color/Tint =====
     
     /**
      * Get/Set color tint (includes alpha)
      */
-    const math::Color& GetColor() const;
+    math::Color GetColor() const;
     void SetColor(const math::Color& color);
 
     // ===== Anchor Properties =====
-    
-    /**
-     * Get/Set anchor min (normalized 0-1 within parent)
-     */
-    const math::Vec2& GetAnchorMin() const;
-    void SetAnchorMin(const math::Vec2& anchor);
-    
-    /**
-     * Get/Set anchor max (normalized 0-1 within parent)
-     */
-    const math::Vec2& GetAnchorMax() const;
-    void SetAnchorMax(const math::Vec2& anchor);
-    
-    /**
-     * Get/Set offset min (pixel offset from anchor min)
-     */
-    const math::Vec2& GetOffsetMin() const;
-    void SetOffsetMin(const math::Vec2& offset);
-    
-    /**
-     * Get/Set offset max (pixel offset from anchor max)
-     */
-    const math::Vec2& GetOffsetMax() const;
-    void SetOffsetMax(const math::Vec2& offset);
+    // Anchors/offsets (anchorMin/anchorMax/offsetMin/offsetMax) are provided by the
+    // UIControl base class and are honored by its layout solver.
 
     // ===== Aspect Ratio =====
     
@@ -189,6 +198,30 @@ public:
      */
     BlendMode GetBlendMode() const;
     void SetBlendMode(BlendMode mode);
+
+    // ===== Stretch / Nine-Slice =====
+
+    /**
+     * Get/Set the image stretch mode (Stretch / KeepCentered / NineSlice).
+     * Stretch preserves the legacy textured rounded-rect path (flip + blend +
+     * aspect). KeepCentered and NineSlice route through DrawUIImage.
+     */
+    UIImageStretchMode GetStretchMode() const;
+    void SetStretchMode(UIImageStretchMode mode);
+
+    // Nine-slice config (used when stretch mode == NineSlice).
+    // Margins are in SOURCE texture pixels: x=left, y=top, z=right, w=bottom.
+    math::Vec4 GetNineSliceMargins() const;
+    void SetNineSliceMargins(const math::Vec4& margins);
+
+    UINineSliceAxisMode GetNineSliceAxisHorizontal() const;
+    void SetNineSliceAxisHorizontal(UINineSliceAxisMode mode);
+
+    UINineSliceAxisMode GetNineSliceAxisVertical() const;
+    void SetNineSliceAxisVertical(UINineSliceAxisMode mode);
+
+    bool GetNineSliceDrawCenter() const;
+    void SetNineSliceDrawCenter(bool drawCenter);
 
     // ===== Mouse Behaviour =====
     
@@ -234,7 +267,7 @@ public:
     /**
      * Get/Set border color
      */
-    const math::Color& GetBorderColor() const;
+    math::Color GetBorderColor() const;
     void SetBorderColor(const math::Color& color);
     
     /**
@@ -261,14 +294,7 @@ public:
     void SetBorderWidthLinked(bool linked);
 
     // ===== UI Space Properties =====
-    
-    /**
-     * Get/Set UI space flag
-     * true = renders in CameraUI space
-     * false = renders in Camera2D space
-     */
-    bool GetUISpace() const;
-    void SetUISpace(bool uiSpace);
+    // GetUISpace/SetUISpace are provided by the UIControl base class.
 
     // ===== IRenderableComponent Interface =====
 
@@ -314,9 +340,18 @@ private:
     void RenderImage(RenderContext& ctx, const math::Vec2& position, const math::Vec2& size, float rotation);
 
     /**
+     * Render the image using the attached custom shader (image bound as u_Texture).
+     * Returns false if the shader could not be resolved/compiled (caller falls back to RenderImage).
+     */
+    bool RenderImageCustomShader(RenderContext& ctx, const math::Vec2& position, const math::Vec2& size, float rotation);
+
+    /**
      * Render the border
      */
     void RenderBorder(RenderContext& ctx, const math::Vec2& position, const math::Vec2& size, float rotation);
+
+    // Custom shader parameter parsing + texture-parameter cache (shared helper).
+    CustomShaderParams m_ShaderParams;
     
     /**
      * Convert enum to int for serialization

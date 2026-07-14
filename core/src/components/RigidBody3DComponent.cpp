@@ -60,7 +60,41 @@ void RigidBody3DComponent::OnDestroy() {
     DestroyPhysicsBody();
 }
 
-void RigidBody3DComponent::OnPhysicsProcess(float deltaTime) {
+void RigidBody3DComponent::OnPhysicsWorldRebuild(PhysicsWorldRebuildPhase phase) {
+    // See Component::PhysicsWorldRebuildPhase: only reached by a component that outlives a
+    // scene swap, i.e. one inside an add_scene overlay.
+    switch (phase) {
+        case PhysicsWorldRebuildPhase::SaveState:
+            // The body is the sole owner of the velocity, and it is about to be destroyed.
+            if (m_PhysicsBody) {
+                m_SavedLinearVelocity = m_PhysicsBody->GetLinearVelocity();
+                m_SavedAngularVelocity = m_PhysicsBody->GetAngularVelocity();
+            }
+            break;
+
+        case PhysicsWorldRebuildPhase::RecreateBodies:
+            // The world was cleared, so the body is already gone - drop the stale handles
+            // directly rather than going through DestroyPhysicsBody, which would call
+            // DestroyBody on a body that no longer exists.
+            m_PhysicsBody = nullptr;
+            m_BodyCreated = false;
+            CreatePhysicsBody();
+            if (m_PhysicsBody) {
+                m_PhysicsBody->SetLinearVelocity(m_SavedLinearVelocity);
+                m_PhysicsBody->SetAngularVelocity(m_SavedAngularVelocity);
+            }
+            break;
+
+        case PhysicsWorldRebuildPhase::AttachColliders:
+            // Mirrors OnReady: put the fresh body at the node's current world transform.
+            if (m_PhysicsBody) {
+                SyncTransformToPhysics();
+            }
+            break;
+    }
+}
+
+void RigidBody3DComponent::OnPhysicsProcess(float) {
     if (!m_PhysicsBody) return;
 
     SyncTransformFromPhysics();
@@ -255,6 +289,8 @@ void RigidBody3DComponent::CreatePhysicsBody() {
 
         return;
     }
+
+    physicsWorld->SetBodyNode(m_PhysicsBodyId, m_Owner);
 
     m_PhysicsBody->SetMass(GetMass());
     m_PhysicsBody->SetLinearDamping(GetLinearDamping());

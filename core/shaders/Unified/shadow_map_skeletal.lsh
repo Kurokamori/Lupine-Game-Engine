@@ -1,0 +1,44 @@
+#shader "ShadowMapSkeletal"
+#description "Shadow map for skeletal meshes with bone transforms"
+
+#begin properties
+    uniform mat4 u_ViewProjection;
+    uniform mat4 u_Model;
+    uniform bool u_UseSkinning = false;
+    uniform mat4 u_BoneTransforms[128];
+#end properties
+
+#begin vertex
+    #input vec3 a_Position : POSITION 0
+    #input vec3 a_Normal : NORMAL 1
+    #input vec2 a_TexCoord : TEXCOORD0 2
+    #input vec4 a_Color : COLOR 3
+    #input vec4 a_Tangent : TANGENT 4
+    #input vec4 a_BoneIDs : BLENDINDICES 5
+    #input vec4 a_BoneWeights : BLENDWEIGHT 6
+
+    #output vec2 v_TexCoord
+
+    void main() {
+        vec4 localPos = vec4(a_Position, 1.0);
+
+        if (u_UseSkinning) {
+            mat4 boneTransform = u_BoneTransforms[int(a_BoneIDs.x)] * a_BoneWeights.x;
+            boneTransform += u_BoneTransforms[int(a_BoneIDs.y)] * a_BoneWeights.y;
+            boneTransform += u_BoneTransforms[int(a_BoneIDs.z)] * a_BoneWeights.z;
+            boneTransform += u_BoneTransforms[int(a_BoneIDs.w)] * a_BoneWeights.w;
+            localPos = MUL(boneTransform, localPos);
+        }
+
+        v_TexCoord = a_TexCoord;
+        VERTEX_OUTPUT = MUL(u_ViewProjection, MUL(u_Model, localPos));
+    }
+#end vertex
+
+#begin fragment
+    #output vec4 FragColor
+
+    void main() {
+        FragColor = vec4(1.0);
+    }
+#end fragment

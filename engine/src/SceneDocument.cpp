@@ -1,5 +1,8 @@
 #include "lupine/engine/SceneDocument.hpp"
 #include "lupine/core/Scene.hpp"
+#include "lupine/core/Prefab.hpp"
+#include "lupine/core/Node.hpp"
+#include "lupine/core/Component.hpp"
 #include "lupine/platform/Platform.hpp"
 #include "lupine/logger/Logger.hpp"
 
@@ -83,6 +86,76 @@ std::shared_ptr<SceneDocument> SceneDocument::Open(const std::string& scenePath)
     return document;
 }
 
+std::shared_ptr<SceneDocument> SceneDocument::OpenPrefab(const std::string& prefabPath) {
+    if (!platform::FileSystem::Exists(prefabPath)) {
+
+        return nullptr;
+    }
+
+    core::Prefab prefab;
+    if (!prefab.Load(prefabPath)) {
+
+        return nullptr;
+    }
+
+    std::shared_ptr<core::Node> root = prefab.InstantiateForEditing();
+    if (!root) {
+
+        return nullptr;
+    }
+
+    std::string sceneName = prefab.GetName();
+    if (sceneName.empty()) {
+        sceneName = root->GetName();
+    }
+
+    auto scene = std::make_shared<Scene>(sceneName);
+    scene->SetRoot(root);
+
+    auto document = std::make_shared<SceneDocument>(scene);
+    document->m_FilePath = prefabPath;
+    document->m_Kind = DocumentKind::Prefab;
+    document->m_IsDirty = false;
+
+    return document;
+}
+
+namespace {
+// Mirrors Scene::RegisterNodePropertiesRecursive (private there): ensures every
+// node and component re-registers its property accessors so the subsequent
+// Serialize() captures the live values, exactly as a normal scene save does.
+void RegisterNodePropertiesRecursive(const std::shared_ptr<core::Node>& node) {
+    if (!node) return;
+
+    node->RegisterProperties();
+    for (const auto& component : node->GetComponents()) {
+        component->RegisterProperties();
+    }
+    for (const auto& child : node->GetChildren()) {
+        RegisterNodePropertiesRecursive(child);
+    }
+}
+} // namespace
+
+bool SceneDocument::SaveAsPrefab(const std::string& filePath) {
+    if (!m_Scene) {
+
+        return false;
+    }
+
+    std::shared_ptr<core::Node> root = m_Scene->GetRoot();
+    if (!root) {
+
+        return false;
+    }
+
+    RegisterNodePropertiesRecursive(root);
+
+    core::Prefab prefab(root->GetName());
+    prefab.CreateFromNode(root);
+    return prefab.Save(filePath);
+}
+
 bool SceneDocument::Save() {
     if (m_FilePath.empty()) {
 
@@ -94,7 +167,11 @@ bool SceneDocument::Save() {
         return false;
     }
 
-    if (!m_Scene->Save(m_FilePath)) {
+    bool saved = (m_Kind == DocumentKind::Prefab)
+        ? SaveAsPrefab(m_FilePath)
+        : m_Scene->Save(m_FilePath);
+
+    if (!saved) {
 
         return false;
     }
@@ -110,7 +187,11 @@ bool SceneDocument::SaveAs(const std::string& newPath) {
         return false;
     }
 
-    if (!m_Scene->Save(newPath)) {
+    bool saved = (m_Kind == DocumentKind::Prefab)
+        ? SaveAsPrefab(newPath)
+        : m_Scene->Save(newPath);
+
+    if (!saved) {
 
         return false;
     }

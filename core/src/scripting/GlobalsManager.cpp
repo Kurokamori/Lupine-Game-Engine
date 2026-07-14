@@ -1,9 +1,11 @@
 #include "lupine/scripting/GlobalsManager.hpp"
 #include "lupine/logger/Logger.hpp"
 #include "lupine/platform/FileSystem.hpp"
+#include "lupine/platform/PackFile.hpp"
 #include "lupine/platform/Path.hpp"
 #include <nlohmann/json.hpp>
 #include <fstream>
+#include <sstream>
 
 namespace lupine {
 namespace scripting {
@@ -15,23 +17,40 @@ GlobalsManager::~GlobalsManager() {
 }
 
 bool GlobalsManager::LoadGlobalsConfig(const std::string& filepath) {
+    std::string contents;
 
-    if (!platform::FileSystem::Exists(filepath)) {
+    // In pack mode (exported games) the config lives inside the .pck, where neither
+    // FileSystem::Exists nor ifstream can see it - both go straight to the real disk.
+    platform::PackFileSystem& packFS = platform::PackFileSystem::Instance();
+    if (packFS.isPackMode()) {
+        const std::string resolved = packFS.resolveAsset(filepath);
+        if (packFS.exists(resolved)) {
+            contents = packFS.readFileAsString(resolved);
+        }
+    }
 
+    if (contents.empty()) {
+        if (!platform::FileSystem::Exists(filepath)) {
+            return false;
+        }
+
+        std::ifstream file(filepath);
+        if (!file.is_open()) {
+            return false;
+        }
+
+        std::stringstream buffer;
+        buffer << file.rdbuf();
+        contents = buffer.str();
+    }
+
+    if (contents.empty()) {
         return false;
     }
 
     try {
 
-        std::ifstream file(filepath);
-        if (!file.is_open()) {
-
-            return false;
-        }
-
-        nlohmann::json json;
-        file >> json;
-        file.close();
+        nlohmann::json json = nlohmann::json::parse(contents);
 
         Clear();
 
@@ -58,17 +77,13 @@ bool GlobalsManager::LoadGlobalsConfig(const std::string& filepath) {
                     continue;
                 }
 
-                if (var.type == "int") {
-                    var.intValue = varData.value("value", 0);
-                } else if (var.type == "float") {
-                    var.floatValue = varData.value("value", 0.0f);
-                } else if (var.type == "bool") {
-                    var.boolValue = varData.value("value", false);
-                } else if (var.type == "string") {
-                    var.stringValue = varData.value("value", "");
+                // The value is stored verbatim as JSON regardless of type, so every
+                // engine type (scalars, vectors, colors, quats, rects, arrays,
+                // dictionaries) is preserved and delivered through SetGlobalJson.
+                if (varData.contains("value")) {
+                    var.value = varData["value"];
                 } else {
-
-                    continue;
+                    var.value = nlohmann::json();
                 }
 
                 m_Variables.push_back(var);
@@ -79,20 +94,20 @@ bool GlobalsManager::LoadGlobalsConfig(const std::string& filepath) {
         return true;
 
     } catch (const std::exception& e) {
-
+        LOG_ERROR(LogCategory::Scripting, "GlobalsManager: failed to load globals config '{}': {}", filepath, e.what());
         return false;
     }
 }
 
 void GlobalsManager::InitializeGlobalVariables(
-    PythonEnvironment* pythonEnv,
+    MicroPythonEnvironment* micropythonEnv,
     LuaEnvironment* luaEnv,
     MRubyEnvironment* mrubyEnv
 ) {
 
     for (const auto& var : m_Variables) {
-        if (pythonEnv) {
-            InitializeVariableInPython(pythonEnv, var);
+        if (micropythonEnv) {
+            InitializeVariableInMicroPython(micropythonEnv, var);
         }
         if (luaEnv) {
             InitializeVariableInLua(luaEnv, var);
@@ -105,24 +120,21 @@ void GlobalsManager::InitializeGlobalVariables(
 }
 
 bool GlobalsManager::LoadSingletons(
-    PythonEnvironment* pythonEnv,
+    MicroPythonEnvironment* micropythonEnv,
     LuaEnvironment* luaEnv,
     MRubyEnvironment* mrubyEnv,
     const std::string& projectDir
 ) {
     if (m_Singletons.empty()) {
-
         return true;
     }
 
     bool allSuccess = true;
 
     for (const auto& singleton : m_Singletons) {
-
         std::string fullPath = platform::Path::Join(projectDir, singleton.scriptPath);
 
         if (!platform::FileSystem::Exists(fullPath)) {
-
             allSuccess = false;
             continue;
         }
@@ -132,14 +144,13 @@ bool GlobalsManager::LoadSingletons(
 
         bool success = false;
 
-        if (ext == ".py" && pythonEnv) {
-            success = LoadSingletonInPython(pythonEnv, singleton, fullPath);
+        if (ext == ".py" && micropythonEnv) {
+            success = LoadSingletonInMicroPython(micropythonEnv, singleton, fullPath);
         } else if (ext == ".lua" && luaEnv) {
             success = LoadSingletonInLua(luaEnv, singleton, fullPath);
         } else if (ext == ".rb" && mrubyEnv) {
             success = LoadSingletonInMRuby(mrubyEnv, singleton, fullPath);
         } else {
-
             allSuccess = false;
             continue;
         }
@@ -147,12 +158,6 @@ bool GlobalsManager::LoadSingletons(
         if (!success) {
             allSuccess = false;
         }
-    }
-
-    if (allSuccess) {
-
-    } else {
-
     }
 
     return allSuccess;
@@ -163,26 +168,16 @@ void GlobalsManager::Clear() {
     m_Singletons.clear();
 }
 
-void GlobalsManager::InitializeVariableInPython(PythonEnvironment* env, const GlobalVariable& var) {
+void GlobalsManager::InitializeVariableInMicroPython(MicroPythonEnvironment* env, const GlobalVariable& var) {
     if (!env) return;
-
-    if (var.type == "int") {
-        env->SetGlobal(var.name, var.intValue);
-    } else if (var.type == "float") {
-        env->SetGlobal(var.name, var.floatValue);
-    } else if (var.type == "bool") {
-        env->SetGlobal(var.name, var.boolValue);
-    } else if (var.type == "string") {
-        env->SetGlobal(var.name, var.stringValue);
-    }
+    env->SetGlobalJson(var.name, var.value);
 }
 
-bool GlobalsManager::LoadSingletonInPython(PythonEnvironment* env, const SingletonScript& singleton, const std::string& fullPath) {
+bool GlobalsManager::LoadSingletonInMicroPython(MicroPythonEnvironment* env, const SingletonScript&, const std::string& fullPath) {
     if (!env) return false;
 
     auto result = env->ExecuteFile(fullPath);
     if (!result.success) {
-
         return false;
     }
 
@@ -191,19 +186,10 @@ bool GlobalsManager::LoadSingletonInPython(PythonEnvironment* env, const Singlet
 
 void GlobalsManager::InitializeVariableInLua(LuaEnvironment* env, const GlobalVariable& var) {
     if (!env) return;
-
-    if (var.type == "int") {
-        env->SetGlobal(var.name, var.intValue);
-    } else if (var.type == "float") {
-        env->SetGlobal(var.name, var.floatValue);
-    } else if (var.type == "bool") {
-        env->SetGlobal(var.name, var.boolValue);
-    } else if (var.type == "string") {
-        env->SetGlobal(var.name, var.stringValue);
-    }
+    env->SetGlobalJson(var.name, var.value);
 }
 
-bool GlobalsManager::LoadSingletonInLua(LuaEnvironment* env, const SingletonScript& singleton, const std::string& fullPath) {
+bool GlobalsManager::LoadSingletonInLua(LuaEnvironment* env, const SingletonScript&, const std::string& fullPath) {
     if (!env) return false;
 
     auto result = env->ExecuteFile(fullPath);
@@ -217,19 +203,10 @@ bool GlobalsManager::LoadSingletonInLua(LuaEnvironment* env, const SingletonScri
 
 void GlobalsManager::InitializeVariableInMRuby(MRubyEnvironment* env, const GlobalVariable& var) {
     if (!env) return;
-
-    if (var.type == "int") {
-        env->SetGlobal(var.name, var.intValue);
-    } else if (var.type == "float") {
-        env->SetGlobal(var.name, var.floatValue);
-    } else if (var.type == "bool") {
-        env->SetGlobal(var.name, var.boolValue);
-    } else if (var.type == "string") {
-        env->SetGlobal(var.name, var.stringValue);
-    }
+    env->SetGlobalJson(var.name, var.value);
 }
 
-bool GlobalsManager::LoadSingletonInMRuby(MRubyEnvironment* env, const SingletonScript& singleton, const std::string& fullPath) {
+bool GlobalsManager::LoadSingletonInMRuby(MRubyEnvironment* env, const SingletonScript&, const std::string& fullPath) {
     if (!env) return false;
 
     auto result = env->ExecuteFile(fullPath);

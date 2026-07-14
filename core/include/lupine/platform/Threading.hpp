@@ -100,14 +100,14 @@ public:
     ConditionVariable& operator=(const ConditionVariable&) = delete;
 
     /**
-     * Waits on the condition variable.
+     * Waits on the condition variable until the predicate holds.
      * The mutex must be locked before calling this.
-     * @param mutex Mutex to use for synchronization
-     */
-    void Wait(Mutex& mutex);
-
-    /**
-     * Waits on the condition variable with a predicate.
+     *
+     * A predicate is mandatory by design: a bare wait cannot distinguish a
+     * spurious wakeup from a real one, and misses a notification delivered
+     * between the caller's condition test and the wait, so every such caller has
+     * a lost-wakeup bug. Re-checking the predicate under the mutex closes both.
+     *
      * @param mutex Mutex to use for synchronization
      * @param predicate Predicate function to check condition
      */
@@ -117,14 +117,6 @@ public:
         m_CondVar.wait(lock, predicate);
         lock.release(); // Release ownership without unlocking
     }
-
-    /**
-     * Waits on the condition variable with a timeout.
-     * @param mutex Mutex to use for synchronization
-     * @param timeoutMs Timeout in milliseconds
-     * @return True if signaled, false if timed out
-     */
-    bool WaitFor(Mutex& mutex, int64_t timeoutMs);
 
     /**
      * Waits on the condition variable with a timeout and predicate.

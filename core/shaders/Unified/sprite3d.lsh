@@ -1,0 +1,49 @@
+#shader "Sprite3D"
+#description "3D sprite rendering with alpha cutoff"
+
+#begin properties
+    uniform mat4 u_ViewProjection;
+    uniform mat4 u_Model;
+    uniform vec4 u_Modulate = vec4(1.0);
+    uniform float u_AlphaCutoff = 0.0;
+    uniform bool u_UseTexture = false;
+    uniform sampler2D u_Texture;
+#end properties
+
+#begin vertex
+    #input vec3 a_Position : POSITION 0
+    #input vec3 a_Normal : NORMAL 1
+    #input vec2 a_TexCoord : TEXCOORD0 2
+    #input vec4 a_Color : COLOR 3
+
+    #output vec2 v_TexCoord
+    #output vec4 v_Color
+    #output vec3 v_WorldPos
+
+    void main() {
+        vec4 worldPos = MUL(u_Model, vec4(a_Position, 1.0));
+        v_WorldPos = worldPos.xyz;
+        v_TexCoord = a_TexCoord;
+        v_Color = a_Color;
+        VERTEX_OUTPUT = MUL(u_ViewProjection, worldPos);
+    }
+#end vertex
+
+#begin fragment
+    #output vec4 FragColor
+
+    void main() {
+        vec4 color = v_Color * u_Modulate;
+
+        if (u_UseTexture) {
+            vec4 texColor = SAMPLE(u_Texture, v_TexCoord);
+            color *= texColor;
+
+            if (u_AlphaCutoff > 0.0 && color.a < u_AlphaCutoff) {
+                DISCARD;
+            }
+        }
+
+        FragColor = color;
+    }
+#end fragment

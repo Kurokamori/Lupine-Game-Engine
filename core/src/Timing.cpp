@@ -44,7 +44,7 @@ ScopedTimer::ScopedTimer(const char* name, bool logOnDestroy)
 ScopedTimer::~ScopedTimer() {
     if (m_LogOnDestroy) {
         double elapsed = GetElapsedMilliseconds();
-
+        LOG_DEBUG(LogCategory::Core, "[Timing] {} took {:.3f} ms", m_Name, elapsed);
     }
 }
 

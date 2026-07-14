@@ -1,0 +1,734 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <title>Lupine Game</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html, body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #1a1a2e;
+            /* Prevent pull-to-refresh on mobile */
+            overscroll-behavior: none;
+        }
+
+        #game-container {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+            position: relative;
+        }
+
+        #canvas {
+            display: block;
+            background-color: #000;
+            /* Will be sized by JavaScript */
+            max-width: 100%;
+            max-height: 100%;
+            /* Enable touch events */
+            touch-action: none;
+        }
+
+        #loading-screen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #1a1a2e;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 100;
+            transition: opacity 0.5s ease;
+        }
+
+        #loading-screen.hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        #loading-screen.removed {
+            display: none;
+        }
+
+        .loading-title {
+            color: #eee;
+            font-family: 'Segoe UI', Arial, sans-serif;
+            font-size: 1.8em;
+            margin-bottom: 30px;
+            text-align: center;
+            padding: 0 20px;
+        }
+
+        .loading-bar-container {
+            width: 280px;
+            max-width: 80%;
+            height: 16px;
+            background-color: #333;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .loading-bar {
+            width: 0%;
+            height: 100%;
+            background: linear-gradient(90deg, #4a9eff, #8b5cf6);
+            border-radius: 8px;
+            transition: width 0.2s ease;
+        }
+
+        .loading-text {
+            color: #888;
+            font-family: 'Segoe UI', Arial, sans-serif;
+            font-size: 0.85em;
+            margin-top: 15px;
+            text-align: center;
+        }
+
+        #error-screen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #1a1a2e;
+            display: none;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 101;
+            color: #ff6b6b;
+            font-family: 'Segoe UI', Arial, sans-serif;
+            text-align: center;
+            padding: 20px;
+        }
+
+        #error-screen.visible {
+            display: flex;
+        }
+
+        .error-title {
+            font-size: 1.4em;
+            margin-bottom: 15px;
+        }
+
+        .error-message {
+            color: #aaa;
+            max-width: 450px;
+            font-size: 0.9em;
+            line-height: 1.5;
+        }
+
+        .error-retry {
+            margin-top: 20px;
+            padding: 10px 25px;
+            background-color: #4a9eff;
+            color: #fff;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 0.9em;
+        }
+
+        /* Controls overlay */
+        #controls-overlay {
+            position: absolute;
+            bottom: 10px;
+            right: 10px;
+            display: flex;
+            gap: 8px;
+            z-index: 50;
+        }
+
+        .control-btn {
+            padding: 8px 16px;
+            background-color: rgba(255, 255, 255, 0.1);
+            color: #fff;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-family: 'Segoe UI', Arial, sans-serif;
+            font-size: 0.8em;
+            transition: background-color 0.2s;
+            backdrop-filter: blur(5px);
+        }
+
+        .control-btn:hover {
+            background-color: rgba(255, 255, 255, 0.2);
+        }
+
+        .control-btn:active {
+            background-color: rgba(255, 255, 255, 0.3);
+        }
+
+        /* Mobile: Hide controls by default, show on tap */
+        @media (max-width: 768px), (pointer: coarse) {
+            #controls-overlay {
+                opacity: 0.7;
+            }
+
+            .control-btn {
+                padding: 12px 20px;
+            }
+        }
+
+        /* itch.io iframe compatibility */
+        @media (max-width: 600px) {
+            .loading-title {
+                font-size: 1.4em;
+            }
+
+            .loading-bar-container {
+                width: 220px;
+            }
+        }
+
+        /* Audio unlock prompt */
+        #audio-unlock {
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 8px 16px;
+            background-color: rgba(74, 158, 255, 0.9);
+            color: #fff;
+            border-radius: 5px;
+            font-family: 'Segoe UI', Arial, sans-serif;
+            font-size: 0.8em;
+            z-index: 60;
+            cursor: pointer;
+            display: none;
+        }
+
+        #audio-unlock.visible {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div id="game-container">
+        <canvas id="canvas" tabindex="0" oncontextmenu="event.preventDefault()"></canvas>
+    </div>
+
+    <div id="loading-screen">
+        <div class="loading-title">Loading...</div>
+        <div class="loading-bar-container">
+            <div class="loading-bar" id="loading-bar"></div>
+        </div>
+        <div class="loading-text" id="loading-text">Initializing...</div>
+    </div>
+
+    <div id="error-screen">
+        <div class="error-title">Something went wrong</div>
+        <div class="error-message" id="error-message">Failed to load game.</div>
+        <button class="error-retry" onclick="location.reload()">Retry</button>
+    </div>
+
+    <div id="controls-overlay">
+        <button class="control-btn" id="fullscreen-btn" title="Fullscreen">Fullscreen</button>
+    </div>
+
+    <div id="audio-unlock">Click anywhere to enable audio</div>
+
+    <script type="text/javascript">
+        // Lupine Engine Web Runtime Loader
+
+        // Configuration
+        var gameWidth = 1280;
+        var gameHeight = 720;
+        var audioUnlocked = false;
+
+        // Get canvas
+        var canvas = document.getElementById('canvas');
+        canvas.width = gameWidth;
+        canvas.height = gameHeight;
+
+        // Module configuration for Emscripten
+        var Module = {
+            preRun: [function() {
+                // Mount persistent storage for user:// (saves, settings) before main().
+                //
+                // MEMFS lives in RAM and is discarded on page unload, so anything written
+                // there is lost on reload. IDBFS is backed by IndexedDB and survives, but
+                // it is asynchronous: the in-memory image has to be populated from
+                // IndexedDB *before* any C++ code opens a user:// file, and no
+                // synchronous C++ call can wait for that (the build sets ASYNCIFY=0).
+                //
+                // So the read happens here, gated by a run dependency, which holds main()
+                // until FS.syncfs has finished. Writes go the other way and are pushed
+                // back asynchronously by UserDataStore::Flush during the frame loop.
+                //
+                // This path must match UserDataStore::kWebUserDataPath in the C++.
+                var USER_DATA_PATH = '/lupine_user';
+
+                console.log('[Lupine] Mounting persistent user data at ' + USER_DATA_PATH);
+                Module.addRunDependency('lupine-user-data');
+
+                try {
+                    FS.mkdir(USER_DATA_PATH);
+                    FS.mount(IDBFS, {}, USER_DATA_PATH);
+
+                    // true = populate the in-memory image FROM IndexedDB.
+                    FS.syncfs(true, function(err) {
+                        if (err) {
+                            console.error('[Lupine] Could not load persisted user data; ' +
+                                          'saves will not carry over between sessions:', err);
+                        } else {
+                            console.log('[Lupine] Persistent user data loaded');
+                        }
+                        // Start the runtime either way - a failure to restore saves is not
+                        // a reason to refuse to boot the game.
+                        Module.removeRunDependency('lupine-user-data');
+                    });
+                } catch (e) {
+                    console.error('[Lupine] Failed to mount IDBFS; user data will be ' +
+                                  'session-only:', e);
+                    Module.removeRunDependency('lupine-user-data');
+                }
+
+                // Fetch and mount game.pck to virtual filesystem before main() runs
+                console.log('[Lupine] Checking for game.pck...');
+
+                // Add a run dependency to delay main() until game.pck is loaded
+                Module.addRunDependency('game.pck');
+
+                fetch('game.pck')
+                    .then(function(response) {
+                        if (!response.ok) {
+                            console.log('[Lupine] No game.pck found (this is OK if using preloaded data)');
+                            Module.removeRunDependency('game.pck');
+                            return null;
+                        }
+                        return response.arrayBuffer();
+                    })
+                    .then(function(buffer) {
+                        if (buffer) {
+                            console.log('[Lupine] Loading game.pck (' + buffer.byteLength + ' bytes)');
+                            var data = new Uint8Array(buffer);
+
+                            // Write to virtual filesystem
+                            try {
+                                FS.writeFile('/game.pck', data);
+                                console.log('[Lupine] game.pck mounted to virtual filesystem');
+                            } catch (e) {
+                                console.error('[Lupine] Failed to write game.pck:', e);
+                            }
+                        }
+                        Module.removeRunDependency('game.pck');
+                    })
+                    .catch(function(err) {
+                        console.log('[Lupine] Could not fetch game.pck:', err.message);
+                        Module.removeRunDependency('game.pck');
+                    });
+            }],
+            postRun: [],
+
+            canvas: (function() {
+                // Prevent right-click context menu
+                canvas.addEventListener('contextmenu', function(e) {
+                    e.preventDefault();
+                    return false;
+                });
+                return canvas;
+            })(),
+
+            print: function(text) {
+                console.log('[Lupine]', text);
+            },
+
+            printErr: function(text) {
+                console.error('[Lupine]', text);
+            },
+
+            setStatus: function(text) {
+                var loadingText = document.getElementById('loading-text');
+                var loadingBar = document.getElementById('loading-bar');
+
+                if (!text) {
+                    // Loading complete
+                    hideLoadingScreen();
+                    return;
+                }
+
+                if (loadingText) {
+                    loadingText.textContent = text;
+                }
+
+                // Parse progress from Emscripten status text
+                // Format: "Downloading data... (X/Y)"
+                var match = text.match(/\((\d+)\/(\d+)\)/);
+                if (match && loadingBar) {
+                    var current = parseInt(match[1]);
+                    var total = parseInt(match[2]);
+                    var percent = Math.round((current / total) * 100);
+                    loadingBar.style.width = percent + '%';
+                }
+            },
+
+            onRuntimeInitialized: function() {
+                console.log('[Lupine] Runtime initialized');
+                Module.setStatus('');
+            },
+
+            onAbort: function(what) {
+                console.error('[Lupine] Aborted:', what);
+                showError('Game crashed: ' + what);
+            },
+
+            // Total dependencies tracking
+            totalDependencies: 0,
+            monitorRunDependencies: function(left) {
+                this.totalDependencies = Math.max(this.totalDependencies, left);
+                if (this.totalDependencies > 0) {
+                    var progress = Math.round((1 - left / this.totalDependencies) * 100);
+                    Module.setStatus('Loading... ' + progress + '%');
+                }
+            }
+        };
+
+        // Error handling
+        function showError(message) {
+            var errorScreen = document.getElementById('error-screen');
+            var errorMessage = document.getElementById('error-message');
+            var loadingScreen = document.getElementById('loading-screen');
+
+            if (loadingScreen) {
+                loadingScreen.classList.add('hidden');
+            }
+            if (errorScreen && errorMessage) {
+                errorMessage.textContent = message;
+                errorScreen.classList.add('visible');
+            }
+        }
+
+        function hideLoadingScreen() {
+            var loadingScreen = document.getElementById('loading-screen');
+            if (loadingScreen) {
+                loadingScreen.classList.add('hidden');
+                // Remove from DOM after transition
+                setTimeout(function() {
+                    loadingScreen.classList.add('removed');
+                }, 500);
+            }
+
+            // Focus canvas
+            canvas.focus();
+        }
+
+        // Canvas resize handling
+        // IMPORTANT: We keep canvas.width/height in sync with CSS display size
+        // to ensure mouse coordinates match rendering coordinates exactly.
+        // The game viewport system handles the internal resolution scaling.
+        function resizeCanvas() {
+            var container = document.getElementById('game-container');
+            var containerWidth = container.clientWidth;
+            var containerHeight = container.clientHeight;
+
+            // Calculate scale to fit while maintaining aspect ratio
+            var scaleX = containerWidth / gameWidth;
+            var scaleY = containerHeight / gameHeight;
+            var scale = Math.min(scaleX, scaleY);
+
+            // Calculate display size
+            var displayWidth = Math.floor(gameWidth * scale);
+            var displayHeight = Math.floor(gameHeight * scale);
+
+            // CRITICAL: Update both the internal canvas size AND CSS size
+            // This ensures SDL mouse coordinates match the WebGL framebuffer
+            canvas.width = displayWidth;
+            canvas.height = displayHeight;
+            canvas.style.width = displayWidth + 'px';
+            canvas.style.height = displayHeight + 'px';
+        }
+
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // Fullscreen handling
+        document.getElementById('fullscreen-btn').addEventListener('click', function() {
+            var container = document.getElementById('game-container');
+            if (container.requestFullscreen) {
+                container.requestFullscreen();
+            } else if (container.webkitRequestFullscreen) {
+                container.webkitRequestFullscreen();
+            } else if (container.mozRequestFullScreen) {
+                container.mozRequestFullScreen();
+            } else if (container.msRequestFullscreen) {
+                container.msRequestFullscreen();
+            }
+        });
+
+        document.addEventListener('fullscreenchange', function() {
+            resizeCanvas();
+        });
+
+        // ====================================================================
+        // Keyboard handling - prevent browser shortcuts and capture input
+        // Platform-aware: handles Mac Command key vs Windows/Linux Ctrl key
+        // ====================================================================
+
+        // Detect platform for modifier key handling
+        var isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+        var isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+        var isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+
+        // Keys that should always be captured for game input
+        var gameKeys = [
+            'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+            'Space', 'Enter', 'Escape', 'Tab',
+            'KeyW', 'KeyA', 'KeyS', 'KeyD',
+            'KeyQ', 'KeyE', 'KeyR', 'KeyF',
+            'KeyZ', 'KeyX', 'KeyC', 'KeyV',
+            'Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5',
+            'Digit6', 'Digit7', 'Digit8', 'Digit9', 'Digit0',
+            'ShiftLeft', 'ShiftRight',
+            'ControlLeft', 'ControlRight',
+            'AltLeft', 'AltRight'
+        ];
+
+        function shouldCaptureKey(e) {
+            // Always capture game keys
+            if (gameKeys.indexOf(e.code) !== -1) {
+                return true;
+            }
+            // Capture letter and number keys when canvas is focused
+            if (e.code.startsWith('Key') || e.code.startsWith('Digit')) {
+                return true;
+            }
+            // Capture F-keys except F11 (fullscreen) and F12 (dev tools)
+            if (e.code.match(/^F([1-9]|10)$/) && e.code !== 'F11' && e.code !== 'F12') {
+                return true;
+            }
+            return false;
+        }
+
+        function shouldPreventDefault(e) {
+            // Prevent spacebar scrolling
+            if (e.code === 'Space') return true;
+            // Prevent browser back on backspace
+            if (e.code === 'Backspace') return true;
+            // Prevent tab navigation
+            if (e.code === 'Tab') return true;
+            // Prevent F-key browser actions (except F11/F12)
+            if (e.code.match(/^F([1-9]|10)$/)) return true;
+            // Prevent arrow keys from scrolling
+            if (e.code.startsWith('Arrow')) return true;
+            // Prevent Ctrl/Cmd+key shortcuts that might interfere
+            var actionMod = isMac ? e.metaKey : e.ctrlKey;
+            if (actionMod && ['KeyR', 'KeyW', 'KeyQ', 'KeyS'].indexOf(e.code) !== -1) {
+                // Only prevent if canvas is focused
+                if (document.activeElement === canvas) return true;
+            }
+            return false;
+        }
+
+        window.addEventListener('keydown', function(e) {
+            // Focus canvas on any key press if not focused on an input
+            if (document.activeElement === document.body) {
+                canvas.focus();
+            }
+
+            if (shouldPreventDefault(e)) {
+                e.preventDefault();
+            }
+        }, { capture: true });
+
+        window.addEventListener('keyup', function(e) {
+            if (shouldPreventDefault(e)) {
+                e.preventDefault();
+            }
+        }, { capture: true });
+
+        // Prevent context menu on right-click in game
+        canvas.addEventListener('contextmenu', function(e) {
+            e.preventDefault();
+        });
+
+        // Focus canvas on interaction
+        document.addEventListener('click', function(e) {
+            if (!e.target.classList.contains('control-btn') &&
+                !e.target.classList.contains('error-retry')) {
+                canvas.focus();
+                unlockAudio();
+            }
+        });
+
+        document.addEventListener('touchstart', function(e) {
+            canvas.focus();
+            unlockAudio();
+        }, { passive: true });
+
+        // Ensure canvas can receive keyboard input
+        canvas.setAttribute('tabindex', '0');
+
+        // Auto-focus canvas when mouse enters
+        canvas.addEventListener('mouseenter', function() {
+            if (document.activeElement === document.body) {
+                canvas.focus();
+            }
+        });
+
+        // Handle visibility change (tab switching)
+        document.addEventListener('visibilitychange', function() {
+            if (document.hidden) {
+                // Game is hidden, could pause here
+            } else {
+                // Game is visible again, refocus canvas
+                canvas.focus();
+            }
+        });
+
+        // Audio unlock for browsers that require user interaction
+        function unlockAudio() {
+            if (audioUnlocked) return;
+            audioUnlocked = true;
+
+            document.getElementById('audio-unlock').classList.remove('visible');
+
+            // Create and play a silent audio context to unlock
+            try {
+                var AudioContext = window.AudioContext || window.webkitAudioContext;
+                if (AudioContext) {
+                    var audioCtx = new AudioContext();
+                    if (audioCtx.state === 'suspended') {
+                        audioCtx.resume();
+                    }
+                    // Create a silent buffer
+                    var buffer = audioCtx.createBuffer(1, 1, 22050);
+                    var source = audioCtx.createBufferSource();
+                    source.buffer = buffer;
+                    source.connect(audioCtx.destination);
+                    source.start(0);
+                }
+            } catch (e) {
+                console.log('[Lupine] Audio unlock:', e);
+            }
+        }
+
+        // Check if audio needs unlocking (most mobile browsers)
+        if (/iPhone|iPad|iPod|Android/i.test(navigator.userAgent)) {
+            document.getElementById('audio-unlock').classList.add('visible');
+        }
+
+        // ====================================================================
+        // WebGL Context Loss Handling - Robust Recovery System
+        // ====================================================================
+        var contextLossCount = 0;
+        var contextLossRecoveryAttempts = 0;
+        var maxRecoveryAttempts = 3;
+        var isRecovering = false;
+
+        function showContextLostWarning() {
+            var loadingScreen = document.getElementById('loading-screen');
+            var loadingText = document.getElementById('loading-text');
+            var loadingTitle = document.querySelector('.loading-title');
+
+            if (loadingScreen) {
+                loadingScreen.classList.remove('hidden');
+                loadingScreen.classList.remove('removed');
+            }
+            if (loadingTitle) {
+                loadingTitle.textContent = 'Recovering Graphics...';
+            }
+            if (loadingText) {
+                loadingText.textContent = 'GPU resources are being restored...';
+            }
+        }
+
+        function hideContextLostWarning() {
+            var loadingScreen = document.getElementById('loading-screen');
+            if (loadingScreen) {
+                loadingScreen.classList.add('hidden');
+                setTimeout(function() {
+                    loadingScreen.classList.add('removed');
+                }, 500);
+            }
+            canvas.focus();
+        }
+
+        canvas.addEventListener('webglcontextlost', function(e) {
+            console.error('[Lupine] WebGL context lost (count: ' + (++contextLossCount) + ')');
+            e.preventDefault();  // CRITICAL: Prevents browser from giving up on context
+
+            isRecovering = true;
+            showContextLostWarning();
+
+            // The C++ code will handle the context loss via Emscripten callbacks
+            // We just need to prevent default and show feedback to user
+        }, false);
+
+        canvas.addEventListener('webglcontextrestored', function(e) {
+            console.log('[Lupine] WebGL context restored');
+            isRecovering = false;
+            contextLossRecoveryAttempts = 0;
+
+            hideContextLostWarning();
+
+            // The C++ code will handle resource recreation via Emscripten callbacks
+        }, false);
+
+        // Periodic context health check (catches silent context loss)
+        var lastContextCheckTime = Date.now();
+        function checkContextHealth() {
+            if (isRecovering) {
+                // Already recovering, don't interfere
+                return;
+            }
+
+            try {
+                // Get the WebGL context from the canvas
+                var gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
+                if (gl) {
+                    // Check if context is lost
+                    if (gl.isContextLost()) {
+                        console.warn('[Lupine] Context health check detected lost context');
+                        // The contextlost event should fire, but if it didn't, we handle it here
+                        if (!isRecovering) {
+                            isRecovering = true;
+                            contextLossCount++;
+                            showContextLostWarning();
+                        }
+                    }
+                }
+            } catch (e) {
+                console.warn('[Lupine] Context health check error:', e);
+            }
+        }
+
+        // Check context health every 2 seconds
+        setInterval(checkContextHealth, 2000);
+
+        // Global error handler
+        window.onerror = function(message, source, lineno, colno, error) {
+            console.error('[Lupine] Error:', message, 'at', source, lineno);
+            if (message.includes('abort') || message.includes('Aborted')) {
+                showError('Game crashed. ' + message);
+            }
+            return false;
+        };
+
+        // Initial status
+        Module.setStatus('Initializing...');
+
+        // Log startup
+        console.log('[Lupine] Web build starting...');
+        console.log('[Lupine] Canvas:', gameWidth, 'x', gameHeight);
+    </script>
+    {{{ SCRIPT }}}
+</body>
+</html>

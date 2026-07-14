@@ -246,15 +246,12 @@ void Panel3D::SetStylePath(const std::string& path) {
     SetPropertyValue<std::string>("stylePath", path);
 }
 
-const Color& Panel3D::GetBackgroundColor() const {
-    static Color cachedColor;
-    static Color defaultColor = Color::White();
+Color Panel3D::GetBackgroundColor() const {
     const ComponentProperty* prop = m_CustomProperties.GetProperty("backgroundColor");
     if (prop) {
-        cachedColor = prop->GetValue<Color>();
-        return cachedColor;
+        return prop->GetValue<Color>();
     }
-    return defaultColor;
+    return Color::White();
 }
 
 void Panel3D::SetBackgroundColor(const Color& color) {
@@ -335,15 +332,12 @@ void Panel3D::SetBorderEnabled(bool enabled) {
     m_MeshNeedsRegeneration = true;
 }
 
-const Color& Panel3D::GetBorderColor() const {
-    static Color cachedColor;
-    static Color defaultColor = Color::Black();
+Color Panel3D::GetBorderColor() const {
     const ComponentProperty* prop = m_CustomProperties.GetProperty("borderColor");
     if (prop) {
-        cachedColor = prop->GetValue<Color>();
-        return cachedColor;
+        return prop->GetValue<Color>();
     }
-    return defaultColor;
+    return Color::Black();
 }
 
 void Panel3D::SetBorderColor(const Color& color) {
@@ -448,15 +442,12 @@ void Panel3D::SetShadowEnabled(bool enabled) {
     m_MeshNeedsRegeneration = true;
 }
 
-const Color& Panel3D::GetShadowColor() const {
-    static Color cachedColor;
-    static Color defaultColor = Color(0.0f, 0.0f, 0.0f, 0.6f);
+Color Panel3D::GetShadowColor() const {
     const ComponentProperty* prop = m_CustomProperties.GetProperty("shadowColor");
     if (prop) {
-        cachedColor = prop->GetValue<Color>();
-        return cachedColor;
+        return prop->GetValue<Color>();
     }
-    return defaultColor;
+    return Color(0.0f, 0.0f, 0.0f, 0.6f);
 }
 
 void Panel3D::SetShadowColor(const Color& color) {
@@ -631,6 +622,12 @@ void Panel3D::buildDrawCommands(RenderContext& ctx) {
 
 void Panel3D::RenderFill(RenderContext& ctx, const Mat4& transform, const Vec2& size, bool isBackFace) {
     Color fillColor = GetBackgroundColor();
+    // Debug: log fillColor right after getting it
+    static int fillColorDebugCount = 0;
+    if (fillColorDebugCount < 10) {
+        
+        fillColorDebugCount++;
+    }
     fillColor.a *= GetOpacity();
 
     if (fillColor.a <= 0.0f) return;

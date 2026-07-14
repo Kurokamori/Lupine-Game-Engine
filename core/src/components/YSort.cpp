@@ -66,7 +66,7 @@ void YSort::OnAwake() {
     m_NeedsSorting = true;
 }
 
-void YSort::OnUpdate(float deltaTime) {
+void YSort::OnUpdate(float) {
     if (!GetEnabled()) {
         return;
     }
@@ -89,7 +89,7 @@ void YSort::OnUpdate(float deltaTime) {
     // Manual mode: sorting only happens when Sort() is called explicitly
 }
 
-void YSort::OnLateUpdate(float deltaTime) {
+void YSort::OnLateUpdate(float) {
     if (!GetEnabled()) {
         return;
     }
@@ -193,21 +193,13 @@ void YSort::PerformSort() {
     std::vector<NodeSortData> nodesToSort;
     nodesToSort.reserve(256); // Pre-allocate for common case
 
-    // Get owner as shared_ptr - we need to find it in the parent's children or scene
-    // Since m_Owner is a raw pointer, we need to work with its children directly
-    // The owner itself shouldn't be sorted, only its children/grandchildren
     const std::vector<std::shared_ptr<Node>>& children = m_Owner->GetChildren();
-
-    LOG_INFO(LogCategory::Core, "YSort: PerformSort on '{}' with {} children",
-             m_Owner->GetName(), children.size());
 
     for (const std::shared_ptr<Node>& child : children) {
         if (child) {
             GatherSortableNodes(child, nodesToSort);
         }
     }
-
-    LOG_INFO(LogCategory::Core, "YSort: Gathered {} nodes to sort", nodesToSort.size());
 
     if (nodesToSort.empty()) {
         m_NeedsSorting = false;
@@ -228,18 +220,7 @@ void YSort::GatherSortableNodes(const std::shared_ptr<Node>& node, std::vector<N
         return;
     }
 
-    // Debug logging for trees and player
-    std::string nodeName = node->GetName();
-    bool isInteresting = nodeName.find("Player") != std::string::npos ||
-                         nodeName.find("Tree") != std::string::npos ||
-                         nodeName.find("tree") != std::string::npos;
-
-    // Check if this node should be included
     bool shouldInclude = ShouldIncludeNode(node);
-
-    if (isInteresting) {
-        LOG_INFO(LogCategory::Core, "YSort: Gathering {} - shouldInclude={}", nodeName, shouldInclude);
-    }
 
     if (shouldInclude) {
         NodeSortData data;
@@ -251,10 +232,6 @@ void YSort::GatherSortableNodes(const std::shared_ptr<Node>& node, std::vector<N
         data.originalZIndex = node2D ? node2D->GetZIndex() : 0;
 
         data.originalDepth = static_cast<int>(outNodes.size());
-
-        if (isInteresting) {
-            LOG_INFO(LogCategory::Core, "YSort: {} sortValue={:.1f}", nodeName, data.sortValue);
-        }
 
         outNodes.push_back(data);
     }
@@ -273,11 +250,6 @@ bool YSort::ShouldIncludeNode(const std::shared_ptr<Node>& node) const {
     if (!node) {
         return false;
     }
-
-    std::string nodeName = node->GetName();
-    bool isInteresting = nodeName.find("Player") != std::string::npos ||
-                         nodeName.find("Tree") != std::string::npos ||
-                         nodeName.find("tree") != std::string::npos;
 
     // If we only affect sprite children, check for visual 2D components
     if (GetAffectOnlySpriteChildren()) {
@@ -299,9 +271,6 @@ bool YSort::ShouldIncludeNode(const std::shared_ptr<Node>& node) const {
         }
 
         if (!hasVisualComponent) {
-            if (isInteresting) {
-                LOG_INFO(LogCategory::Core, "YSort: {} excluded - no visual component", nodeName);
-            }
             return false;
         }
     }
@@ -309,10 +278,6 @@ bool YSort::ShouldIncludeNode(const std::shared_ptr<Node>& node) const {
     // Check if it's a 2D node (required for position access)
     std::shared_ptr<Node2D> node2D = std::dynamic_pointer_cast<Node2D>(node);
     bool isNode2D = node2D != nullptr;
-
-    if (isInteresting && !isNode2D) {
-        LOG_INFO(LogCategory::Core, "YSort: {} excluded - not Node2D", nodeName);
-    }
 
     return isNode2D;
 }
@@ -459,18 +424,7 @@ void YSort::ApplyZPositions(const std::vector<NodeSortData>& sortedNodes) {
             continue;
         }
 
-        // Set Z position based on sort order - INVERTED
-        // Lower Y values (further down/back) should have HIGHER Z (drawn behind)
-        // Higher Y values (closer up/front) should have LOWER Z (drawn in front)
         int newZ = baseOffset + (totalCount - 1 - static_cast<int>(i));
-
-        // Debug logging
-        std::string nodeName = node->GetName();
-        if (nodeName.find("Player") != std::string::npos ||
-            nodeName.find("Tree") != std::string::npos ||
-            nodeName.find("tree") != std::string::npos) {
-            LOG_INFO(LogCategory::Core, "YSort: Applying Z position {} to node {}", newZ, nodeName);
-        }
 
         node2D->SetZIndex(newZ);
     }

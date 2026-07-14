@@ -170,6 +170,9 @@ public:
     // Check if a type is registered
     bool IsTypeRegistered(const std::string& typeName) const;
 
+    // Enumerate all registered type names (for reflection / language bindings)
+    std::vector<std::string> GetRegisteredTypeNames() const;
+
 private:
     TypeRegistry() = default;
     std::unordered_map<std::string, FactoryFunc> m_Factories;

@@ -170,5 +170,123 @@ GamepadAxis StringToGamepadAxis(const std::string& str) {
     return GamepadAxis::Unknown;
 }
 
+std::string GamepadTypeToString(GamepadType type) {
+    switch (type) {
+        case GamepadType::Xbox: return "Xbox";
+        case GamepadType::PlayStation: return "PlayStation";
+        case GamepadType::Nintendo: return "Nintendo";
+        case GamepadType::Steam: return "Steam";
+        case GamepadType::Generic: return "Generic";
+        default: return "Unknown";
+    }
+}
+
+GamepadType StringToGamepadType(const std::string& str) {
+    if (str == "Xbox") return GamepadType::Xbox;
+    if (str == "PlayStation") return GamepadType::PlayStation;
+    if (str == "Nintendo") return GamepadType::Nintendo;
+    if (str == "Steam") return GamepadType::Steam;
+    if (str == "Generic") return GamepadType::Generic;
+    return GamepadType::Unknown;
+}
+
+std::string GamepadTypePrefix(GamepadType type) {
+    switch (type) {
+        case GamepadType::Xbox: return "xbox";
+        case GamepadType::PlayStation: return "ps";
+        case GamepadType::Nintendo: return "switch";
+        case GamepadType::Steam: return "steam";
+        default: return "generic";
+    }
+}
+
+std::string GamepadFaceLabel(GamepadButton button, GamepadType type) {
+    // PlayStation uses shape names for the face buttons and L1/L2/R1/R2 for the
+    // shoulders; Share/Options for select/start. The DualShock/DualSense home
+    // button is the PS button.
+    if (type == GamepadType::PlayStation) {
+        switch (button) {
+            case GamepadButton::A: return "Cross";
+            case GamepadButton::B: return "Circle";
+            case GamepadButton::X: return "Square";
+            case GamepadButton::Y: return "Triangle";
+            case GamepadButton::LeftBumper: return "L1";
+            case GamepadButton::RightBumper: return "R1";
+            case GamepadButton::Back: return "Share";
+            case GamepadButton::Start: return "Options";
+            case GamepadButton::Guide: return "PS";
+            case GamepadButton::LeftThumb: return "L3";
+            case GamepadButton::RightThumb: return "R3";
+            case GamepadButton::DPadUp: return "D-Pad Up";
+            case GamepadButton::DPadRight: return "D-Pad Right";
+            case GamepadButton::DPadDown: return "D-Pad Down";
+            case GamepadButton::DPadLeft: return "D-Pad Left";
+            default: return "Unknown";
+        }
+    }
+
+    // Nintendo controllers swap the physical A/B and X/Y positions relative to
+    // Xbox. SDL reports by position (south == A), so the south button is labeled
+    // "B", east "A", west "Y", north "X". Shoulders are L/R, select/start are -/+.
+    if (type == GamepadType::Nintendo) {
+        switch (button) {
+            case GamepadButton::A: return "B";
+            case GamepadButton::B: return "A";
+            case GamepadButton::X: return "Y";
+            case GamepadButton::Y: return "X";
+            case GamepadButton::LeftBumper: return "L";
+            case GamepadButton::RightBumper: return "R";
+            case GamepadButton::Back: return "-";
+            case GamepadButton::Start: return "+";
+            case GamepadButton::Guide: return "Home";
+            case GamepadButton::LeftThumb: return "L Stick";
+            case GamepadButton::RightThumb: return "R Stick";
+            case GamepadButton::DPadUp: return "D-Pad Up";
+            case GamepadButton::DPadRight: return "D-Pad Right";
+            case GamepadButton::DPadDown: return "D-Pad Down";
+            case GamepadButton::DPadLeft: return "D-Pad Left";
+            default: return "Unknown";
+        }
+    }
+
+    // Xbox / Steam / Generic / Unknown all use the Xbox-style ABXY layout.
+    switch (button) {
+        case GamepadButton::A: return "A";
+        case GamepadButton::B: return "B";
+        case GamepadButton::X: return "X";
+        case GamepadButton::Y: return "Y";
+        case GamepadButton::LeftBumper: return "LB";
+        case GamepadButton::RightBumper: return "RB";
+        case GamepadButton::Back: return "Back";
+        case GamepadButton::Start: return "Start";
+        case GamepadButton::Guide: return "Guide";
+        case GamepadButton::LeftThumb: return "L Stick";
+        case GamepadButton::RightThumb: return "R Stick";
+        case GamepadButton::DPadUp: return "D-Pad Up";
+        case GamepadButton::DPadRight: return "D-Pad Right";
+        case GamepadButton::DPadDown: return "D-Pad Down";
+        case GamepadButton::DPadLeft: return "D-Pad Left";
+        default: return "Unknown";
+    }
+}
+
+std::string GamepadAxisLabel(GamepadAxis axis, GamepadType type) {
+    switch (axis) {
+        case GamepadAxis::LeftX: return "Left Stick X";
+        case GamepadAxis::LeftY: return "Left Stick Y";
+        case GamepadAxis::RightX: return "Right Stick X";
+        case GamepadAxis::RightY: return "Right Stick Y";
+        case GamepadAxis::LeftTrigger:
+            if (type == GamepadType::PlayStation) return "L2";
+            if (type == GamepadType::Nintendo) return "ZL";
+            return "LT";
+        case GamepadAxis::RightTrigger:
+            if (type == GamepadType::PlayStation) return "R2";
+            if (type == GamepadType::Nintendo) return "ZR";
+            return "RT";
+        default: return "Unknown";
+    }
+}
+
 }
 }

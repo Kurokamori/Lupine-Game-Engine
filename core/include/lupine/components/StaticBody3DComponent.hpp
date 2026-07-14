@@ -37,6 +37,7 @@ public:
     void OnAwake() override;
     void OnReady() override;
     void OnDestroy() override;
+    void OnPhysicsWorldRebuild(PhysicsWorldRebuildPhase phase) override;
     void OnPhysicsProcess(float deltaTime) override;
 
     // ===== Property Accessors =====

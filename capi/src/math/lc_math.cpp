@@ -1,12 +1,17 @@
 
 
 #include "math/lc_math.h"
-#include <lupine\math\Math.hpp>
-#include <lupine\math\Camera.hpp>
+#include <lupine/math/Math.hpp>
+#include <lupine/math/Camera.hpp>
+#include <lupine/math/Gradient.hpp>
+#include <lupine/math/Curve.hpp>
 
 #include <glm/gtc/type_ptr.hpp>
 #include <cmath>
 #include <algorithm>
+#include <random>
+#include <string>
+#include <cstring>
 
 namespace {
 
@@ -86,7 +91,6 @@ inline LCTransform FromTransform(const lupine::math::Transform& t) {
 
 }
 
-extern "C" {
 
 LC_API LCVec2 lc_vec2(float x, float y) {
     return LCVec2{x, y};
@@ -762,6 +766,112 @@ LC_API LCVec3 lc_color_to_hsv(LCColor c) {
     return LCVec3{h, s, v};
 }
 
+namespace {
+
+int HexNibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+} // anonymous namespace
+
+LC_API LCColor lc_color_from_hex_string(const char* hex) {
+    if (!hex) return LCColor{0.0f, 0.0f, 0.0f, 1.0f};
+
+    std::string s = hex;
+    if (!s.empty() && s[0] == '#') {
+        s = s.substr(1);
+    }
+
+    auto pair = [&](size_t i) -> float {
+        int hi = HexNibble(s[i]);
+        int lo = HexNibble(s[i + 1]);
+        if (hi < 0 || lo < 0) return 0.0f;
+        return static_cast<float>(hi * 16 + lo) / 255.0f;
+    };
+    auto single = [&](size_t i) -> float {
+        int v = HexNibble(s[i]);
+        if (v < 0) return 0.0f;
+        return static_cast<float>(v * 16 + v) / 255.0f;
+    };
+
+    if (s.size() == 3) {
+        return LCColor{single(0), single(1), single(2), 1.0f};
+    }
+    if (s.size() == 4) {
+        return LCColor{single(0), single(1), single(2), single(3)};
+    }
+    if (s.size() == 6) {
+        return LCColor{pair(0), pair(2), pair(4), 1.0f};
+    }
+    if (s.size() == 8) {
+        return LCColor{pair(0), pair(2), pair(4), pair(6)};
+    }
+    return LCColor{0.0f, 0.0f, 0.0f, 1.0f};
+}
+
+LC_API LCResult lc_color_to_hex_string(LCColor color, char* out_buffer, size_t buffer_size) {
+    if (!out_buffer) return LC_ERROR_NULL_POINTER;
+    if (buffer_size < 10) return LC_ERROR_INVALID_PARAMETER;
+
+    auto clampByte = [](float v) -> int {
+        int b = static_cast<int>(v * 255.0f + 0.5f);
+        if (b < 0) return 0;
+        if (b > 255) return 255;
+        return b;
+    };
+    static const char* digits = "0123456789abcdef";
+    int comps[4] = { clampByte(color.r), clampByte(color.g), clampByte(color.b), clampByte(color.a) };
+
+    out_buffer[0] = '#';
+    for (int i = 0; i < 4; ++i) {
+        out_buffer[1 + i * 2] = digits[(comps[i] >> 4) & 0xF];
+        out_buffer[2 + i * 2] = digits[comps[i] & 0xF];
+    }
+    out_buffer[9] = '\0';
+    return LC_SUCCESS;
+}
+
+LC_API LCColor lc_color_from_hsv01(float h, float s, float v, float a) {
+    h = h - std::floor(h);
+    s = std::min(std::max(s, 0.0f), 1.0f);
+    v = std::min(std::max(v, 0.0f), 1.0f);
+
+    float r = v, g = v, b = v;
+    if (s > 0.0f) {
+        float hSector = h * 6.0f;
+        int i = static_cast<int>(std::floor(hSector)) % 6;
+        if (i < 0) i += 6;
+        float f = hSector - std::floor(hSector);
+        float p = v * (1.0f - s);
+        float q = v * (1.0f - s * f);
+        float t = v * (1.0f - s * (1.0f - f));
+        switch (i) {
+            case 0: r = v; g = t; b = p; break;
+            case 1: r = q; g = v; b = p; break;
+            case 2: r = p; g = v; b = t; break;
+            case 3: r = p; g = q; b = v; break;
+            case 4: r = t; g = p; b = v; break;
+            default: r = v; g = p; b = q; break;
+        }
+    }
+    return LCColor{r, g, b, a};
+}
+
+LC_API LCColor lc_sample_gradient(const char* gradient_json, float t) {
+    if (!gradient_json) return FromColor(lupine::math::Color::White());
+    lupine::math::Gradient g = lupine::math::Gradient::FromJsonString(std::string(gradient_json));
+    return FromColor(g.Sample(t));
+}
+
+LC_API float lc_sample_curve(const char* curve_json, float t, float empty_default) {
+    if (!curve_json) return empty_default;
+    lupine::math::Curve c = lupine::math::Curve::FromJsonString(std::string(curve_json));
+    return c.Sample(t, empty_default);
+}
+
 LC_API LCTransform lc_transform_identity(void) {
     return FromTransform(lupine::math::Transform::Identity());
 }
@@ -902,4 +1012,152 @@ LC_API bool lc_is_zero(float value) {
     return lupine::math::IsZero(value);
 }
 
+namespace {
+
+// Shared C-API RNG so lc_random_seed() makes every lc_random_* helper deterministic,
+// mirroring the ScriptRng pattern in ScriptAPI.
+std::mt19937& CapiRng() {
+    static std::mt19937 gen(std::random_device{}());
+    return gen;
+}
+
+} // anonymous namespace
+
+LC_API float lc_random_float(void) {
+    std::uniform_real_distribution<float> dis(0.0f, 1.0f);
+    return dis(CapiRng());
+}
+
+LC_API bool lc_random_bool(void) {
+    std::uniform_int_distribution<int> dis(0, 1);
+    return dis(CapiRng()) != 0;
+}
+
+LC_API int lc_random_sign(void) {
+    std::uniform_int_distribution<int> dis(0, 1);
+    return dis(CapiRng()) == 0 ? -1 : 1;
+}
+
+LC_API void lc_random_seed(int seed) {
+    CapiRng().seed(static_cast<std::mt19937::result_type>(seed));
+}
+
+LC_API float lc_random_range(float min, float max) {
+    std::uniform_real_distribution<float> dis(min, max);
+    return dis(CapiRng());
+}
+
+LC_API int lc_random_range_int(int min, int max) {
+    std::uniform_int_distribution<int> dis(min, max);
+    return dis(CapiRng());
+}
+
+LC_API float lc_wrap(float value, float min, float max) {
+    float range = max - min;
+    if (std::abs(range) < 0.00001f) {
+        return min;
+    }
+    float result = std::fmod(value - min, range);
+    if (result < 0.0f) {
+        result += range;
+    }
+    return result + min;
+}
+
+LC_API int lc_wrap_int(int value, int min, int max) {
+    int range = max - min;
+    if (range == 0) {
+        return min;
+    }
+    int result = (value - min) % range;
+    if (result < 0) {
+        result += range;
+    }
+    return result + min;
+}
+
+LC_API float lc_ping_pong(float value, float length) {
+    if (length <= 0.0f) {
+        return 0.0f;
+    }
+    float t = std::fmod(std::abs(value), length * 2.0f);
+    return length - std::abs(t - length);
+}
+
+LC_API float lc_snapped(float value, float step) {
+    if (std::abs(step) < 0.00001f) {
+        return value;
+    }
+    return std::round(value / step) * step;
+}
+
+LC_API bool lc_is_equal_approx(float a, float b) {
+    float tolerance = 0.00001f * std::max(1.0f, std::max(std::abs(a), std::abs(b)));
+    return std::abs(a - b) <= tolerance;
+}
+
+LC_API float lc_ease(float t, float curve) {
+    t = std::min(std::max(t, 0.0f), 1.0f);
+    if (curve > 0.0f) {
+        if (curve < 1.0f) {
+            return 1.0f - std::pow(1.0f - t, 1.0f / curve);
+        }
+        return std::pow(t, curve);
+    }
+    if (curve < 0.0f) {
+        if (t < 0.5f) {
+            return std::pow(t * 2.0f, -curve) * 0.5f;
+        }
+        return (1.0f - std::pow(1.0f - (t - 0.5f) * 2.0f, -curve)) * 0.5f + 0.5f;
+    }
+    return 0.0f;
+}
+
+LC_API float lc_pos_mod(float a, float b) {
+    if (std::abs(b) < 0.00001f) {
+        return 0.0f;
+    }
+    float result = std::fmod(a, b);
+    if ((result < 0.0f && b > 0.0f) || (result > 0.0f && b < 0.0f)) {
+        result += b;
+    }
+    return result;
+}
+
+LC_API int lc_pos_mod_int(int a, int b) {
+    if (b == 0) {
+        return 0;
+    }
+    int result = a % b;
+    if ((result < 0 && b > 0) || (result > 0 && b < 0)) {
+        result += b;
+    }
+    return result;
+}
+
+LC_API float lc_move_toward(float from, float to, float delta) {
+    if (std::abs(to - from) <= delta) {
+        return to;
+    }
+    return from + (to > from ? delta : -delta);
+}
+
+LC_API float lc_smoothstep(float from, float to, float t) {
+    if (std::abs(to - from) < 0.0001f) {
+        return t < from ? 0.0f : 1.0f;
+    }
+    t = lc_clamp((t - from) / (to - from), 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+LC_API float lc_inverse_lerp(float from, float to, float value) {
+    if (std::abs(to - from) < 0.0001f) {
+        return 0.0f;
+    }
+    return (value - from) / (to - from);
+}
+
+LC_API float lc_remap(float value, float from_min, float from_max, float to_min, float to_max) {
+    float t = lc_inverse_lerp(from_min, from_max, value);
+    return lc_lerp(to_min, to_max, t);
 }

@@ -11,6 +11,20 @@ using math::Vec4;
 using math::Color;
 
 /**
+ * Shader types for material rendering
+ */
+enum class ShaderType {
+    PBR,            // Physically-based rendering (default)
+    Toon,           // Cel/toon shading
+    Stylized,       // Fantasy-style soft shading with shadow ramps and rim lighting
+    Unlit,          // No lighting calculations
+    Standard3D,     // Basic lit shader
+    Transparent,    // Transparent/Glass with refraction and fresnel effects
+    Glow,           // Emissive glow for stars, lights, magic effects
+    Custom          // User-provided custom shader
+};
+
+/**
  * PBR Material properties.
  * 
  * Supports physically-based rendering with:
@@ -60,6 +74,49 @@ struct PBRMaterialProperties {
     TextureHandle heightTexture;       // Height/displacement
     bool useHeightTexture = false;
     float heightScale = 0.05f;
+
+    // Shader selection
+    ShaderType shaderType = ShaderType::PBR;
+    std::string customVertShaderPath;
+    std::string customFragShaderPath;
+
+    // Toon shader specific parameters
+    float shadowBands = 3.0f;
+    float shadowThreshold = 0.5f;
+    float shadowSoftness = 0.02f;
+    float specularBands = 2.0f;
+    float specularPower = 32.0f;
+    float rimIntensity = 0.0f;
+    float rimPower = 3.0f;
+
+    // Stylized shader specific parameters
+    float stylizedShadowSoftness = 0.3f;     // How soft the shadow transitions are
+    float stylizedSpecularSoftness = 0.15f;  // How soft the specular edge is
+    float stylizedShadowBrightness = 0.4f;   // How bright shadows are (0-1)
+    float stylizedShadowWarmth = 0.5f;       // Warm/cool color shift in shadows (0-1)
+    float stylizedSpecularIntensity = 0.5f;  // Specular highlight intensity
+    float stylizedHalfLambertPower = 1.5f;   // Controls wrap-around lighting softness
+
+    // Transparent/Glass shader specific parameters
+    float transparentOpacity = 0.5f;         // Base opacity (0 = fully transparent, 1 = opaque)
+    float transparentRefractiveIndex = 1.5f; // Index of refraction (1.0 = air, 1.5 = glass, 2.4 = diamond)
+    float transparentChromaticAberration = 0.0f; // Color separation amount (0 = none)
+    float transparentFresnelPower = 5.0f;    // Fresnel effect strength at grazing angles
+    float transparentReflectivity = 0.5f;    // How much environment is reflected
+    float transparentRoughness = 0.0f;       // Surface roughness (0 = smooth glass)
+    float transparentThickness = 1.0f;       // Glass thickness (affects refraction offset)
+
+    // Glow/Emissive shader specific parameters
+    float glowIntensity = 1.0f;              // Overall glow brightness
+    float glowFalloff = 2.0f;                // How quickly glow fades from center
+    float glowPulseSpeed = 0.0f;             // Animation speed (0 = no pulse)
+    float glowPulseAmount = 0.0f;            // Pulse intensity variation
+    float glowCoreSize = 0.3f;               // Size of bright core (0-1)
+    float glowCoreBrightness = 2.0f;         // Core brightness multiplier
+    float glowOuterGlow = 1.0f;              // Outer glow intensity
+    float glowFresnelPower = 3.0f;           // Rim glow effect power
+    float glowFresnelIntensity = 0.5f;       // Rim glow intensity
+    float glowColorShift = 0.0f;             // Color temperature shift (-1 = cool, +1 = warm)
 };
 
 /**

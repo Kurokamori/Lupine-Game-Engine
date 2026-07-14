@@ -10,10 +10,8 @@
 
 #include "core/lc_core.h"
 #include "components/lc_light.h"
+#include "../math/lc_math.h"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 /* ============================================================================
  * AudioPlayer Functions
@@ -281,8 +279,329 @@ LC_API LCResult lc_audio_listener_is_active(LCComponentHandle component, bool* o
  */
 LC_API LCResult lc_audio_listener_set_active(LCComponentHandle component, bool active);
 
-#ifdef __cplusplus
-}
-#endif
+/* ============================================================================
+ * Global Audio Control (AudioManager)
+ *
+ * These functions operate on the engine-wide audio mixer rather than on a
+ * specific AudioPlayer component. Audio sources are addressed by their UUID
+ * string (the same value reported by a node/component UUID).
+ * ============================================================================ */
+
+/**
+ * @brief Set the playback volume of an active audio source by UUID
+ * @param uuid UUID string of the audio source
+ * @param volume Linear volume multiplier (1.0 = unchanged)
+ * @threadsafety Thread-safe
+ */
+LC_API void lc_audio_set_source_volume(const char* uuid, float volume);
+
+/**
+ * @brief Set the playback pitch of an active audio source by UUID
+ * @param uuid UUID string of the audio source
+ * @param pitch Pitch multiplier (1.0 = normal)
+ * @threadsafety Thread-safe
+ */
+LC_API void lc_audio_set_source_pitch(const char* uuid, float pitch);
+
+/**
+ * @brief Set the stereo pan of an active audio source by UUID
+ * @param uuid UUID string of the audio source
+ * @param pan Stereo pan (-1.0 left, 0.0 center, 1.0 right)
+ * @threadsafety Thread-safe
+ */
+LC_API void lc_audio_set_source_pan(const char* uuid, float pan);
+
+/**
+ * @brief Set the master output volume
+ * @param volume Linear master volume (0-1)
+ * @threadsafety Thread-safe
+ */
+LC_API void lc_audio_set_master_volume(float volume);
+
+/**
+ * @brief Get the master output volume
+ * @return Linear master volume
+ * @threadsafety Thread-safe
+ */
+LC_API float lc_audio_get_master_volume(void);
+
+/**
+ * @brief Set whether the master output is muted
+ * @param muted Muted state
+ * @threadsafety Thread-safe
+ */
+LC_API void lc_audio_set_master_muted(bool muted);
+
+/**
+ * @brief Check whether the master output is muted
+ * @return true if muted, false otherwise
+ * @threadsafety Thread-safe
+ */
+LC_API bool lc_audio_is_master_muted(void);
+
+/**
+ * @brief Set the 3D audio listener position
+ * @param position Listener world position
+ * @threadsafety Thread-safe
+ */
+LC_API void lc_audio_set_listener_position(LCVec3 position);
+
+/**
+ * @brief Set the 3D audio listener orientation
+ * @param forward Forward direction vector
+ * @param up Up direction vector
+ * @threadsafety Thread-safe
+ */
+LC_API void lc_audio_set_listener_orientation(LCVec3 forward, LCVec3 up);
+
+/**
+ * @brief Set the 3D audio listener velocity (for Doppler)
+ * @param velocity Listener velocity vector
+ * @threadsafety Thread-safe
+ */
+LC_API void lc_audio_set_listener_velocity(LCVec3 velocity);
+
+/**
+ * @brief Create an audio bus
+ * @param name Name of the bus to create
+ * @param parent Optional parent bus name (can be NULL or empty for the master bus)
+ * @threadsafety Thread-safe
+ */
+LC_API void lc_audio_create_bus(const char* name, const char* parent);
+
+/**
+ * @brief Destroy an audio bus
+ * @param name Name of the bus to destroy
+ * @threadsafety Thread-safe
+ */
+LC_API void lc_audio_destroy_bus(const char* name);
+
+/**
+ * @brief Check whether an audio bus exists
+ * @param name Bus name
+ * @return true if the bus exists, false otherwise
+ * @threadsafety Thread-safe
+ */
+LC_API bool lc_audio_has_bus(const char* name);
+
+/**
+ * @brief Set the solo state of an audio bus
+ * @param name Bus name
+ * @param solo Solo state
+ * @threadsafety Thread-safe
+ */
+LC_API void lc_audio_set_bus_solo(const char* name, bool solo);
+
+/**
+ * @brief Check whether an audio bus is soloed
+ * @param name Bus name
+ * @return true if the bus is soloed, false otherwise
+ * @threadsafety Thread-safe
+ */
+LC_API bool lc_audio_is_bus_solo(const char* name);
+
+/* ============================================================================
+ * Bus DSP Effects
+ * ============================================================================ */
+
+/**
+ * @brief Append a DSP effect to a bus.
+ * @param bus Bus name.
+ * @param effect_type One of: "Gain", "LowPass", "HighPass", "BandPass", "Peak",
+ *        "LowShelf", "HighShelf", "Delay", "Reverb", "Compressor",
+ *        "Distortion", "Chorus".
+ * @return The new effect's index, or -1 on failure.
+ * @threadsafety Thread-safe
+ */
+LC_API int lc_audio_bus_add_effect(const char* bus, const char* effect_type);
+
+/** @brief Remove the effect at `index` from a bus. */
+LC_API void lc_audio_bus_remove_effect(const char* bus, int index);
+
+/** @brief Reorder an effect within a bus's chain. */
+LC_API void lc_audio_bus_move_effect(const char* bus, int from_index, int to_index);
+
+/** @brief Remove all effects from a bus. */
+LC_API void lc_audio_bus_clear_effects(const char* bus);
+
+/** @brief Enable or disable a single effect. */
+LC_API void lc_audio_bus_set_effect_enabled(const char* bus, int index, bool enabled);
+
+/**
+ * @brief Set a named parameter on an effect (e.g. "cutoff_hz", "room_size",
+ *        "threshold_db", "wet").
+ */
+LC_API void lc_audio_bus_set_effect_parameter(const char* bus, int index,
+                                              const char* parameter, float value);
+
+/** @brief Number of effects on a bus. */
+LC_API int lc_audio_bus_get_effect_count(const char* bus);
+
+/** @brief Get a named parameter value from an effect. */
+LC_API float lc_audio_bus_get_effect_parameter(const char* bus, int index, const char* parameter);
+
+/** @brief Whether an effect is enabled. */
+LC_API bool lc_audio_bus_is_effect_enabled(const char* bus, int index);
+
+/** @brief Live post-fader/post-fx peak level of a bus (linear, 0..1+). */
+LC_API float lc_audio_bus_get_level(const char* bus);
+
+/**
+ * @brief Live stereo VU levels of a bus.
+ * @param out_left Receives the left-channel peak (may be NULL).
+ * @param out_right Receives the right-channel peak (mirrors left for mono; may be NULL).
+ */
+LC_API void lc_audio_bus_get_levels(const char* bus, float* out_left, float* out_right);
+
+/* ============================================================================
+ * Fire-and-Forget Mixer Playback (AudioManager, by UUID)
+ *
+ * These functions play an audio file directly through the engine mixer without
+ * an AudioPlayer component. The played asset is cached internally so it stays
+ * alive for the lifetime of the process. Each play call returns the UUID string
+ * of the spawned audio source, which can be passed back to the stop/pause/
+ * resume/query functions below.
+ * ============================================================================ */
+
+/**
+ * @brief Play an audio file through the mixer (2D, non-positional)
+ * @param audio_path Path to the audio asset to play
+ * @param bus_name Bus to route playback to (NULL defaults to "Master")
+ * @param loop Whether to loop continuously (false plays once)
+ * @param volume Linear volume multiplier (1.0 = unchanged)
+ * @param out_uuid Output buffer for the source UUID string
+ * @param uuid_size Size of the output buffer
+ * @return LC_SUCCESS on success, error code otherwise
+ * @threadsafety Thread-safe
+ */
+LC_API LCResult lc_audio_play(const char* audio_path, const char* bus_name, bool loop,
+                              float volume, char* out_uuid, size_t uuid_size);
+
+/**
+ * @brief Play an audio file through the mixer at a 3D position
+ * @param audio_path Path to the audio asset to play
+ * @param position World position of the sound
+ * @param bus_name Bus to route playback to (NULL defaults to "Master")
+ * @param loop Whether to loop continuously (false plays once)
+ * @param volume Linear volume multiplier (1.0 = unchanged)
+ * @param out_uuid Output buffer for the source UUID string
+ * @param uuid_size Size of the output buffer
+ * @return LC_SUCCESS on success, error code otherwise
+ * @threadsafety Thread-safe
+ */
+LC_API LCResult lc_audio_play_3d(const char* audio_path, LCVec3 position, const char* bus_name,
+                                 bool loop, float volume, char* out_uuid, size_t uuid_size);
+
+/**
+ * @brief Play an audio file through the mixer after a scheduled delay (2D)
+ * @param audio_path Path to the audio asset to play
+ * @param delay_seconds Delay in seconds before playback begins
+ * @param bus_name Bus to route playback to (NULL defaults to "Master")
+ * @param loop Whether to loop continuously (false plays once)
+ * @param volume Linear volume multiplier (1.0 = unchanged)
+ * @param out_uuid Output buffer for the source UUID string
+ * @param uuid_size Size of the output buffer
+ * @return LC_SUCCESS on success, error code otherwise
+ * @threadsafety Thread-safe
+ */
+LC_API LCResult lc_audio_play_scheduled(const char* audio_path, float delay_seconds,
+                                        const char* bus_name, bool loop, float volume,
+                                        char* out_uuid, size_t uuid_size);
+
+/**
+ * @brief Play an audio file through the mixer after a scheduled delay at a 3D position
+ * @param audio_path Path to the audio asset to play
+ * @param position World position of the sound
+ * @param delay_seconds Delay in seconds before playback begins
+ * @param bus_name Bus to route playback to (NULL defaults to "Master")
+ * @param loop Whether to loop continuously (false plays once)
+ * @param volume Linear volume multiplier (1.0 = unchanged)
+ * @param out_uuid Output buffer for the source UUID string
+ * @param uuid_size Size of the output buffer
+ * @return LC_SUCCESS on success, error code otherwise
+ * @threadsafety Thread-safe
+ */
+LC_API LCResult lc_audio_play_scheduled_3d(const char* audio_path, LCVec3 position,
+                                           float delay_seconds, const char* bus_name, bool loop,
+                                           float volume, char* out_uuid, size_t uuid_size);
+
+/**
+ * @brief Stop a mixer audio source by UUID
+ * @param uuid UUID string of the audio source
+ * @return LC_SUCCESS on success, error code otherwise
+ * @threadsafety Thread-safe
+ */
+LC_API LCResult lc_audio_stop(const char* uuid);
+
+/**
+ * @brief Pause a mixer audio source by UUID
+ * @param uuid UUID string of the audio source
+ * @return LC_SUCCESS on success, error code otherwise
+ * @threadsafety Thread-safe
+ */
+LC_API LCResult lc_audio_pause(const char* uuid);
+
+/**
+ * @brief Resume a paused mixer audio source by UUID
+ * @param uuid UUID string of the audio source
+ * @return LC_SUCCESS on success, error code otherwise
+ * @threadsafety Thread-safe
+ */
+LC_API LCResult lc_audio_resume(const char* uuid);
+
+/**
+ * @brief Check whether a mixer audio source is actively playing
+ * @param uuid UUID string of the audio source
+ * @param out_playing Output parameter for the playing state
+ * @return LC_SUCCESS on success, error code otherwise
+ * @threadsafety Thread-safe
+ */
+LC_API LCResult lc_audio_source_is_playing(const char* uuid, bool* out_playing);
+
+/**
+ * @brief Check whether a one-shot mixer audio source has finished
+ * @param uuid UUID string of the audio source
+ * @param out_finished Output parameter for the finished state
+ * @return LC_SUCCESS on success, error code otherwise
+ * @threadsafety Thread-safe
+ */
+LC_API LCResult lc_audio_source_is_finished(const char* uuid, bool* out_finished);
+
+/**
+ * @brief Set the volume of an audio bus
+ * @param bus Bus name
+ * @param volume Linear bus volume (0-1)
+ * @return LC_SUCCESS on success, error code otherwise
+ * @threadsafety Thread-safe
+ */
+LC_API LCResult lc_audio_set_bus_volume(const char* bus, float volume);
+
+/**
+ * @brief Get the volume of an audio bus
+ * @param bus Bus name
+ * @param out_volume Output parameter for the bus volume
+ * @return LC_SUCCESS on success, error code otherwise
+ * @threadsafety Thread-safe
+ */
+LC_API LCResult lc_audio_get_bus_volume(const char* bus, float* out_volume);
+
+/**
+ * @brief Set whether an audio bus is muted
+ * @param bus Bus name
+ * @param muted Muted state
+ * @return LC_SUCCESS on success, error code otherwise
+ * @threadsafety Thread-safe
+ */
+LC_API LCResult lc_audio_set_bus_muted(const char* bus, bool muted);
+
+/**
+ * @brief Check whether an audio bus is muted
+ * @param bus Bus name
+ * @param out_muted Output parameter for the muted state
+ * @return LC_SUCCESS on success, error code otherwise
+ * @threadsafety Thread-safe
+ */
+LC_API LCResult lc_audio_is_bus_muted(const char* bus, bool* out_muted);
+
 
 #endif /* LUPINE_CAPI_AUDIO_H */

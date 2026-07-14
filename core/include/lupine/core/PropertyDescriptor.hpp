@@ -5,6 +5,7 @@
 #include <variant>
 #include <optional>
 #include <map>
+#include <cstdint>
 #include <nlohmann/json.hpp>
 #include "lupine/math/Math.hpp"
 
@@ -25,7 +26,17 @@ enum class PropertyValueType {
     Color,
     NodePath,     // Reference to a node in the scene tree
     ScenePath,    // Reference to a scene file
-    Enum          // Enumeration with specific allowed values
+    Enum,         // Enumeration with specific allowed values
+    StringArray,  // Array of strings
+    // --- Extended types (appended; existing integer values above must not change) ---
+    Double,       // 64-bit floating point scalar
+    Quat,         // Quaternion rotation (w, x, y, z)
+    Rect,         // 2D rectangle (x, y, w, h)
+    Resource,     // Reference to a resource asset file (e.g. an .ares archetype instance)
+    IntArray,     // Array of integers
+    FloatArray,   // Array of floats
+    Array,        // Generic ordered list of heterogeneous JSON values
+    Dictionary    // Generic string-keyed map of heterogeneous JSON values
 };
 
 /**
@@ -42,8 +53,46 @@ enum class PropertyHintType {
     ColorNoAlpha,    // Color without alpha channel
     Dir,             // Directory path (for String)
     Layers2D,        // 2D physics/render layers
-    Layers3D         // 3D physics/render layers
+    Layers3D,        // 3D physics/render layers
+    // --- Extended hints (appended; existing integer values above must not change) ---
+    NodeType,        // NodePath filtered to nodes of/owning a class (hintString = class name)
+    ArchetypeType,   // Resource filtered to archetype instances of a class (hintString = archetype class)
+    ScriptClass,     // NodePath filtered to nodes owning a script/component class (hintString = class name)
+    Flags,           // Bit flags chosen from a named list (hintString = comma-separated flag names)
+    ExpEasing        // Easing curve (exponential easing widget)
 };
+
+/**
+ * Property usage flags - bitmask controlling editor/serialization behaviour.
+ * Stored on PropertyDescriptor as a uint32_t so it round-trips as a plain integer.
+ */
+enum class PropertyUsageFlags : uint32_t {
+    None         = 0,
+    ReadOnly     = 1u << 0,  // Shown in inspector but not editable
+    Hidden       = 1u << 1,  // Hidden from the inspector ([HideInInspector])
+    NoSerialize  = 1u << 2,  // Not written to disk (editor/runtime transient)
+    Required     = 1u << 3,  // Must have a non-empty value (validated by archetype editor)
+    Unique       = 1u << 4,  // Value must be unique among sibling instances (identity field)
+    Experimental = 1u << 5,  // Flagged as experimental in the inspector
+    Advanced     = 1u << 6   // Collapsed into an "advanced" section by default
+};
+
+inline constexpr uint32_t operator|(PropertyUsageFlags a, PropertyUsageFlags b) {
+    return static_cast<uint32_t>(a) | static_cast<uint32_t>(b);
+}
+
+inline constexpr uint32_t operator|(uint32_t a, PropertyUsageFlags b) {
+    return a | static_cast<uint32_t>(b);
+}
+
+inline uint32_t& operator|=(uint32_t& a, PropertyUsageFlags b) {
+    a |= static_cast<uint32_t>(b);
+    return a;
+}
+
+inline constexpr bool HasUsageFlag(uint32_t flags, PropertyUsageFlags flag) {
+    return (flags & static_cast<uint32_t>(flag)) != 0u;
+}
 
 /**
  * Property hint data - stores additional metadata about a property
@@ -66,6 +115,19 @@ struct PropertyHint {
 };
 
 /**
+ * Wrapper for generic JSON-shaped default values (Array / Dictionary / IntArray /
+ * FloatArray). nlohmann::json's converting constructors would otherwise make it a
+ * viable overload for the scalar variant alternatives (int/float/double/bool/...)
+ * and create ambiguity, so the JSON payload is held behind an explicit wrapper.
+ */
+struct PropertyJsonDefault {
+    nlohmann::json value;
+
+    PropertyJsonDefault() : value(nullptr) {}
+    explicit PropertyJsonDefault(nlohmann::json v) : value(std::move(v)) {}
+};
+
+/**
  * Default value storage using std::variant
  */
 using PropertyDefaultValue = std::variant<
@@ -77,7 +139,12 @@ using PropertyDefaultValue = std::variant<
     math::Vec2,
     math::Vec3,
     math::Vec4,
-    math::Color
+    math::Color,
+    std::vector<std::string>,  // String array
+    double,                    // Double
+    math::Quat,                // Quaternion
+    math::Rect,                // Rectangle
+    PropertyJsonDefault        // Array / Dictionary / IntArray / FloatArray defaults
 >;
 
 /**
@@ -91,6 +158,15 @@ struct PropertyDescriptor {
     PropertyHint hint;
     std::string description;  // Optional description for documentation/tooltips
     std::string group;        // Optional group name for organizing properties in the editor
+
+    // --- Extended editor metadata (all optional; absent keys round-trip cleanly) ---
+    uint32_t usageFlags = 0;             // Bitmask of PropertyUsageFlags
+    std::string headerText;              // Header rendered above this row (distinct from group)
+    std::string suffix;                  // Unit suffix shown after the value (e.g. "px", "deg")
+    std::string customWidget;            // Custom inspector widget id (empty = default by type)
+    std::string customWidgetConfig;      // Opaque JSON/string config passed to the custom widget
+    std::string objectTypeName;          // Inline-struct type name (for Dictionary-backed structs)
+    std::vector<PropertyDescriptor> objectSchema;  // Inline-struct field schema (recursive)
 
     PropertyDescriptor() = default;
 
@@ -109,6 +185,23 @@ struct PropertyDescriptor {
                        PropertyDefaultValue propDefault, PropertyHint propHint,
                        const std::string& propGroup)
         : name(propName), type(propType), defaultValue(propDefault), hint(propHint), description(), group(propGroup) {}
+
+    // Chainable builders for the extended editor metadata. These return *this so
+    // they compose with the PROPERTY_* factory macros, e.g.
+    //   DefineProperty(PROPERTY_FLOAT_RANGE_GROUP(...).WithSuffix("px"));
+    PropertyDescriptor& WithDescription(const std::string& text) { description = text; return *this; }
+    PropertyDescriptor& WithUsage(uint32_t flags) { usageFlags |= flags; return *this; }
+    PropertyDescriptor& WithUsage(PropertyUsageFlags flag) { usageFlags |= static_cast<uint32_t>(flag); return *this; }
+    PropertyDescriptor& WithHeader(const std::string& text) { headerText = text; return *this; }
+    PropertyDescriptor& WithSuffix(const std::string& text) { suffix = text; return *this; }
+    PropertyDescriptor& WithCustomWidget(const std::string& id, const std::string& config = "") {
+        customWidget = id; customWidgetConfig = config; return *this;
+    }
+    PropertyDescriptor& WithObjectSchema(const std::string& typeName, std::vector<PropertyDescriptor> schema) {
+        objectTypeName = typeName; objectSchema = std::move(schema); return *this;
+    }
+
+    bool HasUsage(PropertyUsageFlags flag) const { return HasUsageFlag(usageFlags, flag); }
 
     // Serialize descriptor to JSON
     nlohmann::json Serialize() const;
@@ -185,6 +278,21 @@ struct PropertyDescriptor {
 #define PROPERTY_ENUM_GROUP(name, defaultVal, groupName, ...) \
     lupine::core::PropertyDescriptor(#name, lupine::core::PropertyValueType::Enum, defaultVal, \
         lupine::core::PropertyHint(lupine::core::PropertyHintType::Enum, std::string(#__VA_ARGS__)), groupName)
+
+// Hidden property (registered + serialized but not shown in the inspector)
+#define PROPERTY_HIDDEN(name, type, defaultVal) \
+    lupine::core::PropertyDescriptor(#name, lupine::core::PropertyValueType::type, defaultVal) \
+        .WithUsage(lupine::core::PropertyUsageFlags::Hidden)
+
+// Read-only property (shown but not editable)
+#define PROPERTY_READONLY(name, type, defaultVal, groupName) \
+    lupine::core::PropertyDescriptor(#name, lupine::core::PropertyValueType::type, defaultVal, \
+        lupine::core::PropertyHint(), groupName).WithUsage(lupine::core::PropertyUsageFlags::ReadOnly)
+
+// Property rendered through a named custom inspector widget
+#define PROPERTY_CUSTOM_WIDGET(name, type, defaultVal, widgetId, groupName) \
+    lupine::core::PropertyDescriptor(#name, lupine::core::PropertyValueType::type, defaultVal, \
+        lupine::core::PropertyHint(), groupName).WithCustomWidget(widgetId)
 
 } // namespace core
 } // namespace lupine

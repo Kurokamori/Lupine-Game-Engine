@@ -222,6 +222,39 @@ enum class InputDeviceType : uint8_t {
     Unknown
 };
 
+/**
+ * Physical gamepad family.
+ *
+ * Used to pick the correct on-screen button glyphs/labels for a controller
+ * (e.g. Xbox "A" vs PlayStation "Cross" vs the swapped Nintendo layout).
+ * Reported by the platform layer (SDL_GameControllerGetType).
+ */
+enum class GamepadType : uint8_t {
+    Unknown = 0,
+    Xbox,
+    PlayStation,
+    Nintendo,
+    Steam,
+    Generic
+};
+
+/**
+ * Resolved on-screen prompt for a single binding.
+ *
+ * glyphId is a stable, device-aware identifier a game can map to its own art
+ * (e.g. "gamepad_xbox_a", "key_space", "mouse_left"). label is a human-readable
+ * fallback string ("A", "Space", "Left Click"). artPath is an optional texture
+ * path supplied by the game (empty unless overridden). Both label and artPath are
+ * user-overridable through the InputManager glyph map.
+ */
+struct InputGlyph {
+    std::string glyphId;
+    std::string label;
+    std::string artPath;
+    InputDeviceType device = InputDeviceType::Unknown;
+    GamepadType gamepadType = GamepadType::Unknown;
+};
+
 // Utility functions for converting codes to strings
 std::string KeyCodeToString(KeyCode code);
 std::string MouseButtonToString(MouseButton button);
@@ -232,6 +265,157 @@ KeyCode StringToKeyCode(const std::string& str);
 MouseButton StringToMouseButton(const std::string& str);
 GamepadButton StringToGamepadButton(const std::string& str);
 GamepadAxis StringToGamepadAxis(const std::string& str);
+
+// Gamepad family <-> string, and the short identifier prefix used in glyph ids
+// ("xbox", "ps", "switch", "steam", "generic").
+std::string GamepadTypeToString(GamepadType type);
+GamepadType StringToGamepadType(const std::string& str);
+std::string GamepadTypePrefix(GamepadType type);
+
+/**
+ * Human-readable face/button label for a gamepad button, honoring the controller
+ * family. For example GamepadButton::A reads "A" on Xbox, "Cross" on PlayStation,
+ * and "B" on Nintendo (whose physical A/B and X/Y positions are swapped). Returns
+ * the Xbox-style name for Unknown/Generic.
+ */
+std::string GamepadFaceLabel(GamepadButton button, GamepadType type);
+
+/**
+ * Human-readable label for a gamepad axis, honoring the controller family
+ * (e.g. LeftTrigger reads "LT" on Xbox, "L2" on PlayStation, "ZL" on Nintendo).
+ */
+std::string GamepadAxisLabel(GamepadAxis axis, GamepadType type);
+
+// ============================================================================
+// Platform-specific input utilities
+// ============================================================================
+
+/**
+ * Get the platform-specific "action" modifier key
+ * - Windows/Linux: Control
+ * - Mac: Command (Super)
+ * This allows games to use "action modifier" bindings that work correctly
+ * across all platforms (e.g., Ctrl+C on Windows, Cmd+C on Mac)
+ */
+inline KeyCode GetPlatformActionModifier() {
+#ifdef __APPLE__
+    return KeyCode::LeftSuper;
+#else
+    return KeyCode::LeftControl;
+#endif
+}
+
+/**
+ * Get the platform-specific "alternate" modifier key
+ * - All platforms: Alt
+ */
+inline KeyCode GetPlatformAltModifier() {
+    return KeyCode::LeftAlt;
+}
+
+/**
+ * Check if a key code is a modifier key
+ */
+inline bool IsModifierKey(KeyCode key) {
+    switch (key) {
+        case KeyCode::LeftShift:
+        case KeyCode::RightShift:
+        case KeyCode::LeftControl:
+        case KeyCode::RightControl:
+        case KeyCode::LeftAlt:
+        case KeyCode::RightAlt:
+        case KeyCode::LeftSuper:
+        case KeyCode::RightSuper:
+            return true;
+        default:
+            return false;
+    }
+}
+
+/**
+ * Check if two modifier keys are equivalent across platforms
+ * (e.g., LeftControl on Windows is equivalent to LeftSuper on Mac for actions)
+ */
+inline bool AreModifiersEquivalent(KeyCode key1, KeyCode key2) {
+    if (key1 == key2) return true;
+
+    // Left/Right variants of the same modifier are equivalent
+    if ((key1 == KeyCode::LeftShift && key2 == KeyCode::RightShift) ||
+        (key1 == KeyCode::RightShift && key2 == KeyCode::LeftShift) ||
+        (key1 == KeyCode::LeftControl && key2 == KeyCode::RightControl) ||
+        (key1 == KeyCode::RightControl && key2 == KeyCode::LeftControl) ||
+        (key1 == KeyCode::LeftAlt && key2 == KeyCode::RightAlt) ||
+        (key1 == KeyCode::RightAlt && key2 == KeyCode::LeftAlt) ||
+        (key1 == KeyCode::LeftSuper && key2 == KeyCode::RightSuper) ||
+        (key1 == KeyCode::RightSuper && key2 == KeyCode::LeftSuper)) {
+        return true;
+    }
+
+#ifdef __APPLE__
+    // On Mac, Control and Super (Command) are NOT equivalent for user actions
+    // Super/Command is the action modifier, Control has different uses
+    return false;
+#else
+    // On Windows/Linux, Super (Windows key) and Control are NOT equivalent
+    return false;
+#endif
+}
+
+/**
+ * Get the current platform identifier for input handling
+ */
+enum class InputPlatform : uint8_t {
+    Windows,
+    Mac,
+    Linux,
+    Web,
+    iOS,
+    Android,
+    Unknown
+};
+
+inline InputPlatform GetCurrentPlatform() {
+#if defined(__EMSCRIPTEN__)
+    return InputPlatform::Web;
+#elif defined(_WIN32)
+    return InputPlatform::Windows;
+#elif defined(__APPLE__)
+    #if TARGET_OS_IOS || TARGET_OS_IPHONE
+        return InputPlatform::iOS;
+    #else
+        return InputPlatform::Mac;
+    #endif
+#elif defined(__ANDROID__)
+    return InputPlatform::Android;
+#elif defined(__linux__)
+    return InputPlatform::Linux;
+#else
+    return InputPlatform::Unknown;
+#endif
+}
+
+/**
+ * Check if the current platform supports touch input
+ */
+inline bool PlatformSupportsTouchInput() {
+    InputPlatform platform = GetCurrentPlatform();
+    return platform == InputPlatform::Web ||
+           platform == InputPlatform::iOS ||
+           platform == InputPlatform::Android;
+}
+
+/**
+ * Check if the current platform supports gamepad input
+ */
+inline bool PlatformSupportsGamepad() {
+    // All desktop platforms and web support gamepads
+    // iOS and Android have limited gamepad support
+    InputPlatform platform = GetCurrentPlatform();
+    return platform == InputPlatform::Windows ||
+           platform == InputPlatform::Mac ||
+           platform == InputPlatform::Linux ||
+           platform == InputPlatform::Web;
+}
 
 } // namespace input
 } // namespace lupine

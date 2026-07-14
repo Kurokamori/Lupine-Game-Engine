@@ -20,6 +20,8 @@ public:
         int height = 720;
         bool resizable = true;
         bool vsync = true;
+        bool fullscreen = false;
+        bool borderless = false;
     };
 
     Window();
@@ -62,9 +64,56 @@ public:
     bool isOpen() const { return m_window != nullptr; }
 
     /**
-     * Get window dimensions
+     * Get window dimensions in logical/screen coordinates
      */
     void getSize(int& width, int& height) const;
+
+    /**
+     * Window title.
+     */
+    void setTitle(const std::string& title);
+    std::string getTitle() const;
+
+    /**
+     * Set the window icon (taskbar + title bar) from raw RGBA8 pixel data.
+     * Rows must be top-down; pixels are not retained after the call returns.
+     */
+    void setIcon(const unsigned char* rgbaPixels, int width, int height);
+
+    /**
+     * Borderless desktop fullscreen toggle and query.
+     */
+    void setFullscreen(bool fullscreen);
+    bool isFullscreen() const;
+
+    /**
+     * Set the window client size in logical pixels.
+     */
+    void setSize(int width, int height);
+
+    /**
+     * Window state control.
+     */
+    void maximize();
+    void minimize();
+    void restore();
+
+    /**
+     * Resolution of the display the window is on, in pixels.
+     */
+    void getScreenSize(int& width, int& height) const;
+
+    /**
+     * Get drawable size in actual pixels (for high-DPI displays)
+     * On high-DPI displays, this may be larger than getSize()
+     */
+    void getDrawableSize(int& width, int& height) const;
+
+    /**
+     * Get the DPI scale factor (drawable size / window size)
+     * Returns 1.0 on standard displays, 2.0 on Retina/HiDPI displays, etc.
+     */
+    float getDPIScale() const;
 
     /**
      * Get native window handle for rendering

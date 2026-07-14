@@ -1,0 +1,9 @@
+/build
+*.pyc
+/lupine
+/web-build/build-web
+/.cache
+/resources
+/docs/development
+/vcpkg
+/external

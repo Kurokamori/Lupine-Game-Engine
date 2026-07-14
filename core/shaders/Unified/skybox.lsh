@@ -1,0 +1,73 @@
+#shader "Skybox"
+#description "Skybox with multiple modes: solid color, gradient, cubemap, panoramic"
+
+#begin properties
+    uniform mat4 u_ViewProjection;
+    uniform mat4 u_View;
+    uniform int u_SkyboxType = 0;
+    uniform vec4 u_SkyboxColor = vec4(0.5, 0.7, 1.0, 1.0);
+    uniform vec4 u_SkyTopColor = vec4(0.4, 0.6, 1.0, 1.0);
+    uniform vec4 u_SkyHorizonColor = vec4(0.8, 0.85, 0.95, 1.0);
+    uniform vec4 u_SkyBottomColor = vec4(0.2, 0.2, 0.3, 1.0);
+    uniform samplerCube u_CubemapTexture;
+    uniform sampler2D u_PanoramicTexture;
+#end properties
+
+#begin vertex
+    #input vec3 a_Position : POSITION 0
+    #input vec3 a_Normal : NORMAL 1
+    #input vec2 a_TexCoord : TEXCOORD0 2
+
+    #output vec3 v_Position
+    #output vec3 v_TexCoord3D
+
+    void main() {
+        v_TexCoord3D = a_Position;
+        v_Position = a_Position;
+        vec4 pos = MUL(u_ViewProjection, vec4(a_Position, 1.0));
+        VERTEX_OUTPUT = vec4(pos.xy, pos.w, pos.w);
+    }
+#end vertex
+
+#begin fragment
+    #output vec4 FragColor
+
+    vec2 cartesianToSpherical(vec3 dir) {
+        vec3 n = normalize(dir);
+        float u = 0.5 + atan(n.z, n.x) / (2.0 * 3.14159265359);
+        float v = 0.5 + asin(n.y) / 3.14159265359;
+        return vec2(u, v);
+    }
+
+    void main() {
+        if (u_SkyboxType == 0) {
+            FragColor = vec4(0.0, 0.0, 0.0, 0.0);
+        }
+        else if (u_SkyboxType == 1) {
+            FragColor = u_SkyboxColor;
+        }
+        else if (u_SkyboxType == 2) {
+            vec3 dir = normalize(v_Position);
+            float height = dir.y;
+
+            vec4 color;
+            if (height > 0.0) {
+                color = mix(u_SkyHorizonColor, u_SkyTopColor, height);
+            } else {
+                color = mix(u_SkyBottomColor, u_SkyHorizonColor, height + 1.0);
+            }
+
+            FragColor = color;
+        }
+        else if (u_SkyboxType == 3) {
+            FragColor = SAMPLE_CUBE(u_CubemapTexture, v_TexCoord3D);
+        }
+        else if (u_SkyboxType == 4) {
+            vec2 uv = cartesianToSpherical(v_Position);
+            FragColor = SAMPLE(u_PanoramicTexture, uv);
+        }
+        else {
+            FragColor = vec4(1.0, 0.0, 1.0, 1.0);
+        }
+    }
+#end fragment
